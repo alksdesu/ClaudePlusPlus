@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "tauri": "tauri",
     "check": "tsc --noEmit -p tsconfig.json",
     "vite:dev": "vite --host 127.0.0.1 --port 1430",
     "vite:build": "vite build"
