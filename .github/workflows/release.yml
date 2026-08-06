@@ -43,6 +43,16 @@ jobs:
           releaseDraft: false
           prerelease: false
 
+      - name: Attach portable exe
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ver = "${{ github.ref_name }}".TrimStart("v")
+          Copy-Item src-tauri/target/release/claude-plus-plus.exe "claude-plus-plus_${ver}_portable.exe"
+          gh release upload ${{ github.ref_name }} "claude-plus-plus_${ver}_portable.exe" --clobber
+
       # manual run: build only, keep artifacts on the workflow for preview
       - name: Build without publishing
         if: github.ref_type != 'tag'
