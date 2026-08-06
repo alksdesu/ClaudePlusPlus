@@ -1,0 +1,61 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # tag push: build NSIS installer and publish a GitHub Release
+      - name: Build and publish release
+        if: github.ref_type == 'tag'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Claude++ ${{ github.ref_name }}"
+          releaseBody: |
+            安装包与免安装 exe 见下方 Assets。
+            Installer and portable exe are attached under Assets.
+          releaseDraft: false
+          prerelease: false
+
+      # manual run: build only, keep artifacts on the workflow for preview
+      - name: Build without publishing
+        if: github.ref_type != 'tag'
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload preview artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-plus-plus-preview
+          path: |
+            src-tauri/target/release/claude-plus-plus.exe
+            src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
