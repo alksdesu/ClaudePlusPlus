@@ -220,7 +220,7 @@ function comboStatus(combo: PoolCombo, plan: UnifyPlan | undefined): { label: st
     const unified = plan?.alreadyUnified.some((c) => c.path === combo.path) ?? false;
     return unified
       ? { label: "已归一", cls: "pill-unified" }
-      : { label: "外部 junction", cls: "pill-foreign" };
+      : { label: "外部链接", cls: "pill-foreign" };
   }
   return { label: "待归一", cls: "pill-pending" };
 }
@@ -276,7 +276,7 @@ function renderUnify(): string {
         <div>
           <div class="eyebrow">存储归一</div>
           <h1>渠道与账号共享同一会话池</h1>
-          <p class="lead">把每个账号/组织组合合并进主池，原目录备份后以 junction 指回 —— 切渠道、换账号、官方版与第三方版看到同一份列表。</p>
+          <p class="lead">把每个账号/组织组合合并进主池，原目录备份后以链接指回 —— 切渠道、换账号、官方版与第三方版看到同一份列表。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>

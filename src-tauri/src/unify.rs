@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use crate::discovery::{PoolCombo, PoolKind};
+use crate::link;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +46,7 @@ fn same_target(combo: &PoolCombo, canonical: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
 fn paths_equal(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
         p.to_string_lossy()
@@ -57,8 +59,14 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
     norm(a) == norm(b)
 }
 
+#[cfg(unix)]
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| p.to_string_lossy().trim_end_matches('/').to_string();
+    norm(a) == norm(b)
+}
+
 /// Pick the combo with the most sessions (tombstones break ties) as canonical;
-/// junctions are views of somewhere else, so they never win.
+/// links are views of somewhere else, so they never win.
 pub fn plan_unify(combos: &[PoolCombo], pool: PoolKind) -> Option<UnifyPlan> {
     let pool_combos: Vec<&PoolCombo> = combos.iter().filter(|c| c.pool == pool).collect();
     let canonical = pool_combos
@@ -225,7 +233,7 @@ pub fn bak_name(org_id: &str) -> String {
 
 pub fn apply_unify(plan: &UnifyPlan) -> Result<UnifyReport> {
     if plan.canonical.is_junction {
-        bail!("canonical 不能是 junction");
+        bail!("canonical 不能是链接");
     }
     let canonical_dir = plan.canonical.path.clone();
     let mut report = UnifyReport {
@@ -256,8 +264,8 @@ pub fn apply_unify(plan: &UnifyPlan) -> Result<UnifyReport> {
         let bak = parent.join(bak_name(&combo.org_id));
         fs::rename(&combo.path, &bak)
             .with_context(|| format!("备份 {} → {}", combo.path.display(), bak.display()))?;
-        junction::create(&canonical_dir, &combo.path)
-            .with_context(|| format!("创建 junction {}", combo.path.display()))?;
+        link::create(&canonical_dir, &combo.path)
+            .with_context(|| format!("创建链接 {}", combo.path.display()))?;
         report.merged.push(combo.path.clone());
     }
 
@@ -267,11 +275,11 @@ pub fn apply_unify(plan: &UnifyPlan) -> Result<UnifyReport> {
     Ok(report)
 }
 
-/// Remove the junction and restore the newest `.bak-*` sibling.
+/// Remove the link and restore the newest `.bak-*` sibling.
 pub fn restore_combo(combo_path: &Path, org_id: &str) -> Result<()> {
-    let meta = fs::symlink_metadata(combo_path).context("组合路径不存在")?;
-    if !meta.file_type().is_symlink() && junction::get_target(combo_path).is_err() {
-        bail!("{} 不是 junction，无需还原", combo_path.display());
+    fs::symlink_metadata(combo_path).context("组合路径不存在")?;
+    if !link::is_link(combo_path) {
+        bail!("{} 不是链接，无需还原", combo_path.display());
     }
     let parent = combo_path.parent().context("缺少父目录")?;
     let prefix = format!("{org_id}.bak-");
@@ -282,7 +290,7 @@ pub fn restore_combo(combo_path: &Path, org_id: &str) -> Result<()> {
     let Some(bak) = newest else {
         bail!("找不到 {prefix}* 备份");
     };
-    fs::remove_dir(combo_path).context("移除 junction")?;
+    link::remove(combo_path).context("移除链接")?;
     fs::rename(bak.path(), combo_path).context("还原备份")?;
     Ok(())
 }
@@ -331,15 +339,15 @@ mod tests {
         let report = apply_unify(&plan).unwrap();
         assert_eq!(report.moved_entries, 1);
         assert!(big.join("local_s4.json").exists());
-        assert!(junction::get_target(&small).is_ok());
+        assert!(link::is_link(&small));
 
-        // second run sees the junction and does nothing
+        // second run sees the link and does nothing
         let combos = combo_at(dir.path(), "t");
         let plan = plan_unify(&combos, PoolKind::Code).unwrap();
         assert!(plan.to_merge.is_empty());
         assert_eq!(plan.already_unified.len(), 1);
 
-        // sessions listed through the junction match canonical
+        // sessions listed through the link match canonical
         let through: Vec<_> = fs::read_dir(&small)
             .unwrap()
             .flatten()
@@ -363,7 +371,7 @@ mod tests {
         apply_unify(&plan).unwrap();
 
         restore_combo(&small, org).unwrap();
-        assert!(junction::get_target(&small).is_err());
+        assert!(!link::is_link(&small));
         assert!(small.join("local_s9.json").exists());
         assert!(!small.join("local_s1.json").exists());
     }

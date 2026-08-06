@@ -7,7 +7,7 @@
 
 Share every Claude session across Claude Desktop and Claude Code CLI on the same machine — across gateway channels, across accounts, in both directions.
 
-![Tauri](https://img.shields.io/badge/Tauri-2-blue) ![Platform](https://img.shields.io/badge/platform-Windows-informational) ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
+![Tauri](https://img.shields.io/badge/Tauri-2-blue) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-informational) ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
 
 ---
 
@@ -28,7 +28,7 @@ Claude++ 针对这两层分别下手。
 
 | 功能 | 做法 |
 |---|---|
-| **存储归一** | 把所有 `账号/组织` 组合合并进会话数最多的主池，原目录改名 `.bak-<时间戳>` 后建 NTFS junction 指回主池。任何渠道、任何账号、官方版或第三方 userData，枚举到的都是同一池。不修改应用本体，Desktop 升级不失效，随时可还原 |
+| **存储归一** | 把所有 `账号/组织` 组合合并进会话数最多的主池，原目录改名 `.bak-<时间戳>` 后建目录链接指回主池（Windows 用 NTFS junction，macOS 用 symlink）。任何渠道、任何账号、官方版或第三方 userData，枚举到的都是同一池。不修改应用本体，Desktop 升级不失效，随时可还原 |
 | **会话迁移** | CLI→Desktop：为 jsonl 生成一份 Desktop 元数据（转录零拷贝，两边同源）。Desktop→CLI：按 Desktop 自己的墓碑约定移除元数据，转录保留，`claude -r` 照常续聊。两方向互为逆操作 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
@@ -36,19 +36,20 @@ Claude++ 针对这两层分别下手。
 ### 存储结构
 
 ```
-%LOCALAPPDATA%\Claude-3p\              
-├── claude-code-sessions\<acc>\<org>\  # Code 会话元数据池（隔离实体）
+<userData>/                            # Windows 3p: %LOCALAPPDATA%\Claude-3p（官方: %APPDATA%\Claude）
+│                                      # macOS:      ~/Library/Application Support/Claude-3p（官方: .../Claude）
+├── claude-code-sessions/<acc>/<org>/  # Code 会话元数据池（隔离实体）
 │   ├── local_<uuid>.json              #   活跃会话元数据，cliSessionId 指向转录
 │   └── deleted_<cliSessionId>         #   墓碑：内容为删除时刻的毫秒时间戳
-├── local-agent-mode-sessions\...      # Cowork 沙箱会话（内嵌独立 .claude，不参与迁移）
+├── local-agent-mode-sessions/...      # Cowork 沙箱会话（内嵌独立 .claude，不参与迁移）
 └── ant-did                            # base64(设备 UUID)，gateway 模式的 accountId 来源
 
-~\.claude\projects\<cwd编码>\<uuid>.jsonl   # 会话转录，CLI 与 Desktop 共用
+~/.claude/projects/<cwd编码>/<uuid>.jsonl   # 会话转录，CLI 与 Desktop 共用
 ```
 
 ### 使用
 
-1. 从 Release 下载或自行构建，运行 `claude-plus-plus.exe`（常驻托盘）
+1. 从 Release 下载或自行构建：Windows 运行 `claude-plus-plus.exe`，macOS 打开 `Claude++.app`（未签名，首次需右键 → 打开）。常驻托盘/菜单栏
 2. **完全退出 Claude Desktop**（所有写操作都有运行检测，运行中一律拒绝）
 3. 「存储归一」页 → 一键归一；此后切渠道/换账号列表不再变化
 4. 「会话迁移」页 → 勾选 CLI 会话 → 注册，打开 Desktop 对应项目即可见、可继续
@@ -57,7 +58,7 @@ Claude++ 针对这两层分别下手。
 
 ```bash
 npm install
-npx tauri build --no-bundle   # 产物: src-tauri/target/release/claude-plus-plus.exe
+npx tauri build   # Windows 产物: bundle/nsis 安装包 + claude-plus-plus.exe；macOS 产物: bundle/macos/Claude++.app + bundle/dmg
 ```
 
 依赖：Node.js 18+、Rust stable、Tauri 2。
@@ -96,7 +97,7 @@ Claude++ addresses both layers.
 
 | Feature | How it works |
 |---|---|
-| **Pool unification** | Merges every `account/org` combo into the largest pool, renames originals to `.bak-<timestamp>`, and drops NTFS junctions pointing back. Every channel, account, official or third-party userData enumerates the same pool. No app binaries touched — survives Desktop updates, fully reversible |
+| **Pool unification** | Merges every `account/org` combo into the largest pool, renames originals to `.bak-<timestamp>`, and drops directory links pointing back (NTFS junctions on Windows, symlinks on macOS). Every channel, account, official or third-party userData enumerates the same pool. No app binaries touched — survives Desktop updates, fully reversible |
 | **Session migration** | CLI→Desktop: generates Desktop metadata pointing at the existing jsonl (zero-copy, both sides share one transcript). Desktop→CLI: removes metadata following Desktop's own tombstone convention; the transcript stays and `claude -r` keeps working. The two directions are exact inverses |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
@@ -104,19 +105,20 @@ Claude++ addresses both layers.
 ### Storage layout
 
 ```
-%LOCALAPPDATA%\Claude-3p\              # third-party gateway userData (official: %APPDATA%\Claude)
-├── claude-code-sessions\<acc>\<org>\  # Code session metadata pool (the isolation boundary)
+<userData>/                            # Windows 3p: %LOCALAPPDATA%\Claude-3p (official: %APPDATA%\Claude)
+│                                      # macOS:      ~/Library/Application Support/Claude-3p (official: .../Claude)
+├── claude-code-sessions/<acc>/<org>/  # Code session metadata pool (the isolation boundary)
 │   ├── local_<uuid>.json              #   active session metadata; cliSessionId points at the transcript
 │   └── deleted_<cliSessionId>         #   tombstone: deletion epoch millis as file content
-├── local-agent-mode-sessions\...      # Cowork sandbox sessions (embedded .claude; not migratable)
+├── local-agent-mode-sessions/...      # Cowork sandbox sessions (embedded .claude; not migratable)
 └── ant-did                            # base64(device UUID), accountId source in gateway mode
 
-~\.claude\projects\<encoded-cwd>\<uuid>.jsonl   # transcripts, shared by CLI and Desktop
+~/.claude/projects/<encoded-cwd>/<uuid>.jsonl   # transcripts, shared by CLI and Desktop
 ```
 
 ### Usage
 
-1. Download from Releases or build locally, run `claude-plus-plus.exe` (lives in the tray)
+1. Download from Releases or build locally: run `claude-plus-plus.exe` on Windows, open `Claude++.app` on macOS (unsigned — right-click → Open on first launch). Lives in the tray / menu bar
 2. **Quit Claude Desktop entirely** (every write operation checks for running instances and refuses otherwise)
 3. Unify tab → one click; channel/account switches no longer change the session list
 4. Migrate tab → select CLI sessions → Register; open the matching project folder in Desktop to see and resume them
@@ -125,7 +127,7 @@ Claude++ addresses both layers.
 
 ```bash
 npm install
-npx tauri build --no-bundle   # output: src-tauri/target/release/claude-plus-plus.exe
+npx tauri build   # Windows: bundle/nsis installer + claude-plus-plus.exe; macOS: bundle/macos/Claude++.app + bundle/dmg
 ```
 
 Requires Node.js 18+, Rust stable, Tauri 2.

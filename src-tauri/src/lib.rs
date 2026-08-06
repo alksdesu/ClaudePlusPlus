@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod link;
 pub mod migrate;
 pub mod procs;
 pub mod unify;

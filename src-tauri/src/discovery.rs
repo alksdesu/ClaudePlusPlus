@@ -118,7 +118,7 @@ pub fn default_roots() -> Vec<UserDataRoot> {
 }
 
 fn junction_target(path: &Path) -> Option<PathBuf> {
-    junction::get_target(path).ok()
+    crate::link::target(path)
 }
 
 fn count_code_entries(dir: &Path) -> (usize, usize) {

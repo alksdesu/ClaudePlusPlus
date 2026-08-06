@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -28,7 +32,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      # tag push: build NSIS installer and publish a GitHub Release
+      # tag push: build installers and publish a GitHub Release
       - name: Build and publish release
         if: github.ref_type == 'tag'
         uses: tauri-apps/tauri-action@v0
@@ -38,13 +42,13 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Claude++ ${{ github.ref_name }}"
           releaseBody: |
-            安装包与免安装 exe 见下方 Assets。
-            Installer and portable exe are attached under Assets.
+            Windows 安装包、免安装 exe 与 macOS dmg 见下方 Assets。
+            Windows installer, portable exe and macOS dmg are attached under Assets.
           releaseDraft: false
           prerelease: false
 
       - name: Attach portable exe
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && matrix.os == 'windows-latest'
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -60,12 +64,20 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload preview artifacts
-        if: github.ref_type != 'tag'
+      - name: Upload preview artifacts (Windows)
+        if: github.ref_type != 'tag' && matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
         with:
-          name: claude-plus-plus-preview
+          name: claude-plus-plus-preview-windows
           path: |
             src-tauri/target/release/claude-plus-plus.exe
             src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Upload preview artifacts (macOS)
+        if: github.ref_type != 'tag' && matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-plus-plus-preview-macos
+          path: src-tauri/target/release/bundle/dmg/*.dmg
           if-no-files-found: error
