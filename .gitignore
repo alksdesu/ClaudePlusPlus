@@ -1,0 +1,9 @@
+# dependencies & build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# local dev environment
+.claude/
+*.log

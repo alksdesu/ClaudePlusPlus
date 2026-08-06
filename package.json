@@ -1,0 +1,21 @@
+{
+  "name": "claude-plus-plus",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "vite:dev": "vite --host 127.0.0.1 --port 1430",
+    "vite:build": "vite build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "typescript": "^5.6.2",
+    "vite": "^6.0.3"
+  }
+}

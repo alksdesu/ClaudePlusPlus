@@ -1,0 +1,158 @@
+/* 设计 token：原始色板 → 语义层两级结构 */
+
+:root {
+  /* ========== 原始色板 · 暖灰阶（纸白 → 墨黑） ========== */
+  --color-gray-000: #ffffff;
+  --color-gray-050: #faf9f5;   /* ivory-light  主背景 */
+  --color-gray-100: #f5f4ed;
+  --color-gray-150: #f0eee6;   /* ivory-medium 次背景 */
+  --color-gray-200: #e8e6dc;   /* ivory-dark   */
+  --color-gray-250: #dedcd1;
+  --color-gray-300: #d1cfc5;   /* cloud-light  */
+  --color-gray-350: #c2c0b6;
+  --color-gray-400: #b0aea5;   /* cloud-medium */
+  --color-gray-450: #9c9a92;
+  --color-gray-500: #87867f;   /* cloud-dark   */
+  --color-gray-550: #73726c;
+  --color-gray-600: #5e5d59;   /* slate-light  */
+  --color-gray-650: #4d4c48;
+  --color-gray-700: #3d3d3a;   /* slate-medium */
+  --color-gray-750: #30302e;
+  --color-gray-800: #262624;
+  --color-gray-850: #1f1e1d;
+  --color-gray-900: #1a1918;
+  --color-gray-950: #141413;   /* slate-dark   主文字 */
+  --color-gray-1000: #000000;
+
+  /* ========== 原始色板 · 品牌色 ========== */
+  --color-clay: #d97757;        /* 陶土橙，唯一品牌主色 */
+  --color-clay-hover: #c6613f;
+  --color-clay-dark: #c46849;
+
+  /* ========== 原始色板 · 辅助色（低饱和自然色，仅用于插画/图表/标签点缀） ========== */
+  --color-oat: #e3dacc;
+  --color-manilla: #ebdbbc;
+  --color-kraft: #d4a27f;
+  --color-cactus: #bcd1ca;
+  --color-olive: #788c5d;
+  --color-sky: #6a9bcc;
+  --color-heather: #cbcadb;
+  --color-fig: #c46686;
+  --color-coral: #ebcece;
+
+  /* ========== 原始色板 · 功能色 ========== */
+  --color-focus: #2c84db;
+  --color-error: #bf4d43;
+
+  /* ========== 语义层 · 背景 ========== */
+  --theme-background-primary: var(--color-gray-050);
+  --theme-background-secondary: var(--color-gray-100);
+  --theme-background-tertiary: var(--color-gray-150);
+  --theme-background-overlay: var(--color-gray-000);
+
+  /* ========== 语义层 · 前景 ========== */
+  --theme-foreground-primary: var(--color-gray-950);
+  --theme-foreground-secondary: var(--color-gray-750);
+  --theme-foreground-tertiary: var(--color-gray-600);
+
+  /* ========== 语义层 · 边框 ========== */
+  --theme-border-primary: var(--color-gray-400);
+  --theme-border-secondary: var(--color-gray-300);
+  --theme-border-tertiary: var(--color-gray-200);
+
+  /* ========== 语义层 · 按钮（实心按钮只用墨黑，clay 不做按钮色） ========== */
+  --theme-button-primary-bg: var(--color-gray-950);
+  --theme-button-primary-fg: var(--color-gray-050);
+  --theme-button-secondary-bg: var(--color-gray-200);
+  --theme-button-secondary-fg: var(--color-gray-650);
+  --theme-button-secondary-fg-hover: var(--color-gray-950);
+  --theme-accent-clay-primary: var(--color-clay);
+  --theme-accent-clay-interactive: var(--color-clay-hover);
+
+  /* ========== 字体 ========== */
+  --font-sans: -apple-system, "Segoe UI",
+               "Noto Sans SC", "Noto Sans JP", Arial, sans-serif;
+  --font-serif: Georgia, "Source Serif 4",
+                "Noto Serif SC", "Noto Serif JP", serif;
+  --font-mono: ui-monospace, "SF Mono",
+               "JetBrains Mono", Consolas, monospace;
+
+  --font-weight-light: 300;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+
+  /* ========== 字号标尺（display=标题 / paragraph=正文 / detail=辅助） ========== */
+  --font-size-display-xxxl: 6rem;      /* 96px */
+  --font-size-display-xxl: 4.5rem;     /* 72px */
+  --font-size-display-xl: 4rem;        /* 64px */
+  --font-size-display-l: 3rem;         /* 48px */
+  --font-size-display-m: 2rem;         /* 32px */
+  --font-size-display-s: 1.5rem;       /* 24px */
+  --font-size-display-xs: 1.25rem;     /* 20px */
+  --font-size-paragraph-l: 1.5rem;     /* 24px */
+  --font-size-paragraph-m: 1.25rem;    /* 20px */
+  --font-size-paragraph-s: 1.125rem;   /* 18px */
+  --font-size-paragraph-xs: 1rem;      /* 16px */
+  --font-size-detail-xl: 1.25rem;
+  --font-size-detail-l: 1.125rem;
+  --font-size-detail-m: 1rem;
+  --font-size-detail-s: 0.875rem;      /* 14px */
+  --font-size-detail-xs: 0.75rem;      /* 12px */
+
+  /* 流式字号 */
+  --font-size-fluid-hero: clamp(48px, 32px + 5vw, 104px);
+  --font-size-fluid-display: clamp(32px, 1.878vw + 24.96px, 52px);
+  --font-size-fluid-body: clamp(15px, 0.1878vw + 14.3px, 17px);
+
+  /* ========== 行高 ========== */
+  --line-height-display: 1;      /* 超大标题 0.95–1.1 */
+  --line-height-heading: 1.15;
+  --line-height-subhead: 1.3;
+  --line-height-body: 1.4;
+  --line-height-prose: 1.6;
+
+  /* ========== 字距 ========== */
+  --letter-spacing-display: -0.005em;  /* 大标题微收 */
+  --letter-spacing-normal: 0;
+  --letter-spacing-caps: 0.04em;       /* 全大写 eyebrow 放宽 */
+
+  /* ========== 行宽约束 ========== */
+  --text-width-narrow: 20ch;
+  --text-width-headline: 30ch;
+  --text-width-title: 45ch;
+  --text-width-body: 60ch;
+  --text-width-wide: 70ch;
+  --text-width-prose: 80ch;
+
+  /* ========== 间距标尺 ========== */
+  --sp-2: 2px;   --sp-4: 4px;   --sp-6: 6px;   --sp-8: 8px;
+  --sp-12: 12px; --sp-16: 16px; --sp-20: 20px; --sp-24: 24px;
+  --sp-32: 32px; --sp-40: 40px; --sp-48: 48px; --sp-56: 56px;
+  --sp-64: 64px; --sp-80: 80px; --sp-96: 96px; --sp-128: 128px;
+  --sp-200: 200px;
+
+  /* ========== 圆角标尺 ========== */
+  --br-2: 2px;  --br-4: 4px;  --br-6: 6px;  --br-8: 8px;
+  --br-12: 12px; --br-16: 16px; --br-24: 24px; --br-32: 32px;
+  --br-48: 48px; --br-64: 64px;
+  --br-round: 100vw;
+
+  /* ========== 边框与阴影 ========== */
+  --border-width: 1px;
+  --shadow-subtle: 0 0.5px 1px rgba(0, 0, 0, 0.06);
+  --shadow-ring: 0 0 0 1px var(--theme-border-secondary);
+  --shadow-overlay: 0 0 0 1px var(--theme-border-primary), 0 12px 32px rgba(0, 0, 0, 0.35);
+
+  /* ========== 容器 ========== */
+  --container-small: 56.25rem;   /* 900px */
+  --container-main: 90rem;       /* 1440px */
+  --site-gutter: var(--sp-32);
+
+  /* ========== 动效 ========== */
+  --transition-color: color 0.1s ease-in-out;
+  --transition-surface: background-color 0.2s ease-in-out,
+                        border-color 0.2s ease-in-out,
+                        box-shadow 0.2s ease-in-out;
+}
