@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import DOMPurify from "dompurify";
+import { marked } from "marked";
 import "./styles.css";
 
 // absent outside the Tauri shell (browser preview), where controls are hidden
@@ -38,6 +40,7 @@ interface CliSession {
   sizeBytes: number;
   registered: boolean;
   tombstoned: boolean;
+  groupId: string;
 }
 
 interface DiscoveryReport {
@@ -100,6 +103,42 @@ interface TombstoneInfo {
   jsonlSize: number;
 }
 
+type CodexStatus = "migrated" | "mirror" | "orphanMirror" | "nativeOnly";
+
+interface CodexSession {
+  threadId: string;
+  rolloutPath: string;
+  cwd: string | null;
+  originator: string | null;
+  title: string | null;
+  sizeBytes: number;
+  lastActivityMs: number;
+  status: CodexStatus;
+  claudePath: string | null;
+}
+
+interface CodexMigrateReport {
+  threadId: string;
+  outcome: { status: string; claudePath?: string; turns?: number; reason?: string } | null;
+  error: string | null;
+}
+
+type CodexFilter = "all" | "nativeOnly" | "migrated" | "mirror";
+
+interface PreviewMessage {
+  role: string;
+  text: string;
+  timestamp: string | null;
+}
+
+interface SessionPreview {
+  title: string | null;
+  cwd: string | null;
+  totalMessages: number;
+  truncated: boolean;
+  messages: PreviewMessage[];
+}
+
 interface PurgeOutcome {
   fileName: string;
   markerRemoved: boolean;
@@ -108,7 +147,7 @@ interface PurgeOutcome {
 }
 
 interface AppState {
-  tab: "unify" | "migrate";
+  tab: "unify" | "migrate" | "codex";
   report: DiscoveryReport | null;
   plans: UnifyPlan[];
   desktopSessions: DesktopSession[];
@@ -120,6 +159,11 @@ interface AppState {
   maximized: boolean;
   tombstones: TombstoneInfo[];
   purgeConfirmOpen: boolean;
+  expandedGroups: Set<string>;
+  codexSessions: CodexSession[];
+  codexRunning: boolean;
+  selectedCodex: Set<string>;
+  codexFilter: CodexFilter;
 }
 
 const state: AppState = {
@@ -135,6 +179,11 @@ const state: AppState = {
   maximized: false,
   tombstones: [],
   purgeConfirmOpen: false,
+  expandedGroups: new Set(),
+  codexSessions: [],
+  codexRunning: false,
+  selectedCodex: new Set(),
+  codexFilter: "all",
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -204,6 +253,15 @@ async function refresh() {
     state.tombstones = await invoke<TombstoneInfo[]>("list_tombstones");
   } catch {
     state.tombstones = [];
+  }
+  try {
+    [state.codexSessions, state.codexRunning] = await Promise.all([
+      invoke<CodexSession[]>("list_codex_sessions"),
+      invoke<boolean>("codex_running"),
+    ]);
+  } catch {
+    state.codexSessions = [];
+    state.codexRunning = false;
   }
   render();
 }
@@ -301,48 +359,131 @@ function projectOf(session: CliSession): string {
   return session.cwd ?? session.projectDir;
 }
 
-function renderCliColumn(): string {
-  const sessions = state.report!.cliSessions;
-  const groups = new Map<string, CliSession[]>();
-  for (const s of sessions) {
-    const key = projectOf(s);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(s);
+/* rewind/resume 分支与 compact 续接共享 groupId（后端按转录血缘算出）。
+   全局列表已按活跃时间倒序，组内首个成员即最新活跃分支 = 组代表。 */
+interface CliGroup {
+  groupId: string;
+  rep: CliSession;
+  branches: CliSession[];
+  anyRegistered: boolean;
+}
+
+function cliGroupsByProject(): Map<string, CliGroup[]> {
+  const byProject = new Map<string, Map<string, CliGroup>>();
+  for (const s of state.report?.cliSessions ?? []) {
+    const project = projectOf(s);
+    if (!byProject.has(project)) byProject.set(project, new Map());
+    const groups = byProject.get(project)!;
+    const key = s.groupId || s.sessionId;
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, { groupId: key, rep: s, branches: [], anyRegistered: s.registered });
+    } else {
+      group.branches.push(s);
+      group.anyRegistered ||= s.registered;
+    }
   }
+  const out = new Map<string, CliGroup[]>();
+  for (const [project, groups] of byProject) out.set(project, [...groups.values()]);
+  return out;
+}
+
+/* 组内任一分支已注册即视为该逻辑会话已入 Desktop，批量操作跳过整组；
+   展开后单独勾选分支不受此限。 */
+function repRegistrable(group: CliGroup): boolean {
+  return !group.anyRegistered && !group.rep.tombstoned;
+}
+
+function findCliGroup(sessionId: string): CliGroup | undefined {
+  for (const groups of cliGroupsByProject().values()) {
+    const hit = groups.find(
+      (g) => g.rep.sessionId === sessionId || g.branches.some((b) => b.sessionId === sessionId),
+    );
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+/* 一个逻辑会话只该进 Desktop 一次：勾选组内任一行前先清掉同组其他行。 */
+function selectExclusiveInGroup(sessionId: string) {
+  const group = findCliGroup(sessionId);
+  if (!group) return;
+  state.selectedCli.delete(group.rep.sessionId);
+  for (const branch of group.branches) state.selectedCli.delete(branch.sessionId);
+  state.selectedCli.add(sessionId);
+}
+
+function groupTitle(group: CliGroup): string {
+  if (group.rep.firstUserText) return group.rep.firstUserText;
+  // compact 续接的代表没有可读标题时，回退到最早分支的原始首句
+  for (let i = group.branches.length - 1; i >= 0; i--) {
+    const text = group.branches[i].firstUserText;
+    if (text) return text;
+  }
+  return group.rep.sessionId;
+}
+
+function cliRowHtml(s: CliSession, options: { title?: string; branch?: boolean; badge?: string } = {}): string {
+  const checked = state.selectedCli.has(s.sessionId);
+  const pill = s.registered
+    ? '<span class="pill pill-registered">✓ 已注册</span>'
+    : s.tombstoned
+      ? '<span class="pill pill-tombstone">墓碑</span>'
+      : "";
+  return `
+    <div class="session-row ${options.branch ? "branch-row" : ""} ${checked ? "selected" : ""}" data-cli="${s.sessionId}" ${
+      s.registered ? 'data-disabled="1"' : ""
+    }>
+      <input type="checkbox" ${checked ? "checked" : ""} ${s.registered ? "disabled" : ""} tabindex="-1"/>
+      <div class="session-body">
+        <div class="session-title">${esc(options.title ?? s.firstUserText ?? s.sessionId)}</div>
+        <div class="session-sub">
+          <span class="mono">${shortId(s.sessionId)}</span>
+          <span>${timeOf(s.lastActivityMs)}</span>
+          <span>${sizeOf(s.sizeBytes)}</span>
+          ${s.entrypoint ? `<span>${esc(s.entrypoint)}</span>` : ""}
+          ${s.cwd ? `<span>${esc(s.cwd)}</span>` : ""}
+        </div>
+      </div>
+      ${options.badge ?? ""}
+      ${pill}
+    </div>`;
+}
+
+function renderCliColumn(): string {
+  const byProject = cliGroupsByProject();
   const blocks: string[] = [];
-  for (const [project, list] of groups) {
-    const ids = list.filter((s) => !s.registered && !s.tombstoned).map((s) => s.sessionId);
-    const allChecked = ids.length > 0 && ids.every((id) => state.selectedCli.has(id));
+  for (const [project, groups] of byProject) {
+    const selectable = groups.filter(repRegistrable).map((g) => g.rep.sessionId);
+    const allChecked = selectable.length > 0 && selectable.every((id) => state.selectedCli.has(id));
+    const fileCount = groups.reduce((n, g) => n + 1 + g.branches.length, 0);
+    const countNote =
+      fileCount === groups.length ? `· ${groups.length}` : `· ${groups.length} 会话 / ${fileCount} 分支文件`;
     blocks.push(`
       <div class="group-label">
         <label><input type="checkbox" data-group-cli="${esc(project)}" ${allChecked ? "checked" : ""} ${
-          ids.length === 0 ? "disabled" : ""
+          selectable.length === 0 ? "disabled" : ""
         }/> ${esc(project)}</label>
-        <span>· ${list.length}</span>
+        <span>${countNote}</span>
       </div>`);
-    for (const s of list) {
-      const checked = state.selectedCli.has(s.sessionId);
-      const pill = s.registered
-        ? '<span class="pill pill-registered">✓ 已注册</span>'
-        : s.tombstoned
-          ? '<span class="pill pill-tombstone">墓碑</span>'
-          : "";
-      blocks.push(`
-        <div class="session-row ${checked ? "selected" : ""}" data-cli="${s.sessionId}" ${
-          s.registered ? 'data-disabled="1"' : ""
-        }>
-          <input type="checkbox" ${checked ? "checked" : ""} ${s.registered ? "disabled" : ""} tabindex="-1"/>
-          <div class="session-body">
-            <div class="session-title">${esc(s.firstUserText ?? s.sessionId)}</div>
-            <div class="session-sub">
-              <span class="mono">${shortId(s.sessionId)}</span>
-              <span>${timeOf(s.lastActivityMs)}</span>
-              <span>${sizeOf(s.sizeBytes)}</span>
-              ${s.entrypoint ? `<span>${esc(s.entrypoint)}</span>` : ""}
-            </div>
-          </div>
-          ${pill}
-        </div>`);
+    for (const group of groups) {
+      if (group.branches.length === 0) {
+        blocks.push(cliRowHtml(group.rep));
+        continue;
+      }
+      const expanded = state.expandedGroups.has(group.groupId);
+      const branchRegistered = !group.rep.registered && group.anyRegistered;
+      const badge = `
+        ${branchRegistered ? '<span class="pill pill-branch">分支已注册</span>' : ""}
+        <button class="branch-toggle ${expanded ? "open" : ""}" data-expand-group="${esc(group.groupId)}"
+          data-group-rep="${group.rep.sessionId}"
+          title="${expanded ? "收起" : "展开"}同一会话的 ${group.branches.length} 个历史分支">
+          ⑂ ${group.branches.length + 1}
+        </button>`;
+      blocks.push(cliRowHtml(group.rep, { title: groupTitle(group), badge }));
+      if (expanded) {
+        for (const branch of group.branches) blocks.push(cliRowHtml(branch, { branch: true }));
+      }
     }
   }
   return blocks.join("") || '<div class="empty-note">未发现 CLI 会话</div>';
@@ -464,6 +605,208 @@ function renderMigrate(): string {
     </div>`;
 }
 
+/* ---------- Codex 迁移页 ---------- */
+
+const CODEX_STATUS_META: Record<CodexStatus, { label: string; cls: string }> = {
+  nativeOnly: { label: "Claude 无此会话", cls: "pill-pending" },
+  migrated: { label: "已迁移", cls: "pill-registered" },
+  mirror: { label: "Claude 已有", cls: "pill-canonical" },
+  orphanMirror: { label: "镜像 · 源已删", cls: "pill-tombstone" },
+};
+
+function codexFiltered(): CodexSession[] {
+  const all = state.codexSessions;
+  switch (state.codexFilter) {
+    case "nativeOnly":
+      return all.filter((s) => s.status === "nativeOnly");
+    case "migrated":
+      return all.filter((s) => s.status === "migrated");
+    case "mirror":
+      return all.filter((s) => s.status === "mirror" || s.status === "orphanMirror");
+    default:
+      return all;
+  }
+}
+
+function renderCodex(): string {
+  const all = state.codexSessions;
+  const counts = {
+    nativeOnly: all.filter((s) => s.status === "nativeOnly").length,
+    migrated: all.filter((s) => s.status === "migrated").length,
+    mirror: all.filter((s) => s.status === "mirror" || s.status === "orphanMirror").length,
+  };
+  const disabled = state.codexRunning || state.busy;
+  const runningNote = state.codexRunning
+    ? '<div class="banner banner-error">Codex 正在运行 —— 迁移会写入 Codex 的导入记录（防止它把迁移产物同步回去），请先完全退出 Codex</div>'
+    : "";
+  const filters: { key: CodexFilter; label: string }[] = [
+    { key: "all", label: `全部 ${all.length}` },
+    { key: "nativeOnly", label: `Claude 无 ${counts.nativeOnly}` },
+    { key: "migrated", label: `已迁移 ${counts.migrated}` },
+    { key: "mirror", label: `镜像 ${counts.mirror}` },
+  ];
+  const chips = filters
+    .map(
+      (f) => `<button class="filter-chip ${state.codexFilter === f.key ? "active" : ""}" data-codex-filter="${f.key}">${f.label}</button>`,
+    )
+    .join("");
+
+  const rows = codexFiltered()
+    .map((s) => {
+      const meta = CODEX_STATUS_META[s.status];
+      const selectable = s.status === "nativeOnly";
+      const checked = state.selectedCodex.has(s.threadId);
+      return `
+        <div class="session-row ${checked ? "selected" : ""}" data-codex="${s.threadId}" ${
+          selectable ? "" : 'data-disabled="1"'
+        }>
+          <input type="checkbox" ${checked ? "checked" : ""} ${selectable ? "" : "disabled"} tabindex="-1"/>
+          <div class="session-body">
+            <div class="session-title">${esc(s.title ?? s.threadId)}</div>
+            <div class="session-sub">
+              <span class="mono">${shortId(s.threadId)}</span>
+              <span>${timeOf(s.lastActivityMs)}</span>
+              <span>${sizeOf(s.sizeBytes)}</span>
+              ${s.originator ? `<span>${esc(s.originator)}</span>` : ""}
+              ${s.cwd ? `<span>${esc(s.cwd)}</span>` : ""}
+            </div>
+          </div>
+          <span class="pill ${meta.cls}">${meta.label}</span>
+        </div>`;
+    })
+    .join("");
+
+  return `
+    <div class="view view-wide">
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Codex 会话迁移</div>
+          <h1>把 Codex 原生对话带进 Claude</h1>
+          <p class="lead">Codex 会把 Claude 转录同步为自己的会话；反向则由这里完成 —— 原生对话转为 Claude 转录（零破坏、幂等），迁移后可在「会话迁移」页注册进 Desktop，CLI 侧 claude -r 直接续聊。</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
+          <button class="btn btn-tertiary" data-action="codex-select-native">全选可迁移</button>
+          <button class="btn btn-tertiary" data-action="codex-clear">清空选中</button>
+          <button class="btn btn-primary" data-action="codex-migrate" ${
+            state.selectedCodex.size === 0 || disabled ? "disabled" : ""
+          }>迁移到 Claude（${state.selectedCodex.size}）</button>
+        </div>
+      </div>
+      ${runningNote}
+      ${
+        counts.nativeOnly === 0
+          ? '<div class="banner">没有待迁移的 Codex 原生会话 —— 全部会话在 Claude 侧均有对应。</div>'
+          : ""
+      }
+      <div class="filter-row">${chips}</div>
+      <div class="column-scroll" id="codex-column">${rows || '<div class="empty-note">未发现 Codex 会话（~/.codex/sessions）</div>'}</div>
+    </div>`;
+}
+
+async function doMigrateCodex() {
+  state.busy = true;
+  render();
+  try {
+    const ids = [...state.selectedCodex];
+    const reports = await invoke<CodexMigrateReport[]>("migrate_codex_sessions", {
+      threadIds: ids,
+    });
+    let ok = 0;
+    let turns = 0;
+    for (const r of reports) {
+      if (r.error) {
+        toast(`${shortId(r.threadId)}: ${r.error}`, true);
+      } else if (r.outcome?.status === "migrated") {
+        ok += 1;
+        turns += r.outcome.turns ?? 0;
+      } else if (r.outcome?.status === "alreadyMigrated") {
+        toast(`${shortId(r.threadId)}: 已迁移过，跳过`);
+      } else if (r.outcome?.status === "skipped") {
+        toast(`${shortId(r.threadId)}: ${r.outcome.reason ?? "跳过"}`, true);
+      }
+    }
+    if (ok) toast(`已迁移 ${ok} 个会话（共 ${turns} 轮对话）—— 去「会话迁移」页注册即可在 Desktop 打开`);
+    state.selectedCodex.clear();
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
+/* ---------- 会话预览 ---------- */
+
+function openPreview(kind: "claude" | "codex", id: string | null, title: string) {
+  if (!id) {
+    toast("此会话没有关联转录，无法预览");
+    return;
+  }
+  void invoke("open_preview", { kind, id, title }).catch((error) => toast(String(error), true));
+}
+
+function previewTimeOf(iso: string | null): string {
+  if (!iso) return "";
+  const ms = Date.parse(iso);
+  return Number.isNaN(ms) ? "" : fmtTime.format(new Date(ms));
+}
+
+/* 转录内容不可信，渲染产物必须过 DOMPurify */
+function renderMarkdown(text: string): string {
+  const html = marked.parse(text, { async: false, breaks: true, gfm: true }) as string;
+  return DOMPurify.sanitize(html);
+}
+
+async function initPreview(kind: string, id: string) {
+  const close = () => void tauriWindow()?.close();
+  app.innerHTML = `
+    <header class="topbar preview-topbar" data-tauri-drag-region>
+      <div class="preview-head-title">会话预览</div>
+      ${tauriWindow() ? `<div class="win-controls"><button class="win-btn win-close" data-preview-close title="关闭">${SVG_CLOSE}</button></div>` : ""}
+    </header>
+    <main class="preview-scroll"><div class="loading">正在读取会话内容…</div></main>`;
+  app.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).closest("[data-preview-close]")) close();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") close();
+  });
+
+  const main = app.querySelector<HTMLElement>(".preview-scroll")!;
+  try {
+    const preview = await invoke<SessionPreview>("load_preview", { kind, id });
+    const head = app.querySelector<HTMLElement>(".preview-head-title")!;
+    head.textContent = preview.title ?? "会话预览";
+    const rows = preview.messages
+      .map((m) => {
+        if (m.role === "tool") {
+          return `<div class="msg-tool">⚙ ${esc(m.text)}</div>`;
+        }
+        if (m.role === "user") {
+          const time = previewTimeOf(m.timestamp);
+          return `
+            <div class="msg-user-wrap">
+              <div class="msg-user-bubble">${esc(m.text)}</div>
+              ${time ? `<div class="msg-time">${time}</div>` : ""}
+            </div>`;
+        }
+        return `<div class="msg-assistant-flow md">${renderMarkdown(m.text)}</div>`;
+      })
+      .join("");
+    main.innerHTML = `
+      <div class="preview-meta">
+        ${preview.cwd ? `<span class="mono">${esc(preview.cwd)}</span>` : ""}
+        <span>共 ${preview.totalMessages} 条消息</span>
+        ${preview.truncated ? `<span>· 仅显示最近 ${preview.messages.length} 条</span>` : ""}
+      </div>
+      ${rows || '<div class="empty-note">没有可显示的对话内容</div>'}`;
+    main.scrollTop = 0;
+  } catch (error) {
+    main.innerHTML = `<div class="loading">${esc(String(error))}</div>`;
+  }
+}
+
 /* ---------- 渲染与事件 ---------- */
 
 function watchChip(): string {
@@ -522,11 +865,10 @@ function updateMigrateSelection() {
     const box = row.querySelector<HTMLInputElement>('input[type="checkbox"]');
     if (box) box.checked = selected;
   }
+  const groupsByProject = cliGroupsByProject();
   for (const box of app.querySelectorAll<HTMLInputElement>("[data-group-cli]")) {
-    const members = (state.report?.cliSessions ?? []).filter(
-      (s) => projectOf(s) === box.dataset.groupCli && !s.registered && !s.tombstoned,
-    );
-    box.checked = members.length > 0 && members.every((s) => state.selectedCli.has(s.sessionId));
+    const reps = (groupsByProject.get(box.dataset.groupCli!) ?? []).filter(repRegistrable);
+    box.checked = reps.length > 0 && reps.every((g) => state.selectedCli.has(g.rep.sessionId));
   }
   const disabled = anyDesktopRunning() || state.busy;
   const register = app.querySelector<HTMLButtonElement>('[data-action="register"]');
@@ -556,11 +898,12 @@ function render() {
       <nav class="tabs">
         <button class="tab ${state.tab === "unify" ? "active" : ""}" data-tab="unify">存储归一</button>
         <button class="tab ${state.tab === "migrate" ? "active" : ""}" data-tab="migrate">会话迁移</button>
+        <button class="tab ${state.tab === "codex" ? "active" : ""}" data-tab="codex">Codex 会话迁移</button>
       </nav>
       ${watchChip()}
       ${windowControls()}
     </header>
-    <main>${state.tab === "unify" ? renderUnify() : renderMigrate()}</main>
+    <main>${state.tab === "unify" ? renderUnify() : state.tab === "migrate" ? renderMigrate() : renderCodex()}</main>
   `;
   for (const [id, top] of scrollTops) {
     const column = document.getElementById(id);
@@ -605,6 +948,8 @@ async function doRegister() {
         toast(`${shortId(r.sessionId)}: 曾在 Desktop 删除过（墓碑），再次注册将复活它`, true);
       } else if (r.outcome?.status === "alreadyRegistered") {
         toast(`${shortId(r.sessionId)}: 已注册，跳过`);
+      } else if (r.outcome?.status === "siblingRegistered") {
+        toast(`${shortId(r.sessionId)}: 同一会话的另一分支已在 Desktop，跳过`);
       }
     }
     if (ok) toast(`已注册 ${ok} 个会话，打开 Desktop 对应项目即可见`);
@@ -668,6 +1013,7 @@ async function doUnregister() {
   }
 }
 
+function initMain() {
 app.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const tab = target.closest<HTMLElement>("[data-tab]");
@@ -696,10 +1042,11 @@ app.addEventListener("click", (event) => {
     if (action === "purge-markers") void doPurge(false);
     if (action === "purge-all") void doPurge(true);
     if (action === "cli-select-all") {
-      for (const s of state.report?.cliSessions ?? []) {
-        // tombstoned sessions get blocked at register time; sweeping them in
-        // would only produce a wall of error toasts
-        if (!s.registered && !s.tombstoned) state.selectedCli.add(s.sessionId);
+      // tombstoned/已注册组会在注册时被挡下，批量勾入只会刷一屏错误 toast
+      for (const groups of cliGroupsByProject().values()) {
+        for (const group of groups) {
+          if (repRegistrable(group)) state.selectedCli.add(group.rep.sessionId);
+        }
       }
       updateMigrateSelection();
     }
@@ -717,16 +1064,60 @@ app.addEventListener("click", (event) => {
       state.selectedDesktop.clear();
       updateMigrateSelection();
     }
+    if (action === "codex-select-native") {
+      for (const s of state.codexSessions) {
+        if (s.status === "nativeOnly") state.selectedCodex.add(s.threadId);
+      }
+      render();
+    }
+    if (action === "codex-clear") {
+      state.selectedCodex.clear();
+      render();
+    }
+    if (action === "codex-migrate") void doMigrateCodex();
+    return;
+  }
+  const filterChip = target.closest<HTMLElement>("[data-codex-filter]");
+  if (filterChip) {
+    state.codexFilter = filterChip.dataset.codexFilter as CodexFilter;
+    render();
+    return;
+  }
+  const clickedCheckbox = (target as HTMLElement).closest('input[type="checkbox"]') !== null;
+  const codexRow = target.closest<HTMLElement>("[data-codex]");
+  if (codexRow) {
+    const id = codexRow.dataset.codex!;
+    if (!clickedCheckbox) {
+      const title = codexRow.querySelector(".session-title")?.textContent ?? "会话预览";
+      openPreview("codex", id, title);
+      return;
+    }
+    if (codexRow.dataset.disabled) return;
+    if (state.selectedCodex.has(id)) state.selectedCodex.delete(id);
+    else state.selectedCodex.add(id);
+    render();
+    return;
+  }
+  const expandButton = target.closest<HTMLElement>("[data-expand-group]");
+  if (expandButton) {
+    const groupId = expandButton.dataset.expandGroup!;
+    if (state.expandedGroups.has(groupId)) {
+      state.expandedGroups.delete(groupId);
+      // 收起后分支行不可见，留着选中等于静默注册看不见的会话
+      const group = findCliGroup(expandButton.dataset.groupRep!);
+      for (const branch of group?.branches ?? []) state.selectedCli.delete(branch.sessionId);
+    } else {
+      state.expandedGroups.add(groupId);
+    }
+    render();
     return;
   }
   const groupCli = target.closest<HTMLInputElement>("[data-group-cli]");
   if (groupCli) {
     const project = groupCli.dataset.groupCli!;
-    const members = (state.report?.cliSessions ?? []).filter(
-      (s) => projectOf(s) === project && !s.registered && !s.tombstoned,
-    );
-    const allIn = members.every((s) => state.selectedCli.has(s.sessionId));
-    for (const s of members) {
+    const reps = (cliGroupsByProject().get(project) ?? []).filter(repRegistrable).map((g) => g.rep);
+    const allIn = reps.every((s) => state.selectedCli.has(s.sessionId));
+    for (const s of reps) {
       if (allIn) state.selectedCli.delete(s.sessionId);
       else state.selectedCli.add(s.sessionId);
     }
@@ -734,16 +1125,28 @@ app.addEventListener("click", (event) => {
     return;
   }
   const cliRow = target.closest<HTMLElement>("[data-cli]");
-  if (cliRow && !cliRow.dataset.disabled) {
+  if (cliRow) {
     const id = cliRow.dataset.cli!;
+    if (!clickedCheckbox) {
+      const title = cliRow.querySelector(".session-title")?.textContent ?? "会话预览";
+      openPreview("claude", id, title);
+      return;
+    }
+    if (cliRow.dataset.disabled) return;
     if (state.selectedCli.has(id)) state.selectedCli.delete(id);
-    else state.selectedCli.add(id);
+    else selectExclusiveInGroup(id);
     updateMigrateSelection();
     return;
   }
   const deskRow = target.closest<HTMLElement>("[data-desktop]");
   if (deskRow) {
     const file = deskRow.dataset.desktop!;
+    if (!clickedCheckbox) {
+      const session = state.desktopSessions.find((s) => s.fileName === file);
+      const title = deskRow.querySelector(".session-title")?.textContent ?? "会话预览";
+      openPreview("claude", session?.cliSessionId ?? null, title);
+      return;
+    }
     if (state.selectedDesktop.has(file)) state.selectedDesktop.delete(file);
     else state.selectedDesktop.add(file);
     updateMigrateSelection();
@@ -784,3 +1187,11 @@ setInterval(() => {
     if (changed) render();
   });
 }, 15000);
+}
+
+const previewSpec = (window as { __PREVIEW__?: { kind: string; id: string } }).__PREVIEW__;
+if (previewSpec) {
+  void initPreview(previewSpec.kind, previewSpec.id);
+} else {
+  initMain();
+}

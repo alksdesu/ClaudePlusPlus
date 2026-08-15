@@ -116,6 +116,36 @@ pub fn any_desktop_running() -> bool {
     !desktop_command_lines().is_empty()
 }
 
+/// Codex 本体进程存活检测（迁移会写它的导入记录，运行中拒绝）。
+/// codex-plus-plus 是独立管理工具，与 Codex 本体无关，须排除。
+#[cfg(windows)]
+pub fn codex_running() -> bool {
+    let mut cmd = Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process -Filter \"Name='codex.exe' OR Name='codex-code-mode-host.exe'\" | ForEach-Object { $_.ProcessId }",
+    ]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.output()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+pub fn codex_running() -> bool {
+    let mut cmd = Command::new("ps");
+    cmd.args(["-axo", "comm="]);
+    cmd.output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).lines().any(|line| {
+                let name = line.trim().rsplit('/').next().unwrap_or("");
+                name == "codex" || name == "codex-code-mode-host" || name.eq_ignore_ascii_case("Codex")
+            })
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;

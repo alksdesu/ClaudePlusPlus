@@ -153,6 +153,8 @@ pub enum ConflictPolicy {
 pub enum RegisterOutcome {
     Registered { metadata_file: String },
     AlreadyRegistered { metadata_file: String },
+    /// 同一逻辑会话的另一分支已在 Desktop，再注册只会得到重复条目
+    SiblingRegistered { metadata_file: String, sibling_id: String },
     TombstoneBlocked,
     Skipped { reason: String },
 }
@@ -193,6 +195,17 @@ pub fn register_cli_session(
     cli: &CliSession,
     policy: ConflictPolicy,
 ) -> Result<RegisterOutcome> {
+    register_cli_session_with_siblings(code_dir, cli, policy, &[])
+}
+
+/// `siblings` 为同组其他分支的 cliSessionId：任一已注册即拒绝，避免同一逻辑
+/// 会话在 Desktop 里出现多条。Overwrite 由调用方显式选择，不受此限。
+pub fn register_cli_session_with_siblings(
+    code_dir: &Path,
+    cli: &CliSession,
+    policy: ConflictPolicy,
+    siblings: &[String],
+) -> Result<RegisterOutcome> {
     if let Some(existing) = find_active_registration(code_dir, &cli.session_id) {
         return Ok(match policy {
             ConflictPolicy::Overwrite => {
@@ -203,6 +216,16 @@ pub fn register_cli_session(
                 metadata_file: existing,
             },
         });
+    }
+    if policy != ConflictPolicy::Overwrite {
+        for sibling in siblings {
+            if let Some(existing) = find_active_registration(code_dir, sibling) {
+                return Ok(RegisterOutcome::SiblingRegistered {
+                    metadata_file: existing,
+                    sibling_id: sibling.clone(),
+                });
+            }
+        }
     }
     let tombstone = code_dir.join(format!("deleted_{}", cli.session_id));
     if tombstone.exists() {
@@ -454,6 +477,7 @@ mod tests {
             size_bytes: 1,
             registered: false,
             tombstoned: false,
+            group_id: "12ad197f-2a0f-451d-b6eb-2e2ed6ab30a9".into(),
         }
     }
 
@@ -510,6 +534,26 @@ mod tests {
             .path()
             .join("deleted_12ad197f-2a0f-451d-b6eb-2e2ed6ab30a9")
             .exists());
+    }
+
+    #[test]
+    fn sibling_branch_blocks_duplicate_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = sample_cli(dir.path());
+        register_cli_session(dir.path(), &cli, ConflictPolicy::Skip).unwrap();
+
+        // 同组另一分支：cliSessionId 不同，逐个查重挡不住，须靠 siblings
+        let mut branch = sample_cli(dir.path());
+        branch.session_id = "99999999-2a0f-451d-b6eb-2e2ed6ab30a9".into();
+        let siblings = vec![cli.session_id.clone()];
+        let outcome =
+            register_cli_session_with_siblings(dir.path(), &branch, ConflictPolicy::Skip, &siblings)
+                .unwrap();
+        assert!(matches!(outcome, RegisterOutcome::SiblingRegistered { .. }));
+
+        // 无 siblings 上下文时照旧放行，保证单会话路径不受影响
+        let outcome = register_cli_session(dir.path(), &branch, ConflictPolicy::Skip).unwrap();
+        assert!(matches!(outcome, RegisterOutcome::Registered { .. }));
     }
 
     #[test]

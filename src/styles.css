@@ -383,6 +383,10 @@ main {
   background: var(--color-oat);
 }
 
+.pill-branch {
+  background: var(--color-heather);
+}
+
 /* ---------- 迁移页双列 ---------- */
 
 .migrate-grid {
@@ -485,6 +489,60 @@ main {
   flex-shrink: 0;
 }
 
+.branch-row {
+  margin-left: var(--sp-32);
+  background: var(--theme-background-secondary);
+}
+
+.branch-toggle {
+  flex-shrink: 0;
+  padding: var(--sp-2) var(--sp-8);
+  border-radius: var(--br-round);
+  box-shadow: var(--shadow-ring);
+  color: var(--theme-foreground-secondary);
+  font-size: var(--font-size-detail-xs);
+  font-feature-settings: "pnum" on, "lnum" on;
+  transition: var(--transition-color), var(--transition-surface);
+}
+
+.branch-toggle:hover {
+  color: var(--theme-foreground-primary);
+  background: var(--theme-background-tertiary);
+}
+
+.branch-toggle.open {
+  color: var(--theme-foreground-primary);
+  background: var(--theme-background-tertiary);
+  box-shadow: 0 0 0 var(--border-width) var(--theme-border-primary);
+}
+
+/* ---------- Codex 迁移页筛选 ---------- */
+
+.filter-row {
+  display: flex;
+  gap: var(--sp-8);
+}
+
+.filter-chip {
+  padding: var(--sp-4) var(--sp-12);
+  border-radius: var(--br-round);
+  box-shadow: var(--shadow-ring);
+  color: var(--theme-foreground-secondary);
+  font-size: var(--font-size-detail-xs);
+  font-feature-settings: "pnum" on, "lnum" on;
+  transition: var(--transition-color), var(--transition-surface);
+}
+
+.filter-chip:hover {
+  color: var(--theme-foreground-primary);
+}
+
+.filter-chip.active {
+  color: var(--theme-foreground-primary);
+  background: var(--theme-background-tertiary);
+  box-shadow: 0 0 0 var(--border-width) var(--theme-border-primary);
+}
+
 .column-section {
   margin-top: var(--sp-8);
 }
@@ -555,6 +613,180 @@ main {
   .toast {
     animation: none;
   }
+}
+
+/* ---------- 会话预览窗口 ---------- */
+
+.preview-topbar {
+  gap: var(--sp-12);
+  flex-shrink: 0;
+}
+
+.preview-head-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--font-weight-medium);
+  pointer-events: none;
+}
+
+.preview-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--sp-16) var(--sp-24) var(--sp-32);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-12);
+}
+
+.preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-4) var(--sp-12);
+  padding: var(--sp-4) var(--sp-8);
+  color: var(--theme-foreground-tertiary);
+  font-size: var(--font-size-detail-xs);
+  font-feature-settings: "pnum" on, "lnum" on;
+}
+
+/* Desktop 风格：用户=右侧圆角气泡，助手=无框全宽文档流，工具=灰字摘要行 */
+
+.msg-user-wrap {
+  align-self: flex-end;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-4);
+  max-width: 78%;
+}
+
+.msg-user-bubble {
+  padding: var(--sp-8) var(--sp-12);
+  border-radius: var(--br-8);
+  background: var(--theme-background-tertiary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-detail-s);
+}
+
+.msg-time {
+  font-size: var(--font-size-detail-xs);
+  color: var(--theme-foreground-tertiary);
+  font-feature-settings: "pnum" on, "lnum" on;
+}
+
+.msg-assistant-flow {
+  align-self: stretch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--font-size-detail-s);
+  line-height: var(--line-height-prose);
+}
+
+.msg-tool {
+  align-self: flex-start;
+  font-size: var(--font-size-detail-xs);
+  color: var(--theme-foreground-tertiary);
+}
+
+/* ---------- 预览内 Markdown ---------- */
+
+.msg-assistant-flow.md {
+  white-space: normal;
+}
+
+.md :where(p, ul, ol, pre, blockquote, table) {
+  margin: 0 0 var(--sp-8);
+}
+
+.md :where(p, ul, ol, pre, blockquote, table):last-child {
+  margin-bottom: 0;
+}
+
+.md :where(h1, h2, h3, h4, h5, h6) {
+  margin: var(--sp-12) 0 var(--sp-8);
+  font-weight: var(--font-weight-semibold);
+  line-height: var(--line-height-subhead);
+}
+
+.md h1 {
+  font-size: var(--font-size-detail-xl);
+}
+
+.md h2 {
+  font-size: var(--font-size-detail-l);
+}
+
+.md :where(h3, h4, h5, h6) {
+  font-size: var(--font-size-detail-m);
+}
+
+.md :where(ul, ol) {
+  padding-left: var(--sp-24);
+}
+
+.md li {
+  margin-bottom: var(--sp-2);
+}
+
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--theme-background-tertiary);
+  padding: 0 var(--sp-4);
+  border-radius: var(--br-4);
+}
+
+.md pre {
+  padding: var(--sp-12);
+  border-radius: var(--br-8);
+  background: var(--theme-background-tertiary);
+  overflow-x: auto;
+}
+
+.md pre code {
+  background: none;
+  padding: 0;
+  font-size: var(--font-size-detail-xs);
+}
+
+.md blockquote {
+  padding-left: var(--sp-12);
+  border-left: var(--sp-2) solid var(--theme-border-secondary);
+  color: var(--theme-foreground-secondary);
+}
+
+.md table {
+  display: block;
+  border-collapse: collapse;
+  overflow-x: auto;
+  font-size: var(--font-size-detail-xs);
+}
+
+.md :where(th, td) {
+  padding: var(--sp-4) var(--sp-12);
+  border: var(--border-width) solid var(--theme-border-tertiary);
+  text-align: left;
+}
+
+.md th {
+  background: var(--theme-background-secondary);
+  font-weight: var(--font-weight-medium);
+}
+
+.md a {
+  color: var(--color-focus);
+}
+
+.md hr {
+  margin: var(--sp-12) 0;
+  border: 0;
+  border-top: var(--border-width) solid var(--theme-border-tertiary);
+}
+
+.md img {
+  max-width: 100%;
 }
 
 /* ---------- 骨架 ---------- */

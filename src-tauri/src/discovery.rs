@@ -60,6 +60,8 @@ pub struct CliSession {
     pub size_bytes: u64,
     pub registered: bool,
     pub tombstoned: bool,
+    /// 同一逻辑会话（rewind/resume 分支、compact 续接）的所有 jsonl 共享同一组 id
+    pub group_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -208,6 +210,8 @@ struct JsonlProbe {
     entrypoint: Option<String>,
     first_user_text: Option<String>,
     first_timestamp: Option<String>,
+    first_message_uuid: Option<String>,
+    first_is_compact_boundary: bool,
 }
 
 fn extract_user_text(message: &serde_json::Value) -> Option<String> {
@@ -228,6 +232,7 @@ fn extract_user_text(message: &serde_json::Value) -> Option<String> {
         || trimmed.starts_with("<command-name>")
         || trimmed.starts_with("<local-command")
         || trimmed.starts_with("Caveat:")
+        || trimmed.starts_with("This session is being continued from a previous conversation")
     {
         return None;
     }
@@ -269,8 +274,18 @@ fn probe_jsonl_head(path: &Path) -> JsonlProbe {
                 .and_then(|v| v.as_str())
                 .map(String::from);
         }
+        let line_type = value.get("type").and_then(|v| v.as_str());
+        if probe.first_message_uuid.is_none()
+            && matches!(line_type, Some("user" | "assistant" | "system"))
+        {
+            if let Some(uuid) = value.get("uuid").and_then(|v| v.as_str()) {
+                probe.first_message_uuid = Some(uuid.to_string());
+                probe.first_is_compact_boundary =
+                    value.get("subtype").and_then(|v| v.as_str()) == Some("compact_boundary");
+            }
+        }
         if probe.first_user_text.is_none()
-            && value.get("type").and_then(|v| v.as_str()) == Some("user")
+            && line_type == Some("user")
             && !value
                 .get("isSidechain")
                 .and_then(|v| v.as_bool())
@@ -280,11 +295,114 @@ fn probe_jsonl_head(path: &Path) -> JsonlProbe {
                 probe.first_user_text = extract_user_text(message);
             }
         }
-        if probe.cwd.is_some() && probe.first_user_text.is_some() && probe.entrypoint.is_some() {
+        if probe.cwd.is_some()
+            && probe.first_user_text.is_some()
+            && probe.entrypoint.is_some()
+            && probe.first_message_uuid.is_some()
+        {
             break;
         }
     }
     probe
+}
+
+const SCAN_CHUNK_BYTES: usize = 64 * 1024;
+
+/// 流式判断文件是否包含任一 needle，命中即停；块间保留重叠避免跨界漏配。
+fn file_contains(path: &Path, needles: &[String]) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    let overlap = needles.iter().map(|n| n.len()).max().unwrap_or(0).saturating_sub(1);
+    let mut window: Vec<u8> = Vec::with_capacity(SCAN_CHUNK_BYTES + overlap);
+    let mut chunk = vec![0u8; SCAN_CHUNK_BYTES];
+    loop {
+        let Ok(read) = file.read(&mut chunk) else {
+            return false;
+        };
+        if read == 0 {
+            return false;
+        }
+        window.extend_from_slice(&chunk[..read]);
+        if needles
+            .iter()
+            .any(|n| window.windows(n.len()).any(|w| w == n.as_bytes()))
+        {
+            return true;
+        }
+        let keep = window.len().saturating_sub(overlap);
+        window.drain(..keep);
+    }
+}
+
+fn uf_find(uf: &mut [usize], mut x: usize) -> usize {
+    while uf[x] != x {
+        uf[x] = uf[uf[x]];
+        x = uf[x];
+    }
+    x
+}
+
+fn uf_union(uf: &mut [usize], a: usize, b: usize) {
+    let (ra, rb) = (uf_find(uf, a), uf_find(uf, b));
+    if ra != rb {
+        uf[ra] = rb;
+    }
+}
+
+/// 同一逻辑会话的血缘统一判据：文件 X 的首条消息 uuid 出现在文件 Y 里即同组。
+/// fork（rewind/resume）把公共前缀整段复制，首条消息 uuid 天然相同（头部即证）；
+/// compact 续接则把 compact_boundary 行写进母文件中部后从它开始复制，boundary 的
+/// 位置无规律，需对候选文件做全文流式搜索——仅 compact 开头的文件触发。
+fn assign_groups(sessions: &mut [CliSession], probes: &[(Option<String>, bool)]) {
+    let mut buckets: std::collections::HashMap<String, Vec<usize>> = std::collections::HashMap::new();
+    for (i, session) in sessions.iter().enumerate() {
+        buckets.entry(session.project_dir.clone()).or_default().push(i);
+    }
+    for indices in buckets.values() {
+        let n = indices.len();
+        let mut uf: Vec<usize> = (0..n).collect();
+
+        let mut by_first: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (local, &gi) in indices.iter().enumerate() {
+            if let Some(first) = probes[gi].0.as_deref() {
+                if let Some(&seen) = by_first.get(first) {
+                    uf_union(&mut uf, local, seen);
+                } else {
+                    by_first.insert(first, local);
+                }
+            }
+        }
+
+        for (local, &gi) in indices.iter().enumerate() {
+            if !probes[gi].1 {
+                continue;
+            }
+            let Some(boundary) = probes[gi].0.as_deref() else { continue };
+            // 结构化匹配防误报：正文里被讨论的 uuid 经 JSON 转义带反斜杠，不会命中
+            let needles = [
+                format!("\"uuid\":\"{boundary}\""),
+                format!("\"uuid\": \"{boundary}\""),
+            ];
+            for other in 0..n {
+                if other == local || uf_find(&mut uf, other) == uf_find(&mut uf, local) {
+                    continue;
+                }
+                if file_contains(&sessions[indices[other]].jsonl_path, &needles) {
+                    uf_union(&mut uf, local, other);
+                }
+            }
+        }
+
+        for (local, &gi) in indices.iter().enumerate() {
+            let root = indices[uf_find(&mut uf, local)];
+            let key = probes[root]
+                .0
+                .clone()
+                .unwrap_or_else(|| sessions[root].session_id.clone());
+            sessions[gi].group_id = key;
+        }
+    }
 }
 
 /// cliSessionIds referenced by code-pool metadata (active + tombstones).
@@ -327,6 +445,7 @@ pub fn scan_cli_sessions(registered: &RegisteredIndex) -> Vec<CliSession> {
         return Vec::new();
     };
     let mut sessions = Vec::new();
+    let mut probes: Vec<(Option<String>, bool)> = Vec::new();
     let Ok(project_dirs) = fs::read_dir(&projects) else {
         return Vec::new();
     };
@@ -355,6 +474,7 @@ pub fn scan_cli_sessions(registered: &RegisteredIndex) -> Vec<CliSession> {
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
             let probe = probe_jsonl_head(&path);
+            probes.push((probe.first_message_uuid, probe.first_is_compact_boundary));
             sessions.push(CliSession {
                 session_id: stem.to_string(),
                 jsonl_path: path,
@@ -367,9 +487,12 @@ pub fn scan_cli_sessions(registered: &RegisteredIndex) -> Vec<CliSession> {
                 size_bytes,
                 registered: registered.active.contains(stem),
                 tombstoned: registered.tombstoned.contains(stem),
+                group_id: String::new(),
             });
         }
     }
+    // probes 与 sessions 按下标对齐，排序必须放在分组之后
+    assign_groups(&mut sessions, &probes);
     sessions.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
     sessions
 }
@@ -443,7 +566,179 @@ mod tests {
     fn user_text_skips_command_noise() {
         let msg = serde_json::json!({"role":"user","content":"<command-name>/model</command-name>"});
         assert_eq!(extract_user_text(&msg), None);
+        let msg = serde_json::json!({"role":"user","content":"This session is being continued from a previous conversation that ran out of context."});
+        assert_eq!(extract_user_text(&msg), None);
         let msg = serde_json::json!({"role":"user","content":[{"type":"text","text":"帮我看看这个项目"}]});
         assert_eq!(extract_user_text(&msg).as_deref(), Some("帮我看看这个项目"));
+    }
+
+    fn write_jsonl(dir: &Path, name: &str, lines: &[String]) -> PathBuf {
+        let path = dir.join(format!("{name}.jsonl"));
+        fs::write(&path, lines.join("\n")).unwrap();
+        path
+    }
+
+    fn msg_line(sid: &str, uuid: &str, parent: Option<&str>, text: &str) -> String {
+        serde_json::json!({
+            "parentUuid": parent,
+            "sessionId": sid,
+            "type": "user",
+            "uuid": uuid,
+            "timestamp": "2026-08-01T10:00:00.000Z",
+            "cwd": "E:\\Proj\\demo",
+            "message": {"role": "user", "content": text}
+        })
+        .to_string()
+    }
+
+    fn session_stub(stem: &str, path: PathBuf) -> CliSession {
+        CliSession {
+            session_id: stem.to_string(),
+            jsonl_path: path,
+            project_dir: "E--Proj-demo".into(),
+            cwd: None,
+            entrypoint: None,
+            first_user_text: None,
+            first_timestamp: None,
+            last_activity_ms: 0,
+            size_bytes: 0,
+            registered: false,
+            tombstoned: false,
+            group_id: String::new(),
+        }
+    }
+
+    fn boundary_line(uuid: &str, lp: &str) -> String {
+        format!(
+            r#"{{"type":"system","subtype":"compact_boundary","uuid":"{uuid}","logicalParentUuid":"{lp}","content":"Conversation compacted"}}"#
+        )
+    }
+
+    fn probe_pair(path: &Path) -> (Option<String>, bool) {
+        let probe = probe_jsonl_head(path);
+        (probe.first_message_uuid, probe.first_is_compact_boundary)
+    }
+
+    #[test]
+    fn probe_extracts_fork_and_compact_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let forked = write_jsonl(
+            dir.path(),
+            "forked",
+            &[
+                r#"{"type":"custom-title","title":"x"}"#.to_string(),
+                msg_line("forked", "m1", None, "第一句"),
+            ],
+        );
+        let probe = probe_jsonl_head(&forked);
+        assert_eq!(probe.first_message_uuid.as_deref(), Some("m1"));
+        assert!(!probe.first_is_compact_boundary);
+
+        let compacted = write_jsonl(
+            dir.path(),
+            "compacted",
+            &[
+                boundary_line("c1", "m9"),
+                msg_line("compacted", "m10", Some("c1"), "This session is being continued from a previous conversation that ran out of context."),
+            ],
+        );
+        let probe = probe_jsonl_head(&compacted);
+        assert_eq!(probe.first_message_uuid.as_deref(), Some("c1"));
+        assert!(probe.first_is_compact_boundary);
+        assert_eq!(probe.first_user_text, None);
+    }
+
+    #[test]
+    fn fork_and_compact_files_share_one_group() {
+        let dir = tempfile::tempdir().unwrap();
+        // compact 把 boundary 行写进母文件，续接文件从同一 boundary 行开始复制
+        let root = write_jsonl(
+            dir.path(),
+            "root",
+            &[
+                msg_line("root", "m1", None, "起点"),
+                msg_line("root", "m2", Some("m1"), "继续"),
+                boundary_line("c1", "m2"),
+            ],
+        );
+        let fork = write_jsonl(
+            dir.path(),
+            "fork",
+            &[msg_line("fork", "m1", None, "起点"), msg_line("fork", "m3", Some("m1"), "分叉")],
+        );
+        let compact = write_jsonl(
+            dir.path(),
+            "compact",
+            &[boundary_line("c1", "m2"), msg_line("compact", "m4", Some("c1"), "压缩后继续")],
+        );
+        let other = write_jsonl(dir.path(), "other", &[msg_line("other", "z1", None, "无关会话")]);
+        // 孤儿 compact：母文件已删，boundary 无宿主，独立成组
+        let orphan = write_jsonl(
+            dir.path(),
+            "orphan",
+            &[boundary_line("c9", "m8"), msg_line("orphan", "m5", Some("c9"), "孤儿续接")],
+        );
+
+        let mut sessions = vec![
+            session_stub("root", root.clone()),
+            session_stub("fork", fork.clone()),
+            session_stub("compact", compact.clone()),
+            session_stub("other", other.clone()),
+            session_stub("orphan", orphan.clone()),
+        ];
+        let probes: Vec<_> = [&root, &fork, &compact, &other, &orphan]
+            .iter()
+            .map(|p| probe_pair(p))
+            .collect();
+        assign_groups(&mut sessions, &probes);
+
+        let group_of = |stem: &str| {
+            sessions
+                .iter()
+                .find(|s| s.session_id == stem)
+                .unwrap()
+                .group_id
+                .clone()
+        };
+        assert_eq!(group_of("root"), group_of("fork"));
+        assert_eq!(group_of("root"), group_of("compact"));
+        assert_ne!(group_of("root"), group_of("other"));
+        assert_ne!(group_of("root"), group_of("orphan"));
+        assert_ne!(group_of("other"), group_of("orphan"));
+        assert!(!group_of("other").is_empty());
+    }
+
+    #[test]
+    fn quoted_uuid_in_message_body_does_not_bridge() {
+        let dir = tempfile::tempdir().unwrap();
+        // 正文里讨论 uuid "c1" 的会话：JSON 转义使 "uuid":"c1" 变成 \"uuid\":\"c1\"，不得误桥
+        let chatter = write_jsonl(
+            dir.path(),
+            "chatter",
+            &[msg_line("chatter", "a1", None, r#"看这段元数据 "uuid":"c1" 是什么意思"#)],
+        );
+        let compact = write_jsonl(
+            dir.path(),
+            "compact",
+            &[boundary_line("c1", "m9")],
+        );
+        let mut sessions = vec![session_stub("chatter", chatter.clone()), session_stub("compact", compact.clone())];
+        let probes: Vec<_> = [&chatter, &compact].iter().map(|p| probe_pair(p)).collect();
+        assign_groups(&mut sessions, &probes);
+        assert_ne!(sessions[0].group_id, sessions[1].group_id);
+    }
+
+    #[test]
+    fn file_contains_matches_across_chunk_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let needle = "\"uuid\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\"".to_string();
+        // needle 恰好横跨 64KB 块边界
+        let path = dir.path().join("big.jsonl");
+        let mut content = "x".repeat(SCAN_CHUNK_BYTES - 10);
+        content.push_str(&needle);
+        content.push_str(&"y".repeat(1000));
+        fs::write(&path, &content).unwrap();
+        assert!(file_contains(&path, std::slice::from_ref(&needle)));
+        assert!(!file_contains(&path, &["\"uuid\":\"not-there\"".to_string()]));
     }
 }

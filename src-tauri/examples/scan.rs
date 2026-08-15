@@ -53,4 +53,30 @@ fn main() {
             s.first_user_text.as_deref().unwrap_or("-")
         );
     }
+    let mut groups: std::collections::BTreeMap<&str, Vec<&claude_plus_plus_lib::discovery::CliSession>> =
+        Default::default();
+    for s in &report.cli_sessions {
+        groups.entry(&s.group_id).or_default().push(s);
+    }
+    let multi: Vec<_> = groups.values().filter(|v| v.len() > 1).collect();
+    println!("== branch groups ==");
+    println!(
+        "  groups={} multi-branch={} files-in-multi={}",
+        groups.len(),
+        multi.len(),
+        multi.iter().map(|v| v.len()).sum::<usize>()
+    );
+    for members in &multi {
+        let rep = members[0];
+        println!(
+            "  [{}] {} 个分支  {}  {:?}",
+            &rep.group_id[..8],
+            members.len(),
+            rep.project_dir,
+            rep.first_user_text.as_deref().unwrap_or("-")
+        );
+        for m in members.iter() {
+            println!("      {}  {}KB", &m.session_id[..8], m.size_bytes / 1024);
+        }
+    }
 }

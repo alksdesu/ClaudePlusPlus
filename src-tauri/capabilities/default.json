@@ -1,7 +1,7 @@
 {
   "identifier": "default",
-  "description": "Main window permissions.",
-  "windows": ["main"],
+  "description": "Main and preview window permissions.",
+  "windows": ["main", "preview-*"],
   "permissions": [
     "core:default",
     "core:tray:default",

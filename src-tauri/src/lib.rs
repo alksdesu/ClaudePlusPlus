@@ -1,6 +1,8 @@
+pub mod codex;
 pub mod discovery;
 pub mod link;
 pub mod migrate;
+pub mod preview;
 pub mod procs;
 pub mod unify;
 pub mod watch;
@@ -13,6 +15,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 
+use codex::{CodexSession, MigrateOutcome};
 use discovery::{DiscoveryReport, PoolKind};
 use migrate::{
     ConflictPolicy, DesktopSession, PurgeOutcome, RegisterOutcome, TombstoneInfo, UnregisterOutcome,
@@ -119,6 +122,8 @@ fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<Reg
     let code_dir = canonical_code_dir()?;
     let report = discovery::scan_all();
     let mut results = Vec::new();
+    // 同批次内已注册的组：挡住一次提交里勾了同组多个分支的情况
+    let mut done_groups: std::collections::HashSet<String> = std::collections::HashSet::new();
     for id in session_ids {
         let Some(cli) = report.cli_sessions.iter().find(|s| s.session_id == id) else {
             results.push(RegisterReport {
@@ -128,7 +133,21 @@ fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<Reg
             });
             continue;
         };
-        match migrate::register_cli_session(&code_dir, cli, policy) {
+        let siblings: Vec<String> = report
+            .cli_sessions
+            .iter()
+            .filter(|s| s.group_id == cli.group_id && s.session_id != cli.session_id)
+            .map(|s| s.session_id.clone())
+            .collect();
+        if policy != ConflictPolicy::Overwrite && !done_groups.insert(cli.group_id.clone()) {
+            results.push(RegisterReport {
+                session_id: id,
+                outcome: None,
+                error: Some("同一会话的另一分支已在本次注册中处理".into()),
+            });
+            continue;
+        }
+        match migrate::register_cli_session_with_siblings(&code_dir, cli, policy, &siblings) {
             Ok(outcome) => results.push(RegisterReport {
                 session_id: id,
                 outcome: Some(outcome),
@@ -193,6 +212,121 @@ fn purge_tombstones(
     ))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexMigrateReport {
+    pub thread_id: String,
+    pub outcome: Option<MigrateOutcome>,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+fn list_codex_sessions() -> Vec<CodexSession> {
+    codex::list_codex_sessions()
+}
+
+#[tauri::command]
+fn codex_running() -> bool {
+    procs::codex_running()
+}
+
+#[tauri::command]
+fn migrate_codex_sessions(thread_ids: Vec<String>) -> Result<Vec<CodexMigrateReport>, String> {
+    // 迁移会写 Codex 的导入记录（防循环），Codex 运行中可能覆盖它
+    if procs::codex_running() {
+        return Err("Codex 正在运行，请先退出后再迁移".into());
+    }
+    let codex_home = codex::codex_home().ok_or("找不到 ~/.codex")?;
+    let projects = cli_projects_dir()?;
+    let sessions = codex::list_codex_sessions();
+    let mut results = Vec::new();
+    for id in thread_ids {
+        let Some(session) = sessions.iter().find(|s| s.thread_id == id) else {
+            results.push(CodexMigrateReport {
+                thread_id: id,
+                outcome: None,
+                error: Some("Codex 会话不存在".into()),
+            });
+            continue;
+        };
+        match codex::migrate_session(&codex_home, &projects, &session.rollout_path) {
+            Ok(outcome) => results.push(CodexMigrateReport {
+                thread_id: id,
+                outcome: Some(outcome),
+                error: None,
+            }),
+            Err(error) => results.push(CodexMigrateReport {
+                thread_id: id,
+                outcome: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+fn is_uuid_like(id: &str) -> bool {
+    id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// 打开（或聚焦）某会话的预览窗口；id 进入窗口 label，须先消毒。
+/// async 必需：同步 command 在主线程创建 webview 会与消息泵死锁（Windows）
+#[tauri::command]
+async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: String) -> Result<(), String> {
+    if !matches!(kind.as_str(), "claude" | "codex") {
+        return Err("未知预览类型".into());
+    }
+    if !is_uuid_like(&id) {
+        return Err("非法会话 id".into());
+    }
+    let label = format!("preview-{id}");
+    if let Some(window) = app.get_webview_window(&label) {
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    // WebviewUrl::App 是路径而非 URL，query 会被当作文件名的一部分导致 404 白屏；
+    // 参数经 initialization_script 注入（kind/id 已过白名单与 uuid 校验）
+    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
+        .initialization_script(&format!(
+            "window.__PREVIEW__ = {{ kind: {kind:?}, id: {id:?} }};"
+        ))
+        .title(if title.is_empty() { "会话预览".into() } else { title })
+        .inner_size(760.0, 640.0)
+        .min_inner_size(480.0, 360.0)
+        .decorations(false)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_preview(kind: String, id: String) -> Result<preview::SessionPreview, String> {
+    if !is_uuid_like(&id) {
+        return Err("非法会话 id".into());
+    }
+    match kind.as_str() {
+        "claude" => {
+            let projects = cli_projects_dir()?;
+            let target = format!("{id}.jsonl");
+            let path = std::fs::read_dir(&projects)
+                .map_err(|e| e.to_string())?
+                .flatten()
+                .map(|p| p.path().join(&target))
+                .find(|p| p.is_file())
+                .ok_or("找不到该会话的转录（可能已删除或位于沙箱内）")?;
+            preview::preview_claude_jsonl(&path).map_err(|e| e.to_string())
+        }
+        "codex" => {
+            let session = codex::list_codex_sessions()
+                .into_iter()
+                .find(|s| s.thread_id == id)
+                .ok_or("找不到该 Codex 会话")?;
+            preview::preview_codex_rollout(&session.rollout_path).map_err(|e| e.to_string())
+        }
+        _ => Err("未知预览类型".into()),
+    }
+}
+
 #[tauri::command]
 fn watch_status(state: tauri::State<'_, Arc<WatchState>>) -> WatchStatus {
     state.status()
@@ -228,6 +362,11 @@ pub fn run() {
             unregister_sessions,
             list_tombstones,
             purge_tombstones,
+            list_codex_sessions,
+            codex_running,
+            migrate_codex_sessions,
+            open_preview,
+            load_preview,
             watch_status,
             watch_set_paused,
         ])
@@ -281,10 +420,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // close-to-tray keeps the watcher alive
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+            // close-to-tray keeps the watcher alive; preview windows close for real
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
             }
         })
         .run(tauri::generate_context!())
