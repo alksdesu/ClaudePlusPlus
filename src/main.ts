@@ -88,6 +88,17 @@ interface UnregisterReport {
   error: string | null;
 }
 
+interface DeleteReport {
+  target: string;
+  outcome: {
+    cliSessionId: string | null;
+    metadataRemoved: string | null;
+    tombstoneRemoved: boolean;
+    transcriptRemoved: boolean;
+  } | null;
+  error: string | null;
+}
+
 interface WatchStatus {
   running: boolean;
   paused: boolean;
@@ -159,6 +170,7 @@ interface AppState {
   maximized: boolean;
   tombstones: TombstoneInfo[];
   purgeConfirmOpen: boolean;
+  deleteConfirm: "cli" | "desktop" | null;
   expandedGroups: Set<string>;
   codexSessions: CodexSession[];
   codexRunning: boolean;
@@ -179,6 +191,7 @@ const state: AppState = {
   maximized: false,
   tombstones: [],
   purgeConfirmOpen: false,
+  deleteConfirm: null,
   expandedGroups: new Set(),
   codexSessions: [],
   codexRunning: false,
@@ -413,6 +426,40 @@ function selectExclusiveInGroup(sessionId: string) {
   state.selectedCli.add(sessionId);
 }
 
+/* 勾选里排掉已注册的：删除需要能选中它们，注册则不该重复提交 */
+function registerableSelection(): string[] {
+  const byId = new Map((state.report?.cliSessions ?? []).map((s) => [s.sessionId, s]));
+  return [...state.selectedCli].filter((id) => !byId.get(id)?.registered);
+}
+
+/* 勾中组代表 = 删掉这个逻辑会话的所有分支文件；单勾某个分支只删它自己 */
+function cliDeleteTargets(): CliSession[] {
+  const targets = new Map<string, CliSession>();
+  for (const id of state.selectedCli) {
+    const group = findCliGroup(id);
+    if (!group) continue;
+    if (group.rep.sessionId === id) {
+      targets.set(group.rep.sessionId, group.rep);
+      for (const branch of group.branches) targets.set(branch.sessionId, branch);
+    } else {
+      const branch = group.branches.find((b) => b.sessionId === id);
+      if (branch) targets.set(id, branch);
+    }
+  }
+  return [...targets.values()];
+}
+
+function desktopDeleteTargets(): { session: DesktopSession; transcript: CliSession | undefined }[] {
+  const byId = new Map((state.report?.cliSessions ?? []).map((s) => [s.sessionId, s]));
+  return [...state.selectedDesktop]
+    .map((file) => state.desktopSessions.find((s) => s.fileName === file))
+    .filter((s): s is DesktopSession => s !== undefined)
+    .map((session) => ({
+      session,
+      transcript: session.cliSessionId ? byId.get(session.cliSessionId) : undefined,
+    }));
+}
+
 function groupTitle(group: CliGroup): string {
   if (group.rep.firstUserText) return group.rep.firstUserText;
   // compact 续接的代表没有可读标题时，回退到最早分支的原始首句
@@ -431,10 +478,8 @@ function cliRowHtml(s: CliSession, options: { title?: string; branch?: boolean; 
       ? '<span class="pill pill-tombstone">墓碑</span>'
       : "";
   return `
-    <div class="session-row ${options.branch ? "branch-row" : ""} ${checked ? "selected" : ""}" data-cli="${s.sessionId}" ${
-      s.registered ? 'data-disabled="1"' : ""
-    }>
-      <input type="checkbox" ${checked ? "checked" : ""} ${s.registered ? "disabled" : ""} tabindex="-1"/>
+    <div class="session-row ${options.branch ? "branch-row" : ""} ${checked ? "selected" : ""}" data-cli="${s.sessionId}">
+      <input type="checkbox" ${checked ? "checked" : ""} tabindex="-1"/>
       <div class="session-body">
         <div class="session-title">${esc(options.title ?? s.firstUserText ?? s.sessionId)}</div>
         <div class="session-sub">
@@ -548,12 +593,44 @@ function purgeBanner(): string {
     </div>`;
 }
 
+function deleteBanner(): string {
+  if (state.deleteConfirm === null) return "";
+  const disabled = anyDesktopRunning() || state.busy;
+  let note: string;
+  if (state.deleteConfirm === "cli") {
+    const files = cliDeleteTargets();
+    const bytes = files.reduce((n, s) => n + s.sizeBytes, 0);
+    const registered = files.filter((s) => s.registered).length;
+    const branchNote =
+      files.length > state.selectedCli.size ? `（含历史分支共 ${files.length} 个文件）` : "";
+    note = `将删除 ${state.selectedCli.size} 个 CLI 会话${branchNote}，转录合计 ${sizeOf(bytes)}${
+      registered ? `；其中 ${registered} 个已注册到 Desktop，条目会一并清掉` : ""
+    }。`;
+  } else {
+    const targets = desktopDeleteTargets();
+    const withTranscript = targets.filter((t) => t.transcript !== undefined);
+    const bytes = withTranscript.reduce((n, t) => n + (t.transcript?.sizeBytes ?? 0), 0);
+    note = `将删除 ${targets.length} 个 Desktop 条目${
+      withTranscript.length ? `，连同 ${withTranscript.length} 份 CLI 转录（${sizeOf(bytes)}）` : ""
+    }。`;
+  }
+  return `
+    <div class="banner">
+      <span>${note}转录送系统回收站，可从回收站找回；Desktop 元数据不留墓碑，直接消失。</span>
+      <button class="btn btn-secondary btn-small btn-danger" data-action="delete-confirm" ${
+        disabled ? "disabled" : ""
+      }>确认删除</button>
+      <button class="btn btn-tertiary btn-small" data-action="delete-cancel">取消</button>
+    </div>`;
+}
+
 function renderMigrate(): string {
   const runningNote = anyDesktopRunning()
     ? '<div class="banner banner-error">Claude Desktop 正在运行 —— 迁移已禁用，请先退出 Desktop</div>'
     : "";
   const cliCount = state.selectedCli.size;
   const deskCount = state.selectedDesktop.size;
+  const registerable = registerableSelection().length;
   const disabled = anyDesktopRunning() || state.busy;
   return `
     <div class="view view-wide">
@@ -561,7 +638,7 @@ function renderMigrate(): string {
         <div>
           <div class="eyebrow">会话迁移</div>
           <h1>CLI 与 Desktop 互认会话</h1>
-          <p class="lead">注册 = 为 CLI 会话生成 Desktop 元数据（转录零拷贝，两边同源）；注销 = 移除 Desktop 元数据（转录保留，CLI 照常 resume）。</p>
+          <p class="lead">注册 = 为 CLI 会话生成 Desktop 元数据（转录零拷贝，两边同源）；注销 = 只移除 Desktop 元数据（转录保留，CLI 照常 resume）；删除 = 两侧痕迹一并抹掉，转录进回收站。</p>
         </div>
         <div class="head-actions">
           ${
@@ -574,18 +651,24 @@ function renderMigrate(): string {
       </div>
       ${runningNote}
       ${purgeBanner()}
+      ${deleteBanner()}
       <div class="migrate-grid">
         <div class="column">
           <div class="column-head">
             <span class="eyebrow">CLI 会话 · ~/.claude/projects</span>
             <button class="btn btn-tertiary btn-small" data-action="cli-select-all">全选可注册</button>
             <button class="btn btn-tertiary btn-small" data-action="cli-clear">清空选中</button>
+            <button class="btn btn-tertiary btn-small btn-danger" data-action="delete-cli" ${
+              cliCount === 0 || disabled ? "disabled" : ""
+            }>删除（${cliCount}）</button>
           </div>
           <div class="column-scroll" id="cli-column">${renderCliColumn()}</div>
         </div>
         <div class="migrate-actions">
-          <button class="btn btn-primary" data-action="register" ${cliCount === 0 || disabled ? "disabled" : ""}>
-            注册 → （${cliCount}）
+          <button class="btn btn-primary" data-action="register" ${
+            registerable === 0 || disabled ? "disabled" : ""
+          }>
+            注册 → （${registerable}）
           </button>
           <button class="btn btn-secondary" data-action="unregister" ${
             deskCount === 0 || disabled ? "disabled" : ""
@@ -598,6 +681,9 @@ function renderMigrate(): string {
             <span class="eyebrow">Desktop Code 会话 · 主池</span>
             <button class="btn btn-tertiary btn-small" data-action="desk-select-all">全选</button>
             <button class="btn btn-tertiary btn-small" data-action="desk-clear">清空选中</button>
+            <button class="btn btn-tertiary btn-small btn-danger" data-action="delete-desktop" ${
+              deskCount === 0 || disabled ? "disabled" : ""
+            }>删除（${deskCount}）</button>
           </div>
           <div class="column-scroll" id="desktop-column">${renderDesktopColumn()}</div>
         </div>
@@ -850,6 +936,16 @@ function windowControls(): string {
     </div>`;
 }
 
+/* 选择一变，之前那批的删除确认就失效了，避免确认的和删掉的不是同一批 */
+function syncSelection() {
+  if (state.deleteConfirm) {
+    state.deleteConfirm = null;
+    render();
+    return;
+  }
+  updateMigrateSelection();
+}
+
 /* Selection only touches row state; rebuilding innerHTML would reset the
    column scroll position, so sync the affected nodes in place. */
 function updateMigrateSelection() {
@@ -871,10 +967,21 @@ function updateMigrateSelection() {
     box.checked = reps.length > 0 && reps.every((g) => state.selectedCli.has(g.rep.sessionId));
   }
   const disabled = anyDesktopRunning() || state.busy;
+  const registerable = registerableSelection().length;
   const register = app.querySelector<HTMLButtonElement>('[data-action="register"]');
   if (register) {
-    register.textContent = `注册 → （${state.selectedCli.size}）`;
-    register.disabled = state.selectedCli.size === 0 || disabled;
+    register.textContent = `注册 → （${registerable}）`;
+    register.disabled = registerable === 0 || disabled;
+  }
+  const deleteCli = app.querySelector<HTMLButtonElement>('[data-action="delete-cli"]');
+  if (deleteCli) {
+    deleteCli.textContent = `删除（${state.selectedCli.size}）`;
+    deleteCli.disabled = state.selectedCli.size === 0 || disabled;
+  }
+  const deleteDesktop = app.querySelector<HTMLButtonElement>('[data-action="delete-desktop"]');
+  if (deleteDesktop) {
+    deleteDesktop.textContent = `删除（${state.selectedDesktop.size}）`;
+    deleteDesktop.disabled = state.selectedDesktop.size === 0 || disabled;
   }
   const unregister = app.querySelector<HTMLButtonElement>('[data-action="unregister"]');
   if (unregister) {
@@ -933,7 +1040,7 @@ async function doRegister() {
   state.busy = true;
   render();
   try {
-    const ids = [...state.selectedCli];
+    const ids = registerableSelection();
     const reports = await invoke<RegisterReport[]>("register_sessions", {
       sessionIds: ids,
       policy: "skip",
@@ -981,6 +1088,41 @@ async function doPurge(deleteTranscripts: boolean) {
         : `已清理 ${markers} 个墓碑标记，对应会话恢复为可注册`,
     );
     state.purgeConfirmOpen = false;
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
+async function doDelete() {
+  const side = state.deleteConfirm;
+  if (side === null) return;
+  state.busy = true;
+  render();
+  try {
+    const reports = await invoke<DeleteReport[]>("delete_sessions", {
+      cliSessionIds: side === "cli" ? cliDeleteTargets().map((s) => s.sessionId) : [],
+      metadataFiles: side === "desktop" ? [...state.selectedDesktop] : [],
+    });
+    let transcripts = 0;
+    let entries = 0;
+    for (const r of reports) {
+      if (r.error) {
+        toast(`${shortId(r.target)}: ${r.error}`, true);
+        continue;
+      }
+      if (r.outcome?.transcriptRemoved) transcripts += 1;
+      if (r.outcome?.metadataRemoved) entries += 1;
+    }
+    const parts = [];
+    if (transcripts) parts.push(`${transcripts} 份转录已送回收站`);
+    if (entries) parts.push(`${entries} 个 Desktop 条目已清除`);
+    toast(parts.length ? `删除完成：${parts.join("，")}` : "没有可删除的内容");
+    if (side === "cli") state.selectedCli.clear();
+    else state.selectedDesktop.clear();
+    state.deleteConfirm = null;
   } catch (error) {
     toast(String(error), true);
   } finally {
@@ -1039,6 +1181,15 @@ app.addEventListener("click", (event) => {
       state.purgeConfirmOpen = false;
       render();
     }
+    if (action === "delete-cli" || action === "delete-desktop") {
+      state.deleteConfirm = action === "delete-cli" ? "cli" : "desktop";
+      render();
+    }
+    if (action === "delete-cancel") {
+      state.deleteConfirm = null;
+      render();
+    }
+    if (action === "delete-confirm") void doDelete();
     if (action === "purge-markers") void doPurge(false);
     if (action === "purge-all") void doPurge(true);
     if (action === "cli-select-all") {
@@ -1048,21 +1199,21 @@ app.addEventListener("click", (event) => {
           if (repRegistrable(group)) state.selectedCli.add(group.rep.sessionId);
         }
       }
-      updateMigrateSelection();
+      syncSelection();
     }
     if (action === "cli-clear") {
       state.selectedCli.clear();
-      updateMigrateSelection();
+      syncSelection();
     }
     if (action === "desk-select-all") {
       for (const s of state.desktopSessions) {
         if (!s.sandboxed) state.selectedDesktop.add(s.fileName);
       }
-      updateMigrateSelection();
+      syncSelection();
     }
     if (action === "desk-clear") {
       state.selectedDesktop.clear();
-      updateMigrateSelection();
+      syncSelection();
     }
     if (action === "codex-select-native") {
       for (const s of state.codexSessions) {
@@ -1121,7 +1272,7 @@ app.addEventListener("click", (event) => {
       if (allIn) state.selectedCli.delete(s.sessionId);
       else state.selectedCli.add(s.sessionId);
     }
-    updateMigrateSelection();
+    syncSelection();
     return;
   }
   const cliRow = target.closest<HTMLElement>("[data-cli]");
@@ -1132,10 +1283,9 @@ app.addEventListener("click", (event) => {
       openPreview("claude", id, title);
       return;
     }
-    if (cliRow.dataset.disabled) return;
     if (state.selectedCli.has(id)) state.selectedCli.delete(id);
     else selectExclusiveInGroup(id);
-    updateMigrateSelection();
+    syncSelection();
     return;
   }
   const deskRow = target.closest<HTMLElement>("[data-desktop]");
@@ -1149,7 +1299,7 @@ app.addEventListener("click", (event) => {
     }
     if (state.selectedDesktop.has(file)) state.selectedDesktop.delete(file);
     else state.selectedDesktop.add(file);
-    updateMigrateSelection();
+    syncSelection();
   }
 });
 

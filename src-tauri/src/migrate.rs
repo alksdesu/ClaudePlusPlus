@@ -300,7 +300,7 @@ pub fn unregister_desktop_session(
     metadata_file: &str,
     hard_delete: bool,
 ) -> Result<UnregisterOutcome> {
-    if !metadata_file.starts_with("local_") || !metadata_file.ends_with(".json") {
+    if !is_metadata_file(metadata_file) {
         bail!("非法元数据文件名: {metadata_file}");
     }
     let path = code_dir.join(metadata_file);
@@ -358,7 +358,7 @@ pub fn list_tombstones(code_dir: &Path, projects_dir: &Path) -> Vec<TombstoneInf
     let mut tombstones = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(cli_id) = name.strip_prefix("deleted_") else {
+        let Some(cli_id) = name.strip_prefix("deleted_").filter(|id| is_session_id(id)) else {
             continue;
         };
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -415,7 +415,7 @@ pub fn purge_tombstones(
 ) -> Vec<PurgeOutcome> {
     let mut outcomes = Vec::new();
     for name in file_names {
-        let Some(cli_id) = name.strip_prefix("deleted_") else {
+        let Some(cli_id) = name.strip_prefix("deleted_").filter(|id| is_session_id(id)) else {
             outcomes.push(PurgeOutcome {
                 file_name: name.clone(),
                 marker_removed: false,
@@ -451,6 +451,113 @@ pub fn purge_tombstones(
         outcomes.push(outcome);
     }
     outcomes
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteOutcome {
+    pub cli_session_id: Option<String>,
+    pub metadata_removed: Option<String>,
+    pub tombstone_removed: bool,
+    pub transcript_removed: bool,
+}
+
+pub fn is_session_id(id: &str) -> bool {
+    id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+}
+
+/// 前缀后缀之外还须是纯文件名，否则 local_..\..\x.json 能拼出 code_dir 之外的路径
+pub fn is_metadata_file(name: &str) -> bool {
+    name.starts_with("local_")
+        && name.ends_with(".json")
+        && Path::new(name).file_name() == Some(std::ffi::OsStr::new(name))
+}
+
+/// Desktop 侧先删：转录先没了而元数据还在会留下死链条目，反序最坏只是转录
+/// 重新出现在 CLI 列表，可重试。
+fn delete_traces(
+    code_dir: &Path,
+    projects_dir: &Path,
+    cli_session_id: Option<&str>,
+    metadata_file: Option<String>,
+    recycle: bool,
+) -> Result<DeleteOutcome> {
+    let mut outcome = DeleteOutcome {
+        cli_session_id: cli_session_id.map(String::from),
+        metadata_removed: None,
+        tombstone_removed: false,
+        transcript_removed: false,
+    };
+    if let Some(name) = metadata_file {
+        let path = code_dir.join(&name);
+        if path.exists() {
+            fs::remove_file(&path).with_context(|| format!("删除元数据 {name}"))?;
+            outcome.metadata_removed = Some(name);
+        }
+    }
+    let Some(id) = cli_session_id else {
+        return Ok(outcome);
+    };
+    let tombstone = code_dir.join(format!("deleted_{id}"));
+    if tombstone.exists() {
+        fs::remove_file(&tombstone).context("移除墓碑")?;
+        outcome.tombstone_removed = true;
+    }
+    if let Some(jsonl) = find_cli_jsonl(projects_dir, id) {
+        remove_path(&jsonl, recycle)?;
+        outcome.transcript_removed = true;
+    }
+    Ok(outcome)
+}
+
+/// 从 CLI 侧删除：转录 + 它在 Desktop 的注册与墓碑一并抹掉
+pub fn delete_cli_session(
+    code_dir: &Path,
+    projects_dir: &Path,
+    cli_session_id: &str,
+    recycle: bool,
+) -> Result<DeleteOutcome> {
+    if !is_session_id(cli_session_id) {
+        bail!("非法会话 id: {cli_session_id}");
+    }
+    let metadata = find_active_registration(code_dir, cli_session_id);
+    delete_traces(
+        code_dir,
+        projects_dir,
+        Some(cli_session_id),
+        metadata,
+        recycle,
+    )
+}
+
+/// 从 Desktop 侧删除：元数据 + 墓碑 + 它指向的 CLI 转录
+pub fn delete_desktop_session(
+    code_dir: &Path,
+    projects_dir: &Path,
+    metadata_file: &str,
+    recycle: bool,
+) -> Result<DeleteOutcome> {
+    if !is_metadata_file(metadata_file) {
+        bail!("非法元数据文件名: {metadata_file}");
+    }
+    // 元数据损坏时仍要能删掉这条，读不出 cliSessionId 就只清 Desktop 侧
+    let cli_id = fs::read_to_string(code_dir.join(metadata_file))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("cliSessionId")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
+        .filter(|id| is_session_id(id));
+    delete_traces(
+        code_dir,
+        projects_dir,
+        cli_id.as_deref(),
+        Some(metadata_file.to_string()),
+        recycle,
+    )
 }
 
 #[cfg(test)]
@@ -573,16 +680,16 @@ mod tests {
         let proj = projects.join("E--P1");
         fs::create_dir_all(&proj).unwrap();
 
-        fs::write(code.join("deleted_aaa-1"), "1785000000000").unwrap();
-        fs::write(code.join("deleted_bbb-2"), "1786000000000").unwrap();
+        fs::write(code.join("deleted_aaa11111-2a0f-451d-b6eb-2e2ed6ab30a9"), "1785000000000").unwrap();
+        fs::write(code.join("deleted_bbb22222-2a0f-451d-b6eb-2e2ed6ab30a9"), "1786000000000").unwrap();
         fs::write(code.join("local_x.json"), "{}").unwrap();
-        fs::write(proj.join("aaa-1.jsonl"), "line").unwrap();
+        fs::write(proj.join("aaa11111-2a0f-451d-b6eb-2e2ed6ab30a9.jsonl"), "line").unwrap();
 
         let listed = list_tombstones(&code, &projects);
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].cli_session_id, "bbb-2"); // newest deletion first
+        assert_eq!(listed[0].cli_session_id, "bbb22222-2a0f-451d-b6eb-2e2ed6ab30a9"); // newest deletion first
         assert!(listed[0].jsonl_path.is_none());
-        let with_transcript = listed.iter().find(|t| t.cli_session_id == "aaa-1").unwrap();
+        let with_transcript = listed.iter().find(|t| t.cli_session_id == "aaa11111-2a0f-451d-b6eb-2e2ed6ab30a9").unwrap();
         assert!(with_transcript.jsonl_path.is_some());
         assert_eq!(with_transcript.jsonl_size, 4);
 
@@ -590,24 +697,24 @@ mod tests {
         let outcomes = purge_tombstones(
             &code,
             &projects,
-            &["deleted_bbb-2".to_string()],
+            &["deleted_bbb22222-2a0f-451d-b6eb-2e2ed6ab30a9".to_string()],
             false,
             false,
         );
         assert!(outcomes[0].marker_removed && !outcomes[0].transcript_removed);
-        assert!(!code.join("deleted_bbb-2").exists());
+        assert!(!code.join("deleted_bbb22222-2a0f-451d-b6eb-2e2ed6ab30a9").exists());
 
         // full purge takes the transcript too
         let outcomes = purge_tombstones(
             &code,
             &projects,
-            &["deleted_aaa-1".to_string()],
+            &["deleted_aaa11111-2a0f-451d-b6eb-2e2ed6ab30a9".to_string()],
             true,
             false,
         );
         assert!(outcomes[0].marker_removed && outcomes[0].transcript_removed);
-        assert!(!code.join("deleted_aaa-1").exists());
-        assert!(!proj.join("aaa-1.jsonl").exists());
+        assert!(!code.join("deleted_aaa11111-2a0f-451d-b6eb-2e2ed6ab30a9").exists());
+        assert!(!proj.join("aaa11111-2a0f-451d-b6eb-2e2ed6ab30a9.jsonl").exists());
 
         // invalid name is reported, not silently skipped
         let outcomes = purge_tombstones(&code, &projects, &["local_x.json".to_string()], true, false);
@@ -633,5 +740,97 @@ mod tests {
             sessions.iter().map(|s| (s.session_id.clone(), s.sandboxed)).collect();
         assert_eq!(by_id["local_a"], true);
         assert_eq!(by_id["local_b"], false);
+    }
+
+    #[test]
+    fn delete_cli_session_wipes_both_sides() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = dir.path().join("code");
+        let projects = dir.path().join("projects");
+        let proj = projects.join("E--Proj-demo");
+        fs::create_dir_all(&code).unwrap();
+        fs::create_dir_all(&proj).unwrap();
+        let cli = sample_cli(&proj);
+        register_cli_session(&code, &cli, ConflictPolicy::Skip).unwrap();
+        fs::write(code.join(format!("deleted_{}", cli.session_id)), "1785000000000").unwrap();
+
+        let outcome = delete_cli_session(&code, &projects, &cli.session_id, false).unwrap();
+        assert!(outcome.metadata_removed.is_some());
+        assert!(outcome.tombstone_removed);
+        assert!(outcome.transcript_removed);
+        assert!(!cli.jsonl_path.exists());
+        assert!(find_active_registration(&code, &cli.session_id).is_none());
+        assert!(!code.join(format!("deleted_{}", cli.session_id)).exists());
+
+        // 已经删干净后重来一次不报错，只是什么都没删
+        let again = delete_cli_session(&code, &projects, &cli.session_id, false).unwrap();
+        assert!(again.metadata_removed.is_none() && !again.transcript_removed);
+    }
+
+    #[test]
+    fn delete_desktop_session_follows_cli_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = dir.path().join("code");
+        let projects = dir.path().join("projects");
+        let proj = projects.join("E--Proj-demo");
+        fs::create_dir_all(&code).unwrap();
+        fs::create_dir_all(&proj).unwrap();
+        let cli = sample_cli(&proj);
+        let RegisterOutcome::Registered { metadata_file } =
+            register_cli_session(&code, &cli, ConflictPolicy::Skip).unwrap()
+        else {
+            panic!()
+        };
+
+        let outcome = delete_desktop_session(&code, &projects, &metadata_file, false).unwrap();
+        assert_eq!(outcome.cli_session_id.as_deref(), Some(cli.session_id.as_str()));
+        assert_eq!(outcome.metadata_removed.as_deref(), Some(metadata_file.as_str()));
+        assert!(outcome.transcript_removed);
+        assert!(!code.join(&metadata_file).exists());
+        assert!(!cli.jsonl_path.exists());
+        // 删除不留墓碑：墓碑的作用是挡住重新注册，转录都没了没有可挡的
+        assert!(!code.join(format!("deleted_{}", cli.session_id)).exists());
+    }
+
+    #[test]
+    fn delete_desktop_session_survives_broken_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = dir.path().join("code");
+        let projects = dir.path().join("projects");
+        fs::create_dir_all(&code).unwrap();
+        fs::create_dir_all(&projects).unwrap();
+        fs::write(code.join("local_broken.json"), "{ not json").unwrap();
+
+        let outcome = delete_desktop_session(&code, &projects, "local_broken.json", false).unwrap();
+        assert!(outcome.cli_session_id.is_none());
+        assert!(outcome.metadata_removed.is_some());
+        assert!(!code.join("local_broken.json").exists());
+    }
+
+    #[test]
+    fn delete_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let code = dir.path().join("code");
+        let projects = dir.path().join("projects");
+        fs::create_dir_all(&code).unwrap();
+        fs::create_dir_all(&projects).unwrap();
+        assert!(delete_cli_session(&code, &projects, "../../etc/passwd", false).is_err());
+        assert!(delete_cli_session(&code, &projects, "not-a-uuid", false).is_err());
+        assert!(delete_desktop_session(&code, &projects, "../secrets.json", false).is_err());
+        assert!(delete_desktop_session(&code, &projects, "deleted_x", false).is_err());
+        // 前缀后缀都合法，中间夹相对路径
+        assert!(delete_desktop_session(&code, &projects, "local_../../evil.json", false).is_err());
+        assert!(delete_desktop_session(&code, &projects, r"local_..\..\evil.json", false).is_err());
+        assert!(unregister_desktop_session(&code, "local_../../evil.json", false).is_err());
+        let escaped = purge_tombstones(&code, &projects, &["deleted_../../evil".to_string()], true, false);
+        assert!(escaped[0].error.is_some());
+        // 元数据里塞非法 cliSessionId 也不能带着拼路径
+        fs::write(
+            code.join("local_evil.json"),
+            r#"{"cliSessionId":"../../../boom"}"#,
+        )
+        .unwrap();
+        let outcome = delete_desktop_session(&code, &projects, "local_evil.json", false).unwrap();
+        assert!(outcome.cli_session_id.is_none());
     }
 }

@@ -18,7 +18,8 @@ use tauri::{Emitter, Manager};
 use codex::{CodexSession, MigrateOutcome};
 use discovery::{DiscoveryReport, PoolKind};
 use migrate::{
-    ConflictPolicy, DesktopSession, PurgeOutcome, RegisterOutcome, TombstoneInfo, UnregisterOutcome,
+    ConflictPolicy, DeleteOutcome, DesktopSession, PurgeOutcome, RegisterOutcome, TombstoneInfo,
+    UnregisterOutcome,
 };
 use unify::{UnifyPlan, UnifyReport};
 use watch::{WatchState, WatchStatus};
@@ -214,6 +215,66 @@ fn purge_tombstones(
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteReport {
+    pub target: String,
+    pub outcome: Option<DeleteOutcome>,
+    pub error: Option<String>,
+}
+
+/// 彻底删除会话：Desktop 元数据 + 墓碑 + CLI 转录（转录走回收站）。
+/// 与 unregister 的分工——注销只退回 CLI 侧，删除是两边一起消失。
+#[tauri::command]
+fn delete_sessions(
+    cli_session_ids: Vec<String>,
+    metadata_files: Vec<String>,
+) -> Result<Vec<DeleteReport>, String> {
+    ensure_desktop_stopped()?;
+    let code_dir = canonical_code_dir()?;
+    let projects_dir = cli_projects_dir()?;
+    let mut results = Vec::new();
+    let mut done: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Desktop 侧先做：它能解出 cliSessionId，两侧勾到同一会话时不会删第二遍
+    for file in metadata_files {
+        match migrate::delete_desktop_session(&code_dir, &projects_dir, &file, true) {
+            Ok(outcome) => {
+                if let Some(id) = outcome.cli_session_id.clone() {
+                    done.insert(id);
+                }
+                results.push(DeleteReport {
+                    target: file,
+                    outcome: Some(outcome),
+                    error: None,
+                });
+            }
+            Err(error) => results.push(DeleteReport {
+                target: file,
+                outcome: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    for id in cli_session_ids {
+        if !done.insert(id.clone()) {
+            continue;
+        }
+        match migrate::delete_cli_session(&code_dir, &projects_dir, &id, true) {
+            Ok(outcome) => results.push(DeleteReport {
+                target: id,
+                outcome: Some(outcome),
+                error: None,
+            }),
+            Err(error) => results.push(DeleteReport {
+                target: id,
+                outcome: None,
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+    Ok(results)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexMigrateReport {
     pub thread_id: String,
     pub outcome: Option<MigrateOutcome>,
@@ -265,10 +326,6 @@ fn migrate_codex_sessions(thread_ids: Vec<String>) -> Result<Vec<CodexMigrateRep
     Ok(results)
 }
 
-fn is_uuid_like(id: &str) -> bool {
-    id.len() == 36 && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
-}
-
 /// 打开（或聚焦）某会话的预览窗口；id 进入窗口 label，须先消毒。
 /// async 必需：同步 command 在主线程创建 webview 会与消息泵死锁（Windows）
 #[tauri::command]
@@ -276,7 +333,7 @@ async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: St
     if !matches!(kind.as_str(), "claude" | "codex") {
         return Err("未知预览类型".into());
     }
-    if !is_uuid_like(&id) {
+    if !migrate::is_session_id(&id) {
         return Err("非法会话 id".into());
     }
     let label = format!("preview-{id}");
@@ -301,7 +358,7 @@ async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: St
 
 #[tauri::command]
 fn load_preview(kind: String, id: String) -> Result<preview::SessionPreview, String> {
-    if !is_uuid_like(&id) {
+    if !migrate::is_session_id(&id) {
         return Err("非法会话 id".into());
     }
     match kind.as_str() {
@@ -362,6 +419,7 @@ pub fn run() {
             unregister_sessions,
             list_tombstones,
             purge_tombstones,
+            delete_sessions,
             list_codex_sessions,
             codex_running,
             migrate_codex_sessions,
