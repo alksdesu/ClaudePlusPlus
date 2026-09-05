@@ -1,5 +1,6 @@
 pub mod codex;
 pub mod discovery;
+pub mod fastmode;
 pub mod link;
 pub mod migrate;
 pub mod preview;
@@ -17,6 +18,7 @@ use tauri::{Emitter, Manager};
 
 use codex::{CodexSession, MigrateOutcome};
 use discovery::{DiscoveryReport, PoolKind};
+use fastmode::{ActionReport, FastModeSettings, FastModeStatus};
 use migrate::{
     ConflictPolicy, DeleteOutcome, DesktopSession, PurgeOutcome, RegisterOutcome, TombstoneInfo,
     UnregisterOutcome,
@@ -396,6 +398,26 @@ fn watch_set_paused(state: tauri::State<'_, Arc<WatchState>>, paused: bool) -> W
     state.status()
 }
 
+#[tauri::command(async)]
+fn fastmode_status() -> FastModeStatus {
+    fastmode::status()
+}
+
+#[tauri::command(async)]
+fn fastmode_install() -> Result<ActionReport, String> {
+    fastmode::install().map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn fastmode_uninstall() -> Result<ActionReport, String> {
+    fastmode::uninstall().map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn fastmode_set_auto(auto: bool) -> Result<FastModeSettings, String> {
+    fastmode::set_auto(auto).map_err(|e| e.to_string())
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -405,6 +427,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // 提权子进程：只做 renderer 写操作，不起窗口不起托盘
+    if let Some(mode) = fastmode::elevated_mode_from_args() {
+        std::process::exit(fastmode::run_elevated(&mode));
+    }
     let watch_state = Arc::new(WatchState::new());
 
     tauri::Builder::default()
@@ -428,18 +454,22 @@ pub fn run() {
             load_preview,
             watch_status,
             watch_set_paused,
+            fastmode_status,
+            fastmode_install,
+            fastmode_uninstall,
+            fastmode_set_auto,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
             let emitter = handle.clone();
-            watch::spawn(watch_state.clone(), move |summary| {
-                let _ = emitter.emit("unify-auto", summary);
+            watch::spawn(watch_state.clone(), move |kind, payload| {
+                let _ = emitter.emit(kind, payload);
             });
 
             let open = MenuItem::with_id(app, "open", "打开 Claude++", true, None::<&str>)?;
             let rescan = MenuItem::with_id(app, "rescan", "立即扫描并归一", true, None::<&str>)?;
-            let pause = MenuItem::with_id(app, "pause", "暂停自动归一", true, None::<&str>)?;
-            let resume = MenuItem::with_id(app, "resume", "恢复自动归一", true, None::<&str>)?;
+            let pause = MenuItem::with_id(app, "pause", "暂停自动守护", true, None::<&str>)?;
+            let resume = MenuItem::with_id(app, "resume", "恢复自动守护", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &rescan, &pause, &resume, &quit])?;
 

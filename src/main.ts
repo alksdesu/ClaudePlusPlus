@@ -99,10 +99,41 @@ interface DeleteReport {
   error: string | null;
 }
 
+type WrapperState = "deployed" | "absent" | "broken" | "noCli";
+type RendererState = "patched" | "pristine" | "mismatch" | "notFound" | "unreadable";
+
+interface FastModeSettings {
+  auto: boolean;
+  installed: boolean;
+  lastRepair: string | null;
+  patchedDesktopVersion: string | null;
+  patchedCliVersion: string | null;
+  lastFailure: string | null;
+  failedFor: string | null;
+}
+
+interface FastModeStatus {
+  supported: boolean;
+  desktopVersion: string | null;
+  msixPath: string | null;
+  cliVersion: string | null;
+  cliDir: string | null;
+  wrapper: WrapperState;
+  renderer: { file: string | null; state: RendererState; missingAnchors: string[] };
+  settings: FastModeSettings;
+  speed: { sessions: number; fast: number; standard: number };
+}
+
+interface FastModeReport {
+  wrapper: string;
+  renderer: string;
+}
+
 interface WatchStatus {
   running: boolean;
   paused: boolean;
   pendingUnify: boolean;
+  pendingFastmode: boolean;
   lastEvent: string | null;
 }
 
@@ -158,7 +189,7 @@ interface PurgeOutcome {
 }
 
 interface AppState {
-  tab: "unify" | "migrate" | "codex";
+  tab: "unify" | "migrate" | "codex" | "fastmode";
   report: DiscoveryReport | null;
   plans: UnifyPlan[];
   desktopSessions: DesktopSession[];
@@ -176,6 +207,7 @@ interface AppState {
   codexRunning: boolean;
   selectedCodex: Set<string>;
   codexFilter: CodexFilter;
+  fastmode: FastModeStatus | null;
 }
 
 const state: AppState = {
@@ -197,6 +229,7 @@ const state: AppState = {
   codexRunning: false,
   selectedCodex: new Set(),
   codexFilter: "all",
+  fastmode: null,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -275,6 +308,11 @@ async function refresh() {
   } catch {
     state.codexSessions = [];
     state.codexRunning = false;
+  }
+  try {
+    state.fastmode = await invoke<FastModeStatus>("fastmode_status");
+  } catch {
+    state.fastmode = null;
   }
   render();
 }
@@ -898,8 +936,9 @@ async function initPreview(kind: string, id: string) {
 function watchChip(): string {
   const w = state.watch;
   if (!w) return "";
-  const stateName = w.paused ? "paused" : w.pendingUnify ? "pending" : "running";
-  const label = w.paused ? "守护已暂停" : w.pendingUnify ? "等待 Desktop 退出" : "守护运行中";
+  const waiting = w.pendingUnify || w.pendingFastmode;
+  const stateName = w.paused ? "paused" : waiting ? "pending" : "running";
+  const label = w.paused ? "守护已暂停" : waiting ? "等待 Desktop 退出" : "守护运行中";
   return `<div class="watch-chip" data-state="${stateName}" title="${esc(w.lastEvent ?? "")}">
     <span class="watch-dot"></span>${label}
   </div>`;
@@ -1006,11 +1045,20 @@ function render() {
         <button class="tab ${state.tab === "unify" ? "active" : ""}" data-tab="unify">存储归一</button>
         <button class="tab ${state.tab === "migrate" ? "active" : ""}" data-tab="migrate">会话迁移</button>
         <button class="tab ${state.tab === "codex" ? "active" : ""}" data-tab="codex">Codex 会话迁移</button>
+        <button class="tab ${state.tab === "fastmode" ? "active" : ""}" data-tab="fastmode">Fast Mode</button>
       </nav>
       ${watchChip()}
       ${windowControls()}
     </header>
-    <main>${state.tab === "unify" ? renderUnify() : state.tab === "migrate" ? renderMigrate() : renderCodex()}</main>
+    <main>${
+      state.tab === "unify"
+        ? renderUnify()
+        : state.tab === "migrate"
+          ? renderMigrate()
+          : state.tab === "codex"
+            ? renderCodex()
+            : renderFastMode()
+    }</main>
   `;
   for (const [id, top] of scrollTops) {
     const column = document.getElementById(id);
@@ -1155,6 +1203,165 @@ async function doUnregister() {
   }
 }
 
+/* ---------- Fast Mode 页 ---------- */
+
+const WRAPPER_META: Record<WrapperState, { label: string; cls: string }> = {
+  deployed: { label: "wrapper 在位", cls: "pill-registered" },
+  absent: { label: "官方原样", cls: "pill-pending" },
+  broken: { label: "状态异常", cls: "pill-tombstone" },
+  noCli: { label: "未找到 CLI", cls: "pill-foreign" },
+};
+
+const RENDERER_META: Record<RendererState, { label: string; cls: string }> = {
+  patched: { label: "已 patch", cls: "pill-registered" },
+  pristine: { label: "官方原样", cls: "pill-pending" },
+  mismatch: { label: "锚点失配", cls: "pill-tombstone" },
+  notFound: { label: "未找到", cls: "pill-foreign" },
+  unreadable: { label: "不可读", cls: "pill-foreign" },
+};
+
+function renderFastMode(): string {
+  const fm = state.fastmode;
+  const head = `
+      <div class="page-head">
+        <div>
+          <div class="eyebrow">Fast Mode</div>
+          <h1>让 API key 登录的 Desktop 也能 fast</h1>
+          <p class="lead">3p 模式下官方把 fast 能力位硬编码为封锁，但服务端对有资格的 Console key 是放行的。wrapper 顶替 bundled CLI 把 fastMode 合并进启动参数，renderer patch 亮出实时开关；Desktop 或 CLI 更新后由托盘守护自动补上。</p>
+        </div>
+        <div class="head-actions">
+          <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
+          ${
+            fm?.supported
+              ? `<button class="btn btn-secondary" data-action="fastmode-uninstall" ${
+                  anyDesktopRunning() || state.busy || (fm.wrapper !== "deployed" && fm.renderer.state !== "patched")
+                    ? "disabled"
+                    : ""
+                }>还原官方</button>
+                <button class="btn btn-primary" data-action="fastmode-install" ${
+                  anyDesktopRunning() || state.busy ? "disabled" : ""
+                }>${fm.settings.installed ? "修复 · 重新 patch" : "安装"}</button>`
+              : ""
+          }
+        </div>
+      </div>`;
+  if (!fm) {
+    return `<div class="view">${head}<div class="empty-note">Fast Mode 状态读取失败，请重新扫描</div></div>`;
+  }
+  if (!fm.supported) {
+    return `<div class="view">${head}<div class="banner">Fast Mode 解锁依赖 Windows 版 Desktop 的 MSIX 布局，当前系统不支持。</div></div>`;
+  }
+  const runningNote = anyDesktopRunning()
+    ? '<div class="banner banner-error">Claude Desktop 正在运行 —— 安装与还原需要替换它加载的文件，请先退出 Desktop</div>'
+    : "";
+  const pendingNote = state.watch?.pendingFastmode
+    ? '<div class="banner">检测到 Desktop 或 CLI 已更新，守护会在 Desktop 退出后自动重新 patch（renderer 部分会弹一次 UAC）</div>'
+    : "";
+  const failureNote = fm.settings.lastFailure
+    ? `<div class="banner banner-error">上次自动修复失败：${esc(fm.settings.lastFailure)}。同一版本不再自动重试，点「修复」手动执行</div>`
+    : "";
+  const wrapper = WRAPPER_META[fm.wrapper];
+  const renderer = RENDERER_META[fm.renderer.state];
+  const anchorsNote =
+    fm.renderer.state === "mismatch"
+      ? `<span>未命中：${fm.renderer.missingAnchors.map(esc).join("、")}（Desktop 大版本变化，需重新适配锚点；wrapper 仍让 Opus 会话默认 fast）</span>`
+      : "";
+  const total = fm.speed.fast + fm.speed.standard;
+  const speedNote =
+    total === 0
+      ? "最近的 3p 会话里还没有 Opus 5 / 4.8 的回复"
+      : `最近 ${fm.speed.sessions} 个 3p 会话中 Opus 5 / 4.8 的回复：<strong>fast ${fm.speed.fast}</strong> · standard ${fm.speed.standard}`;
+  const settings = fm.settings;
+  return `
+    <div class="view">
+      ${head}
+      ${runningNote}
+      ${pendingNote}
+      ${failureNote}
+      <section class="column-section">
+        <div class="eyebrow">组件状态</div>
+        <div class="card">
+          <div class="card-title">
+            <span>Claude Desktop · renderer patch</span>
+            <span class="pill ${renderer.cls}">${renderer.label}</span>
+          </div>
+          <div class="card-meta">
+            <span>版本 <span class="mono">${esc(fm.desktopVersion ?? "—")}</span></span>
+            ${fm.renderer.file ? `<span>文件 <span class="mono">${esc(fm.renderer.file)}</span></span>` : ""}
+            ${fm.msixPath ? `<span class="mono">${esc(fm.msixPath)}</span>` : ""}
+            ${anchorsNote}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">
+            <span>bundled CLI · wrapper</span>
+            <span class="pill ${wrapper.cls}">${wrapper.label}</span>
+          </div>
+          <div class="card-meta">
+            <span>版本 <span class="mono">${esc(fm.cliVersion ?? "—")}</span></span>
+            ${fm.cliDir ? `<span class="mono">${esc(fm.cliDir)}</span>` : ""}
+            ${fm.wrapper === "deployed" ? "<span>官方 CLI 藏为 claude-real.exe，Desktop 只校验 .verified 不比 exe 本体</span>" : ""}
+          </div>
+        </div>
+      </section>
+      <section class="column-section">
+        <div class="eyebrow">自动守护</div>
+        <div class="card">
+          <div class="card-title">
+            <label class="toggle">
+              <input type="checkbox" data-action="fastmode-auto" ${settings.auto ? "checked" : ""} ${state.busy ? "disabled" : ""}/>
+              <span>Desktop / CLI 更新后自动重新 patch</span>
+            </label>
+            <span class="pill ${settings.installed ? "pill-registered" : "pill-pending"}">${settings.installed ? "已安装" : "未安装"}</span>
+          </div>
+          <div class="card-meta">
+            <span>${settings.installed ? "守护只对已安装的机器生效；还原官方即停止" : "安装后生效"}</span>
+            ${settings.lastRepair ? `<span>上次修复 ${esc(settings.lastRepair)}</span>` : ""}
+            ${
+              settings.patchedDesktopVersion
+                ? `<span>已 patch：Desktop <span class="mono">${esc(settings.patchedDesktopVersion)}</span> · CLI <span class="mono">${esc(settings.patchedCliVersion ?? "—")}</span></span>`
+                : ""
+            }
+          </div>
+        </div>
+      </section>
+      <section class="column-section">
+        <div class="eyebrow">验证是否真 fast</div>
+        <div class="card">
+          <div class="card-meta">
+            <span>${speedNote}</span>
+            <span>以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。Opus 4.6 服务端已不再提供 fast，按钮对它不显示</span>
+          </div>
+        </div>
+      </section>
+    </div>`;
+}
+
+async function doFastMode(action: "install" | "uninstall") {
+  state.busy = true;
+  render();
+  try {
+    const report = await invoke<FastModeReport>(action === "install" ? "fastmode_install" : "fastmode_uninstall");
+    toast(`${report.wrapper}；${report.renderer}`);
+  } catch (error) {
+    toast(String(error), true);
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
+async function doFastModeAuto(auto: boolean) {
+  try {
+    const settings = await invoke<FastModeSettings>("fastmode_set_auto", { auto });
+    if (state.fastmode) state.fastmode.settings = settings;
+    toast(auto ? "自动守护已开启" : "自动守护已关闭");
+  } catch (error) {
+    toast(String(error), true);
+  }
+  render();
+}
+
 function initMain() {
 app.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
@@ -1190,6 +1397,9 @@ app.addEventListener("click", (event) => {
       render();
     }
     if (action === "delete-confirm") void doDelete();
+    if (action === "fastmode-install") void doFastMode("install");
+    if (action === "fastmode-uninstall") void doFastMode("uninstall");
+    if (action === "fastmode-auto") void doFastModeAuto((target as HTMLInputElement).checked);
     if (action === "purge-markers") void doPurge(false);
     if (action === "purge-all") void doPurge(true);
     if (action === "cli-select-all") {
@@ -1310,6 +1520,11 @@ void listen<string>("unify-auto", (event) => {
 void listen<string>("unify-blocked", (event) => toast(`归一挂起：${event.payload}`, true));
 void listen<string>("unify-noop", (event) => toast(event.payload));
 void listen<string>("unify-error", (event) => toast(`归一失败：${event.payload}`, true));
+void listen<string>("fastmode-auto", (event) => {
+  toast(`Fast Mode 已自动修复：${event.payload}`);
+  void refresh();
+});
+void listen<string>("fastmode-error", (event) => toast(`Fast Mode 自动修复失败：${event.payload}`, true));
 
 /* Maximize toggles can come from the drag region double-click or Win+arrow,
    so track real window state instead of assuming the button was the trigger. */

@@ -796,3 +796,46 @@ main {
   text-align: center;
   color: var(--theme-foreground-tertiary);
 }
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-8);
+  cursor: pointer;
+}
+
+.toggle input[type="checkbox"] {
+  appearance: none;
+  width: var(--sp-32);
+  height: var(--sp-16);
+  margin: 0;
+  border-radius: var(--sp-16);
+  background: var(--theme-border-primary);
+  position: relative;
+  flex-shrink: 0;
+}
+
+.toggle input[type="checkbox"]::before {
+  content: "";
+  position: absolute;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  width: var(--sp-12);
+  height: var(--sp-12);
+  border-radius: var(--sp-12);
+  background: var(--color-gray-000);
+}
+
+.toggle input[type="checkbox"]:checked {
+  background: var(--color-gray-950);
+}
+
+.toggle input[type="checkbox"]:checked::before {
+  left: auto;
+  right: var(--sp-2);
+}
+
+.toggle input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
