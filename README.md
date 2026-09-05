@@ -64,6 +64,29 @@ Claude++ 针对这两层分别下手。
 6. 任意页面单击会话行即可预览完整对话内容
 7. 「Fast Mode」页 → 安装（需先退出 Desktop，renderer 部分弹一次 UAC）→ 保持自动守护开启，Desktop 或 CLI 更新后会自动补上；页面底部按转录里的 `usage.speed` 验证是否真 fast
 
+### Fast Mode 解锁（Windows）
+
+> 前提：Console API key 本身已开通 fast mode（服务端资格）。这里只解**客户端**的封锁，不绕服务端计费与授权。
+
+Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能力位硬编码为 `blocked_by_platform`：UI 不出开关，bundled CLI 落进 `sdk_opt_in_required`。但客户端唯一的钥匙是 `flagSettings.fastMode`，它只从 CLI 的 `--settings` 参数读取；而 UI 开关背后的 `setFastMode` IPC 在 host 侧没有门控。于是：
+
+| 组件 | 做法 | 落点 |
+|---|---|---|
+| wrapper | 顶替版本目录的 `claude.exe`，把 `fastMode:true` 合并进 `--settings` 后转发给改名保留的 `claude-real.exe`；Desktop 只校验 `.verified` 不比 exe 本体 | `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\` |
+| renderer patch | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
+
+wrapper 管"会话默认 fast"，开关管"实时切换"。写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动自身完成 renderer 改动（弹一次 UAC），提权进程不接受任何路径参数。
+
+| 模型 | fast |
+|---|---|
+| Opus 5 / Opus 4.8 | 真 fast |
+| Opus 4.6 | 服务端已不再提供，开关不显示 |
+| 其他 | 不支持，开关隐藏 |
+
+验证以转录里的 `usage.speed` 为准（页面底部的验证卡统计的就是它），Desktop 状态栏的 Fast 标签有官方显示 bug。
+
+Desktop 更新会同时换掉 CLI 版本目录和 renderer。守护线程监控 CLI 目录并定期核对 MSIX 版本，失效即自动补上；Desktop 运行中则等它退出后执行。若 Desktop 大版本改动让三处锚点匹配不上，页面会列出未命中项：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`。「还原官方」一键撤销全部改动。
+
 ### 构建
 
 ```bash
@@ -144,6 +167,29 @@ Claude++ addresses both layers.
 5. Codex tab → filter "not in Claude" → migrate in one click (quit Codex first), then register the results on the Migrate tab to open them in Desktop
 6. Click any session row on any tab to preview the full conversation
 7. Fast Mode tab → Install (quit Desktop first; the renderer step prompts UAC once) → leave auto-guard on and updates to Desktop or the CLI get patched again on their own; the bottom card verifies real fast via `usage.speed` in the transcripts
+
+### Fast Mode unlock (Windows)
+
+> Prerequisite: the Console API key itself is entitled to fast mode server-side. This removes the **client-side** block only; billing and entitlement stay with the server.
+
+Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast-mode capability is hard-coded to `blocked_by_platform`: no toggle in the UI, and the bundled CLI lands in `sdk_opt_in_required`. Yet the only client-side key is `flagSettings.fastMode`, read solely from the CLI's `--settings` flag, and the `setFastMode` IPC behind the toggle has no gate on the host side. Hence:
+
+| Component | How | Location |
+|---|---|---|
+| wrapper | Replaces `claude.exe` in the version directory, merges `fastMode:true` into `--settings` and forwards to the renamed `claude-real.exe`; Desktop only checks `.verified`, never the exe itself | `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\` |
+| renderer patch | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
+
+The wrapper makes sessions fast by default; the toggle switches at runtime. Writing under WindowsApps needs administrator rights: Claude++ relaunches itself with a fixed flag to apply the renderer change (one UAC prompt), and the elevated helper accepts no path arguments.
+
+| Model | fast |
+|---|---|
+| Opus 5 / Opus 4.8 | real fast |
+| Opus 4.6 | no longer served fast by the backend; toggle hidden |
+| others | unsupported; toggle hidden |
+
+Trust `usage.speed` in the transcript (the verification card at the bottom of the tab counts exactly that); the Fast label in Desktop's status bar has a known display bug.
+
+A Desktop update replaces both the CLI version directory and the renderer. The daemon watches the CLI directory and periodically checks the MSIX version, repairing as soon as something is missing, or waiting for Desktop to exit first. If a major Desktop release changes the renderer so the three anchors no longer match, the tab lists the misses: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics. "Restore official" undoes everything in one click.
 
 ### Build
 
