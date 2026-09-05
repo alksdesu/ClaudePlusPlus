@@ -369,7 +369,12 @@ fn register_import_record(codex: &Path, thread_id: &str, dest: &Path, content: &
         Ok(text) => serde_json::from_str(&text)?,
         Err(_) => serde_json::json!({"records": []}),
     };
-    let win_path = format!("\\\\?\\{}", dest.display().to_string().replace('/', "\\"));
+    // Codex 的台账在 Windows 记 \\?\ 前缀的扩展路径，其他平台是普通绝对路径；格式不一致就匹配不上，防循环失效
+    let ledger_path = if cfg!(windows) {
+        format!("\\\\?\\{}", dest.display().to_string().replace('/', "\\"))
+    } else {
+        dest.display().to_string()
+    };
     let records = value
         .get_mut("records")
         .and_then(|v| v.as_array_mut())
@@ -377,13 +382,13 @@ fn register_import_record(codex: &Path, thread_id: &str, dest: &Path, content: &
     let sha = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
     if let Some(existing) = records.iter_mut().find(|r| {
         r.get("imported_thread_id").and_then(|v| v.as_str()) == Some(thread_id)
-            && r.get("source_path").and_then(|v| v.as_str()) == Some(win_path.as_str())
+            && r.get("source_path").and_then(|v| v.as_str()) == Some(ledger_path.as_str())
     }) {
         existing["content_sha256"] = serde_json::Value::String(sha);
         existing["source_modified_at"] = serde_json::json!((last_secs * 1e9) as u64);
     } else {
         records.push(serde_json::json!({
-            "source_path": win_path,
+            "source_path": ledger_path,
             "content_sha256": sha,
             "imported_thread_id": thread_id,
             "imported_at": last_secs as u64,

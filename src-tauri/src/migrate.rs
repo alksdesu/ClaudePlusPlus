@@ -820,6 +820,8 @@ mod tests {
         assert!(delete_desktop_session(&code, &projects, "deleted_x", false).is_err());
         // 前缀后缀都合法，中间夹相对路径
         assert!(delete_desktop_session(&code, &projects, "local_../../evil.json", false).is_err());
+        // 反斜杠只在 Windows 是分隔符，mac 上这是个合法文件名
+        #[cfg(windows)]
         assert!(delete_desktop_session(&code, &projects, r"local_..\..\evil.json", false).is_err());
         assert!(unregister_desktop_session(&code, "local_../../evil.json", false).is_err());
         let escaped = purge_tombstones(&code, &projects, &["deleted_../../evil".to_string()], true, false);
