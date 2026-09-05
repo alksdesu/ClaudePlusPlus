@@ -59,7 +59,7 @@ impl WatchState {
 /// Merge every non-junction, non-canonical combo. Returns a human summary
 /// when anything was merged.
 pub fn unify_new_combos() -> anyhow::Result<Option<String>> {
-    let report = discovery::scan_all();
+    let report = discovery::scan_combos();
     let mut merged = 0usize;
     let mut notes = Vec::new();
     for pool in [PoolKind::Code, PoolKind::Agent] {
@@ -94,7 +94,7 @@ fn watch_roots() -> Vec<PathBuf> {
 }
 
 fn has_unmerged_combo() -> bool {
-    let report = discovery::scan_all();
+    let report = discovery::scan_combos();
     [PoolKind::Code, PoolKind::Agent].into_iter().any(|pool| {
         unify::plan_unify(&report.combos, pool)
             .map(|plan| !plan.to_merge.is_empty())

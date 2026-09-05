@@ -1,5 +1,15 @@
 fn main() {
+    use std::time::Instant;
+    let t = Instant::now();
+    let combos = claude_plus_plus_lib::discovery::scan_combos();
+    println!("== timing ==");
+    println!("  scan_combos: {:?}  ({} combos)", t.elapsed(), combos.combos.len());
+    let t = Instant::now();
     let report = claude_plus_plus_lib::discovery::scan_all();
+    println!("  scan_all #1 (cold bridge cache): {:?}", t.elapsed());
+    let t = Instant::now();
+    let _ = claude_plus_plus_lib::discovery::scan_all();
+    println!("  scan_all #2 (warm bridge cache): {:?}", t.elapsed());
     println!("== roots ==");
     for root in &report.roots {
         println!(

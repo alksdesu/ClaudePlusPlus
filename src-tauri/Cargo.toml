@@ -1,6 +1,6 @@
 [package]
 name = "claude-plus-plus"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 
@@ -20,6 +20,7 @@ base64 = "0.22"
 chrono = "0.4"
 dirs = "6"
 filetime = "0.2"
+memchr = "2"
 notify = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

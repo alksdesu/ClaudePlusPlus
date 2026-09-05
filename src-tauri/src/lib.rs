@@ -47,12 +47,13 @@ pub struct UnregisterReport {
     pub error: Option<String>,
 }
 
-#[tauri::command]
+// 同步 command 默认跑在 UI 线程；标 async 让它们进线程池，扫描、子进程、大文件读都不再冻结窗口
+#[tauri::command(async)]
 fn scan() -> DiscoveryReport {
     discovery::scan_all()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn desktop_running() -> Vec<RunningDesktop> {
     let lines = procs::desktop_command_lines();
     discovery::default_roots()
@@ -64,9 +65,9 @@ fn desktop_running() -> Vec<RunningDesktop> {
         .collect()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn plan_unify_all() -> Vec<UnifyPlan> {
-    let report = discovery::scan_all();
+    let report = discovery::scan_combos();
     [PoolKind::Code, PoolKind::Agent]
         .into_iter()
         .filter_map(|pool| unify::plan_unify(&report.combos, pool))
@@ -80,10 +81,10 @@ fn ensure_desktop_stopped() -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn apply_unify_all() -> Result<Vec<UnifyReport>, String> {
     ensure_desktop_stopped()?;
-    let report = discovery::scan_all();
+    let report = discovery::scan_combos();
     let mut results = Vec::new();
     for pool in [PoolKind::Code, PoolKind::Agent] {
         if let Some(plan) = unify::plan_unify(&report.combos, pool) {
@@ -96,23 +97,23 @@ fn apply_unify_all() -> Result<Vec<UnifyReport>, String> {
     Ok(results)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn restore_combo(path: String, org_id: String) -> Result<(), String> {
     ensure_desktop_stopped()?;
     unify::restore_combo(&PathBuf::from(path), &org_id).map_err(|e| e.to_string())
 }
 
 fn canonical_code_dir() -> Result<PathBuf, String> {
-    let report = discovery::scan_all();
+    let report = discovery::scan_combos();
     migrate::canonical_code_dir_from(&report.combos).ok_or_else(|| "未发现任何 code 会话池".into())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_desktop_sessions() -> Result<Vec<DesktopSession>, String> {
     Ok(migrate::list_desktop_sessions(&canonical_code_dir()?))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<RegisterReport>, String> {
     ensure_desktop_stopped()?;
     let policy = match policy.as_str() {
@@ -164,7 +165,7 @@ fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<Reg
     Ok(results)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn unregister_sessions(metadata_files: Vec<String>, hard_delete: bool) -> Result<Vec<UnregisterReport>, String> {
     ensure_desktop_stopped()?;
     let code_dir = canonical_code_dir()?;
@@ -190,7 +191,7 @@ fn cli_projects_dir() -> Result<PathBuf, String> {
     discovery::cli_projects_dir().ok_or_else(|| "找不到 ~/.claude/projects".into())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_tombstones() -> Result<Vec<TombstoneInfo>, String> {
     Ok(migrate::list_tombstones(
         &canonical_code_dir()?,
@@ -198,7 +199,7 @@ fn list_tombstones() -> Result<Vec<TombstoneInfo>, String> {
     ))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn purge_tombstones(
     file_names: Vec<String>,
     delete_transcripts: bool,
@@ -223,7 +224,7 @@ pub struct DeleteReport {
 
 /// 彻底删除会话：Desktop 元数据 + 墓碑 + CLI 转录（转录走回收站）。
 /// 与 unregister 的分工——注销只退回 CLI 侧，删除是两边一起消失。
-#[tauri::command]
+#[tauri::command(async)]
 fn delete_sessions(
     cli_session_ids: Vec<String>,
     metadata_files: Vec<String>,
@@ -281,17 +282,17 @@ pub struct CodexMigrateReport {
     pub error: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_codex_sessions() -> Vec<CodexSession> {
     codex::list_codex_sessions()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn codex_running() -> bool {
     procs::codex_running()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn migrate_codex_sessions(thread_ids: Vec<String>) -> Result<Vec<CodexMigrateReport>, String> {
     // 迁移会写 Codex 的导入记录（防循环），Codex 运行中可能覆盖它
     if procs::codex_running() {
@@ -356,7 +357,7 @@ async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: St
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn load_preview(kind: String, id: String) -> Result<preview::SessionPreview, String> {
     if !migrate::is_session_id(&id) {
         return Err("非法会话 id".into());

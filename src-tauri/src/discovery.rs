@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use base64::Engine;
 use serde::Serialize;
@@ -313,6 +315,10 @@ fn file_contains(path: &Path, needles: &[String]) -> bool {
     let Ok(mut file) = fs::File::open(path) else {
         return false;
     };
+    let finders: Vec<memchr::memmem::Finder> = needles
+        .iter()
+        .map(|n| memchr::memmem::Finder::new(n.as_bytes()))
+        .collect();
     let overlap = needles.iter().map(|n| n.len()).max().unwrap_or(0).saturating_sub(1);
     let mut window: Vec<u8> = Vec::with_capacity(SCAN_CHUNK_BYTES + overlap);
     let mut chunk = vec![0u8; SCAN_CHUNK_BYTES];
@@ -324,15 +330,35 @@ fn file_contains(path: &Path, needles: &[String]) -> bool {
             return false;
         }
         window.extend_from_slice(&chunk[..read]);
-        if needles
-            .iter()
-            .any(|n| window.windows(n.len()).any(|w| w == n.as_bytes()))
-        {
+        if finders.iter().any(|f| f.find(&window).is_some()) {
             return true;
         }
         let keep = window.len().saturating_sub(overlap);
         window.drain(..keep);
     }
+}
+
+static BRIDGE_CACHE: OnceLock<Mutex<HashMap<(PathBuf, String), (u64, bool)>>> = OnceLock::new();
+
+/// jsonl 只追加不改写：命中过的文件再长也还命中，未命中只在长度不变时可信
+fn bridged(path: &Path, boundary: &str) -> bool {
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let key = (path.to_path_buf(), boundary.to_string());
+    let cache = BRIDGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = cache.lock().unwrap().get(&key).copied();
+    if let Some((seen_len, found)) = cached {
+        if (found && len >= seen_len) || (!found && len == seen_len) {
+            return found;
+        }
+    }
+    // 结构化匹配防误报：正文里被讨论的 uuid 经 JSON 转义带反斜杠，不会命中
+    let needles = [
+        format!("\"uuid\":\"{boundary}\""),
+        format!("\"uuid\": \"{boundary}\""),
+    ];
+    let found = file_contains(path, &needles);
+    cache.lock().unwrap().insert(key, (len, found));
+    found
 }
 
 fn uf_find(uf: &mut [usize], mut x: usize) -> usize {
@@ -379,16 +405,11 @@ fn assign_groups(sessions: &mut [CliSession], probes: &[(Option<String>, bool)])
                 continue;
             }
             let Some(boundary) = probes[gi].0.as_deref() else { continue };
-            // 结构化匹配防误报：正文里被讨论的 uuid 经 JSON 转义带反斜杠，不会命中
-            let needles = [
-                format!("\"uuid\":\"{boundary}\""),
-                format!("\"uuid\": \"{boundary}\""),
-            ];
             for other in 0..n {
                 if other == local || uf_find(&mut uf, other) == uf_find(&mut uf, local) {
                     continue;
                 }
-                if file_contains(&sessions[indices[other]].jsonl_path, &needles) {
+                if bridged(&sessions[indices[other]].jsonl_path, boundary) {
                     uf_union(&mut uf, local, other);
                 }
             }
@@ -497,12 +518,25 @@ pub fn scan_cli_sessions(registered: &RegisteredIndex) -> Vec<CliSession> {
     sessions
 }
 
-pub fn scan_all() -> DiscoveryReport {
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComboReport {
+    pub roots: Vec<UserDataRoot>,
+    pub combos: Vec<PoolCombo>,
+}
+
+/// 只枚举 userData 下的会话池目录，毫秒级；不碰 CLI 转录
+pub fn scan_combos() -> ComboReport {
     let roots = default_roots();
     let mut combos = Vec::new();
     for root in &roots {
         combos.extend(list_combos(root));
     }
+    ComboReport { roots, combos }
+}
+
+pub fn scan_all() -> DiscoveryReport {
+    let ComboReport { roots, combos } = scan_combos();
     let code_combos: Vec<&PoolCombo> = combos.iter().filter(|c| c.pool == PoolKind::Code).collect();
     let registered = registered_cli_ids(&code_combos);
     let cli_sessions = scan_cli_sessions(&registered);
@@ -740,5 +774,31 @@ mod tests {
         fs::write(&path, &content).unwrap();
         assert!(file_contains(&path, std::slice::from_ref(&needle)));
         assert!(!file_contains(&path, &["\"uuid\":\"not-there\"".to_string()]));
+    }
+
+    #[test]
+    fn bridge_cache_trusts_misses_only_at_same_length() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mother.jsonl");
+        fs::write(&path, "{\"type\":\"user\",\"uuid\":\"m1\"}\n").unwrap();
+        assert!(!bridged(&path, "c1"));
+
+        // 同长度原地改写：真实 jsonl 不会这样，缓存按长度未变沿用未命中结果
+        fs::write(&path, "{\"type\":\"user\",\"uuid\":\"c1\"}\n").unwrap();
+        assert!(!bridged(&path, "c1"));
+
+        // 追加 boundary 行：长度变了触发重搜，命中
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"type\":\"system\",\"uuid\":\"c1\"}\n").unwrap();
+        drop(f);
+        assert!(bridged(&path, "c1"));
+
+        // 命中后继续追加仍命中；另一个 boundary 独立缓存
+        let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"{\"type\":\"user\",\"uuid\":\"m9\"}\n").unwrap();
+        drop(f);
+        assert!(bridged(&path, "c1"));
+        assert!(!bridged(&path, "c2"));
     }
 }
