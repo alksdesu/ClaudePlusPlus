@@ -55,11 +55,34 @@ fn is_desktop_command_line(line: &str) -> bool {
     lower.contains("windowsapps\\claude") || lower.contains("--user-data-dir")
 }
 
-// --user-data-dir 是 Electron 通用参数（Discord、VS Code 都带），不能当识别特征；
-// 判定锚定在可执行路径的第一个 .app bundle 名上，参数里出现的路径不参与
+/// 自身可执行路径，小写缓存一份供逐行比对
+#[cfg(not(windows))]
+fn self_exe_lower() -> Option<&'static str> {
+    static CACHE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::env::current_exe()
+                .ok()
+                .map(|p| p.to_string_lossy().to_lowercase())
+        })
+        .as_deref()
+}
+
 #[cfg(not(windows))]
 fn is_desktop_command_line(line: &str) -> bool {
+    is_desktop_line_excluding(line, self_exe_lower())
+}
+
+// --user-data-dir 是 Electron 通用参数（Discord、VS Code 都带），不能当识别特征；
+// 判定锚定在可执行路径的第一个 .app bundle 名上，参数里出现的路径不参与。
+// Claude++ 自己装在 Claude++.app 里，bundle 名同样含 claude，必须先按自身路径排掉，
+// 否则它会把自己算成 Desktop，写操作全被自己挡住
+#[cfg(not(windows))]
+fn is_desktop_line_excluding(line: &str, self_exe: Option<&str>) -> bool {
     let lower = line.to_lowercase();
+    if self_exe.is_some_and(|me| lower.starts_with(me)) {
+        return false;
+    }
     if lower.contains("/npm/") || lower.contains("node_modules") {
         return false;
     }
@@ -213,6 +236,30 @@ mod tests {
         // Desktop 分发的内嵌 claude-code 也是 Desktop 活动
         assert!(is_desktop_command_line(
             "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.219/claude.app/Contents/MacOS/claude --resume=x"
+        ));
+    }
+
+    /// Claude++ 的 bundle 名同样含 claude，不按自身路径排掉就会把自己当成 Desktop
+    #[test]
+    fn claude_plus_plus_does_not_block_itself() {
+        let me = "/applications/claude++.app/contents/macos/claude-plus-plus";
+        let self_line = "/Applications/Claude++.app/Contents/MacOS/claude-plus-plus";
+        assert!(is_desktop_line_excluding(self_line, None));
+        assert!(!is_desktop_line_excluding(self_line, Some(me)));
+        // 排除只认自身这一条路径，Desktop 本体照常识别
+        assert!(is_desktop_line_excluding(
+            "/Applications/Claude.app/Contents/MacOS/Claude",
+            Some(me)
+        ));
+        // 被软链当 bundled CLI 起起来时 ps 显示的是软链路径，那仍是 Desktop 活动
+        assert!(is_desktop_line_excluding(
+            "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.260/claude.app/Contents/MacOS/claude --resume=y",
+            Some(me)
+        ));
+        // 别的进程把 Claude++ 路径带在参数里，不该被当成自身而漏判
+        assert!(is_desktop_line_excluding(
+            "/Applications/Claude.app/Contents/MacOS/Claude --open /Applications/Claude++.app/Contents/MacOS/claude-plus-plus",
+            Some(me)
         ));
     }
 
