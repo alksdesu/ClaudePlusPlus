@@ -100,7 +100,7 @@ interface DeleteReport {
 }
 
 type WrapperState = "deployed" | "absent" | "broken" | "noCli";
-type RendererState = "patched" | "pristine" | "mismatch" | "notFound" | "unreadable";
+type RendererState = "patched" | "pristine" | "mismatch" | "notFound" | "unreadable" | "unsupported";
 
 interface FastModeSettings {
   auto: boolean;
@@ -1218,16 +1218,21 @@ const RENDERER_META: Record<RendererState, { label: string; cls: string }> = {
   mismatch: { label: "锚点失配", cls: "pill-tombstone" },
   notFound: { label: "未找到", cls: "pill-foreign" },
   unreadable: { label: "不可读", cls: "pill-foreign" },
+  unsupported: { label: "本平台不适用", cls: "pill-foreign" },
 };
 
 function renderFastMode(): string {
   const fm = state.fastmode;
+  // macOS 只有 wrapper 半边：renderer patch 会被 Gatekeeper 拒，后端固定回报 unsupported
+  const rendererOff = fm?.renderer.state === "unsupported";
   const head = `
       <div class="page-head">
         <div>
           <div class="eyebrow">Fast Mode</div>
           <h1>让 API key 登录的 Desktop 也能 fast</h1>
-          <p class="lead">3p 模式下官方把 fast 能力位硬编码为封锁，但服务端对有资格的 Console key 是放行的。wrapper 顶替 bundled CLI 把 fastMode 合并进启动参数，renderer patch 亮出实时开关；Desktop 或 CLI 更新后由托盘守护自动补上。</p>
+          <p class="lead">3p 模式下官方把 fast 能力位硬编码为封锁，但服务端对有资格的 Console key 是放行的。wrapper 顶替 bundled CLI 把 fastMode 合并进启动参数，${
+            rendererOff ? "所有会话默认走 fast" : "renderer patch 亮出实时开关"
+          }；Desktop 或 CLI 更新后由托盘守护自动补上。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
@@ -1255,7 +1260,9 @@ function renderFastMode(): string {
     ? '<div class="banner banner-error">Claude Desktop 正在运行 —— 安装与还原需要替换它加载的文件，请先退出 Desktop</div>'
     : "";
   const pendingNote = state.watch?.pendingFastmode
-    ? '<div class="banner">检测到 Desktop 或 CLI 已更新，守护会在 Desktop 退出后自动重新 patch（renderer 部分会弹一次 UAC）</div>'
+    ? `<div class="banner">检测到 Desktop 或 CLI 已更新，守护会在 Desktop 退出后自动${
+        rendererOff ? "重新部署 wrapper" : "重新 patch（renderer 部分会弹一次 UAC）"
+      }</div>`
     : "";
   const failureNote = fm.settings.lastFailure
     ? `<div class="banner banner-error">上次自动修复失败：${esc(fm.settings.lastFailure)}。同一版本不再自动重试，点「修复」手动执行</div>`
@@ -1287,9 +1294,14 @@ function renderFastMode(): string {
           </div>
           <div class="card-meta">
             <span>版本 <span class="mono">${esc(fm.desktopVersion ?? "—")}</span></span>
-            ${fm.renderer.file ? `<span>文件 <span class="mono">${esc(fm.renderer.file)}</span></span>` : ""}
-            ${fm.msixPath ? `<span class="mono">${esc(fm.msixPath)}</span>` : ""}
-            ${anchorsNote}
+            ${
+              rendererOff
+                ? `<span>Claude.app 的资源受 Gatekeeper 完整性校验保护：改 ion-dist 里的 renderer 会让系统判定「已损坏」、拒绝启动并把 app 移进废纸篓，且改回原文件也解不开（判定被缓存住）。所以 macOS 只上 wrapper</span>
+                   <span>影响：不会多出 UI 实时开关，改用 wrapper 让每个会话默认就是 fast；要临时关掉就点「还原官方」</span>`
+                : `${fm.renderer.file ? `<span>文件 <span class="mono">${esc(fm.renderer.file)}</span></span>` : ""}
+                   ${fm.msixPath ? `<span class="mono">${esc(fm.msixPath)}</span>` : ""}
+                   ${anchorsNote}`
+            }
           </div>
         </div>
         <div class="card">
@@ -1300,7 +1312,16 @@ function renderFastMode(): string {
           <div class="card-meta">
             <span>版本 <span class="mono">${esc(fm.cliVersion ?? "—")}</span></span>
             ${fm.cliDir ? `<span class="mono">${esc(fm.cliDir)}</span>` : ""}
-            ${fm.wrapper === "deployed" ? "<span>官方 CLI 藏为 claude-real.exe，Desktop 只校验 .verified 不比 exe 本体</span>" : ""}
+            ${
+              fm.wrapper === "deployed"
+                ? `<span>官方 CLI 原样改名藏为 <span class="mono">${rendererOff ? "claude-real" : "claude-real.exe"}</span>，Desktop 只校验 .verified 不比二进制本体</span>
+                   ${
+                     rendererOff
+                       ? '<span>顶替物是指向 Claude++ 自身的软链 —— Desktop 每次启动会读前 8 字节验 Mach-O 魔数，脚本会被判定失效并重下整个 bundle。移动或删除 Claude++ 会让软链断掉，届时 Desktop 自动重下官方 CLI，回到原样</span>'
+                       : ""
+                   }`
+                : ""
+            }
           </div>
         </div>
       </section>
@@ -1310,7 +1331,7 @@ function renderFastMode(): string {
           <div class="card-title">
             <label class="toggle">
               <input type="checkbox" data-action="fastmode-auto" ${settings.auto ? "checked" : ""} ${state.busy ? "disabled" : ""}/>
-              <span>Desktop / CLI 更新后自动重新 patch</span>
+              <span>Desktop / CLI 更新后自动${rendererOff ? "重新部署 wrapper" : "重新 patch"}</span>
             </label>
             <span class="pill ${settings.installed ? "pill-registered" : "pill-pending"}">${settings.installed ? "已安装" : "未安装"}</span>
           </div>
@@ -1330,7 +1351,11 @@ function renderFastMode(): string {
         <div class="card">
           <div class="card-meta">
             <span>${speedNote}</span>
-            <span>以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。Opus 4.6 服务端已不再提供 fast，按钮对它不显示</span>
+            <span>${
+              rendererOff
+                ? "以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。macOS 没有 UI 开关，这张卡是确认 wrapper 真的生效的唯一途径"
+                : "以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。Opus 4.6 服务端已不再提供 fast，按钮对它不显示"
+            }</span>
           </div>
         </div>
       </section>

@@ -1,8 +1,16 @@
-//! Claude Desktop 3p Fast Mode：wrapper 顶替 bundled CLI 注入 fastMode，renderer patch 亮出开关；
-//! Desktop / CLI 版本变化后由 watch 线程自动修复。
+//! Claude Desktop 3p Fast Mode：wrapper 顶替 bundled CLI 注入 fastMode；Windows 另有 renderer patch
+//! 亮出实时开关（macOS 上会被 Gatekeeper 拒），版本变化后由 watch 线程自动修复。
 
-use std::path::PathBuf;
+// Windows / macOS 之外只有 stub，共享的 wrapper 与统计逻辑在那里用不到
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 pub const ELEVATED_FLAG: &str = "--fastmode-elevated";
@@ -24,6 +32,8 @@ pub enum RendererState {
     Mismatch,
     NotFound,
     Unreadable,
+    /// macOS：改 ion-dist 会让 Gatekeeper 判定 app 已损坏并拒绝启动，只能上 wrapper
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,17 +130,230 @@ pub fn elevated_mode_from_args() -> Option<String> {
     None
 }
 
+const HEAD_BYTES: usize = 4 * 1024;
+const TAIL_BYTES: u64 = 256 * 1024;
+const SPEED_SESSIONS: usize = 15;
+// Desktop 活跃时 userData 几秒一次写入都会唤醒 watch，自动检查含一次进程扫描与读文件，需节流
+const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+static LAST_AUTO_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn settings_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("com.claudeplusplus.manager")
+}
+
+fn settings_path() -> PathBuf {
+    settings_dir().join("fastmode.json")
+}
+
+fn load_settings_from(path: &Path) -> FastModeSettings {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_settings_to(path: &Path, settings: &FastModeSettings) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(settings)?)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub fn load_settings() -> FastModeSettings {
+    load_settings_from(&settings_path())
+}
+
+fn save_settings(settings: &FastModeSettings) -> Result<()> {
+    save_settings_to(&settings_path(), settings)
+}
+
+fn now_iso() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+}
+
+fn dir_label(dir: &Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn parse_version(name: &str) -> Option<Vec<u64>> {
+    let parts: Vec<u64> = name.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    (!parts.is_empty()).then_some(parts)
+}
+
+fn latest_version_dir(root: &Path) -> Option<(String, PathBuf)> {
+    let mut best: Option<(Vec<u64>, String, PathBuf)> = None;
+    for entry in fs::read_dir(root).ok()?.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(version) = parse_version(&name) else { continue };
+        if best.as_ref().map(|(v, _, _)| version > *v).unwrap_or(true) {
+            best = Some((version, name, entry.path()));
+        }
+    }
+    best.map(|(_, name, path)| (name, path))
+}
+
+/// CLI 槽位上现在放着什么。两平台的识别方式不同（Windows 看体积，macOS 看是不是软链），
+/// 状态机共用
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotOccupant {
+    Wrapper,
+    Official,
+    Empty,
+}
+
+fn wrapper_state_from(slot: SlotOccupant, real_present: bool) -> WrapperState {
+    match (slot, real_present) {
+        (SlotOccupant::Wrapper, true) => WrapperState::Deployed,
+        (SlotOccupant::Empty, false) => WrapperState::NoCli,
+        (SlotOccupant::Empty, _) => WrapperState::Broken,
+        (_, false) => WrapperState::Absent,
+        _ => WrapperState::Broken,
+    }
+}
+
+/// 空出 wrapper 的位置。官方本体改名让位；若官方已被 Desktop 重新下载覆盖，以新官方为准
+fn stage_wrapper_slot(exe: &Path, real: &Path, slot: SlotOccupant) -> Result<()> {
+    let name = dir_label(exe);
+    let real_name = dir_label(real);
+    match (slot, real.is_file()) {
+        (SlotOccupant::Official, _) => {
+            fs::rename(exe, real).with_context(|| format!("藏起官方 {name}"))?;
+        }
+        (SlotOccupant::Wrapper, true) => {
+            fs::remove_file(exe).context("移除旧 wrapper")?;
+        }
+        (SlotOccupant::Wrapper, false) => {
+            anyhow::bail!("{name} 不是官方 CLI 且没有 {real_name}，目录状态异常")
+        }
+        (SlotOccupant::Empty, true) => {}
+        (SlotOccupant::Empty, false) => anyhow::bail!("版本目录缺少 {name}"),
+    }
+    Ok(())
+}
+
+fn remove_wrapper_in(exe: &Path, real: &Path) -> Result<bool> {
+    if !real.is_file() {
+        return Ok(false);
+    }
+    // 不能用 exists()：断链的软链它返回 false，可文件本身还占着位置
+    if exe.symlink_metadata().is_ok() {
+        fs::remove_file(exe).context("移除 wrapper")?;
+    }
+    fs::rename(real, exe).with_context(|| format!("还原官方 {}", dir_label(exe)))?;
+    Ok(true)
+}
+
+/// 最近若干个 3p Desktop 会话里 Opus 5 / 4.8 回复的 usage.speed 分布；
+/// 状态栏的 Fast 标签有官方显示 bug，转录里的 speed 才是服务端实际给的
+fn speed_stats() -> SpeedStats {
+    let mut stats = SpeedStats::default();
+    let Some(projects) = crate::discovery::cli_projects_dir() else { return stats };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for project in fs::read_dir(&projects).ok().into_iter().flatten().flatten() {
+        for file in fs::read_dir(project.path()).ok().into_iter().flatten().flatten() {
+            let path = file.path();
+            let is_session = path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                && path.file_stem().map(|s| s.len() == 36).unwrap_or(false);
+            if !is_session {
+                continue;
+            }
+            if let Ok(modified) = file.metadata().and_then(|m| m.modified()) {
+                files.push((modified, path));
+            }
+        }
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in files {
+        if stats.sessions >= SPEED_SESSIONS {
+            break;
+        }
+        let Ok(mut file) = fs::File::open(&path) else { continue };
+        let mut head = vec![0u8; HEAD_BYTES];
+        let read = file.read(&mut head).unwrap_or(0);
+        if !String::from_utf8_lossy(&head[..read]).contains("\"entrypoint\":\"claude-desktop-3p\"") {
+            continue;
+        }
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if file.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES))).is_err() {
+            continue;
+        }
+        let mut tail = Vec::new();
+        if file.read_to_end(&mut tail).is_err() {
+            continue;
+        }
+        stats.sessions += 1;
+        for line in String::from_utf8_lossy(&tail).lines() {
+            if !(line.contains("claude-opus-5") || line.contains("claude-opus-4-8")) {
+                continue;
+            }
+            if line.contains("\"speed\":\"fast\"") {
+                stats.fast += 1;
+            } else if line.contains("\"speed\":\"standard\"") {
+                stats.standard += 1;
+            }
+        }
+    }
+    stats
+}
+
+/// 用脚本装过的机器：wrapper 或 patch 已在位但账本没记，认领下来自动守护才会接手
+fn adopt_existing(status: &FastModeStatus, settings: &mut FastModeSettings) -> bool {
+    if settings.installed {
+        return false;
+    }
+    if status.wrapper != WrapperState::Deployed && status.renderer.state != RendererState::Patched {
+        return false;
+    }
+    settings.installed = true;
+    settings.patched_desktop_version = status.desktop_version.clone();
+    settings.patched_cli_version = status.cli_version.clone();
+    true
+}
+
+fn record_repair(settings: &mut FastModeSettings, status: &FastModeStatus) {
+    settings.installed = true;
+    settings.last_repair = Some(now_iso());
+    settings.patched_desktop_version = status.desktop_version.clone();
+    settings.patched_cli_version = status.cli_version.clone();
+    settings.last_failure = None;
+    settings.failed_for = None;
+}
+
+fn version_key(status: &FastModeStatus) -> String {
+    format!(
+        "{}|{}",
+        status.desktop_version.as_deref().unwrap_or("-"),
+        status.cli_version.as_deref().unwrap_or("-")
+    )
+}
+
+fn auto_check_due() -> bool {
+    let mut last = LAST_AUTO_CHECK.lock().unwrap();
+    if last.map(|t| t.elapsed() < AUTO_CHECK_INTERVAL).unwrap_or(false) {
+        return false;
+    }
+    *last = Some(Instant::now());
+    true
+}
+
 pub use imp::*;
 
 #[cfg(windows)]
 mod imp {
     use std::fs;
-    use std::io::{Read, Seek, SeekFrom};
     use std::os::windows::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
 
     use anyhow::{bail, Context, Result};
 
@@ -140,14 +363,16 @@ mod imp {
     const WRAPPER_SOURCE: &str = include_str!("fastmode/wrapper.cs");
     const CSC: &str = r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe";
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // 官方 exe 200 MB 上下，wrapper 几 KB：以 1 MB 分界判定顶替是否在位
+    // 官方 exe 200 MB 上下，wrapper 几 KB：以 1 MB 分界认出谁占着槽位
     const WRAPPER_MAX_BYTES: u64 = 1024 * 1024;
-    const HEAD_BYTES: usize = 4 * 1024;
-    const TAIL_BYTES: u64 = 256 * 1024;
-    const SPEED_SESSIONS: usize = 15;
-    // Desktop 活跃时 userData 几秒一次写入都会唤醒 watch，自动检查含一次 powershell 与读 renderer，需节流
-    const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(60);
-    static LAST_AUTO_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
+
+    fn slot_occupant(exe: &Path) -> SlotOccupant {
+        match fs::metadata(exe).map(|m| m.len()) {
+            Ok(len) if len > WRAPPER_MAX_BYTES => SlotOccupant::Official,
+            Ok(_) => SlotOccupant::Wrapper,
+            Err(_) => SlotOccupant::Empty,
+        }
+    }
 
     struct Anchor {
         label: &'static str,
@@ -212,35 +437,11 @@ mod imp {
         dirs::data_local_dir().map(|d| d.join("Claude-3p").join("claude-code"))
     }
 
-    fn parse_version(name: &str) -> Option<Vec<u64>> {
-        let parts: Vec<u64> = name.split('.').map(|p| p.parse().ok()).collect::<Option<_>>()?;
-        (!parts.is_empty()).then_some(parts)
-    }
-
-    fn latest_version_dir(root: &Path) -> Option<(String, PathBuf)> {
-        let mut best: Option<(Vec<u64>, String, PathBuf)> = None;
-        for entry in fs::read_dir(root).ok()?.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(version) = parse_version(&name) else { continue };
-            if best.as_ref().map(|(v, _, _)| version > *v).unwrap_or(true) {
-                best = Some((version, name, entry.path()));
-            }
-        }
-        best.map(|(_, name, path)| (name, path))
-    }
-
     fn wrapper_state(dir: &Path) -> WrapperState {
-        let exe_len = fs::metadata(dir.join("claude.exe")).map(|m| m.len());
-        let real = dir.join("claude-real.exe").is_file();
-        match (exe_len, real) {
-            (Ok(len), true) if len <= WRAPPER_MAX_BYTES => WrapperState::Deployed,
-            (Ok(_), false) => WrapperState::Absent,
-            (Err(_), false) => WrapperState::NoCli,
-            _ => WrapperState::Broken,
-        }
+        wrapper_state_from(
+            slot_occupant(&dir.join("claude.exe")),
+            dir.join("claude-real.exe").is_file(),
+        )
     }
 
     fn renderer_file(v1: &Path) -> Option<PathBuf> {
@@ -301,98 +502,6 @@ mod imp {
         }
     }
 
-    fn settings_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("com.claudeplusplus.manager")
-    }
-
-    fn settings_path() -> PathBuf {
-        settings_dir().join("fastmode.json")
-    }
-
-    fn load_settings_from(path: &Path) -> FastModeSettings {
-        fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
-    }
-
-    fn save_settings_to(path: &Path, settings: &FastModeSettings) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(settings)?)?;
-        fs::rename(&tmp, path)?;
-        Ok(())
-    }
-
-    pub fn load_settings() -> FastModeSettings {
-        load_settings_from(&settings_path())
-    }
-
-    fn save_settings(settings: &FastModeSettings) -> Result<()> {
-        save_settings_to(&settings_path(), settings)
-    }
-
-    fn now_iso() -> String {
-        chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
-    }
-
-    /// 最近若干个 3p Desktop 会话里 Opus 5 / 4.8 回复的 usage.speed 分布；
-    /// 状态栏的 Fast 标签有官方显示 bug，转录里的 speed 才是服务端实际给的
-    fn speed_stats() -> SpeedStats {
-        let mut stats = SpeedStats::default();
-        let Some(projects) = crate::discovery::cli_projects_dir() else { return stats };
-        let mut files: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-        for project in fs::read_dir(&projects).ok().into_iter().flatten().flatten() {
-            for file in fs::read_dir(project.path()).ok().into_iter().flatten().flatten() {
-                let path = file.path();
-                let is_session = path.extension().and_then(|e| e.to_str()) == Some("jsonl")
-                    && path.file_stem().map(|s| s.len() == 36).unwrap_or(false);
-                if !is_session {
-                    continue;
-                }
-                if let Ok(modified) = file.metadata().and_then(|m| m.modified()) {
-                    files.push((modified, path));
-                }
-            }
-        }
-        files.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, path) in files {
-            if stats.sessions >= SPEED_SESSIONS {
-                break;
-            }
-            let Ok(mut file) = fs::File::open(&path) else { continue };
-            let mut head = vec![0u8; HEAD_BYTES];
-            let read = file.read(&mut head).unwrap_or(0);
-            if !String::from_utf8_lossy(&head[..read]).contains("\"entrypoint\":\"claude-desktop-3p\"") {
-                continue;
-            }
-            let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-            if file.seek(SeekFrom::Start(len.saturating_sub(TAIL_BYTES))).is_err() {
-                continue;
-            }
-            let mut tail = Vec::new();
-            if file.read_to_end(&mut tail).is_err() {
-                continue;
-            }
-            stats.sessions += 1;
-            for line in String::from_utf8_lossy(&tail).lines() {
-                if !(line.contains("claude-opus-5") || line.contains("claude-opus-4-8")) {
-                    continue;
-                }
-                if line.contains("\"speed\":\"fast\"") {
-                    stats.fast += 1;
-                } else if line.contains("\"speed\":\"standard\"") {
-                    stats.standard += 1;
-                }
-            }
-        }
-        stats
-    }
-
     fn status_light() -> FastModeStatus {
         let msix = msix();
         let cli = cli_root().and_then(|root| latest_version_dir(&root));
@@ -413,20 +522,6 @@ mod imp {
         }
     }
 
-    /// 用脚本装过的机器：wrapper 或 patch 已在位但账本没记，认领下来自动守护才会接手
-    fn adopt_existing(status: &FastModeStatus, settings: &mut FastModeSettings) -> bool {
-        if settings.installed {
-            return false;
-        }
-        if status.wrapper != WrapperState::Deployed && status.renderer.state != RendererState::Patched {
-            return false;
-        }
-        settings.installed = true;
-        settings.patched_desktop_version = status.desktop_version.clone();
-        settings.patched_cli_version = status.cli_version.clone();
-        true
-    }
-
     pub fn status() -> FastModeStatus {
         let mut status = status_light();
         let mut settings = status.settings.clone();
@@ -438,28 +533,11 @@ mod imp {
         status
     }
 
-    fn dir_label(dir: &Path) -> String {
-        dir.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default()
-    }
-
-    /// 顶替版本目录的 claude.exe。若 claude.exe 是官方大文件而 real 也在（Desktop 重下过），以新官方为准
+    /// 顶替版本目录的 claude.exe
     fn deploy_wrapper(dir: &Path) -> Result<String> {
         let exe = dir.join("claude.exe");
         let real = dir.join("claude-real.exe");
-        let exe_len = fs::metadata(&exe).map(|m| m.len()).ok();
-        match (exe_len, real.is_file()) {
-            (Some(len), _) if len > WRAPPER_MAX_BYTES => {
-                fs::rename(&exe, &real).context("藏起官方 claude.exe")?;
-            }
-            (Some(_), true) => {
-                fs::remove_file(&exe).context("移除旧 wrapper")?;
-            }
-            (Some(_), false) => bail!("claude.exe 不是官方 CLI 且没有 claude-real.exe，目录状态异常"),
-            (None, true) => {}
-            (None, false) => bail!("版本目录缺少 claude.exe"),
-        }
+        stage_wrapper_slot(&exe, &real, slot_occupant(&exe))?;
         if !Path::new(CSC).is_file() {
             bail!("未找到 .NET Framework 编译器 {CSC}");
         }
@@ -476,16 +554,7 @@ mod imp {
     }
 
     fn remove_wrapper(dir: &Path) -> Result<bool> {
-        let exe = dir.join("claude.exe");
-        let real = dir.join("claude-real.exe");
-        if !real.is_file() {
-            return Ok(false);
-        }
-        if exe.exists() {
-            fs::remove_file(&exe).context("移除 wrapper")?;
-        }
-        fs::rename(&real, &exe).context("还原官方 claude.exe")?;
-        Ok(true)
+        remove_wrapper_in(&dir.join("claude.exe"), &dir.join("claude-real.exe"))
     }
 
     fn take_ownership(path: &Path) -> Result<()> {
@@ -568,6 +637,15 @@ mod imp {
         }
     }
 
+    /// Windows 的 wrapper 是 csc 编译出的独立 exe，主程序不兼任这个角色
+    pub fn wrapper_argv0() -> Option<PathBuf> {
+        None
+    }
+
+    pub fn run_wrapper(_argv0: &Path) -> i32 {
+        1
+    }
+
     /// 提权子进程入口：只认 apply / restore，结果写文件供主进程读取
     pub fn run_elevated(mode: &str) -> i32 {
         let outcome = (|| -> Result<String> {
@@ -598,23 +676,6 @@ mod imp {
         }
     }
 
-    fn record_repair(settings: &mut FastModeSettings, status: &FastModeStatus) {
-        settings.installed = true;
-        settings.last_repair = Some(now_iso());
-        settings.patched_desktop_version = status.desktop_version.clone();
-        settings.patched_cli_version = status.cli_version.clone();
-        settings.last_failure = None;
-        settings.failed_for = None;
-    }
-
-    fn version_key(status: &FastModeStatus) -> String {
-        format!(
-            "{}|{}",
-            status.desktop_version.as_deref().unwrap_or("-"),
-            status.cli_version.as_deref().unwrap_or("-")
-        )
-    }
-
     pub fn install() -> Result<ActionReport> {
         if procs::any_desktop_running() {
             bail!("Claude Desktop 正在运行，请先退出后再安装");
@@ -635,6 +696,7 @@ mod imp {
             ),
             RendererState::NotFound => "未找到 renderer 文件，跳过".to_string(),
             RendererState::Unreadable => "renderer 文件不可读，跳过".to_string(),
+            RendererState::Unsupported => "该平台不 patch renderer".to_string(),
         };
         let mut settings = load_settings();
         record_repair(&mut settings, &status);
@@ -683,12 +745,8 @@ mod imp {
         if !(settings.installed && settings.auto) {
             return RepairOutcome::Nothing;
         }
-        {
-            let mut last = LAST_AUTO_CHECK.lock().unwrap();
-            if last.map(|t| t.elapsed() < AUTO_CHECK_INTERVAL).unwrap_or(false) {
-                return RepairOutcome::Skipped;
-            }
-            *last = Some(Instant::now());
+        if !auto_check_due() {
+            return RepairOutcome::Skipped;
         }
         let status = status_light();
         let key = version_key(&status);
@@ -754,112 +812,364 @@ mod imp {
             assert_eq!(state, RendererState::Mismatch);
             assert_eq!(missing, vec!["zc 模型支持判定".to_string()]);
         }
+    }
+}
 
-        #[test]
-        fn latest_version_dir_picks_numeric_max() {
-            let dir = tempfile::tempdir().unwrap();
-            for name in ["2.1.258", "2.1.260", "2.1.9", "junk", "2.1.260-beta"] {
-                fs::create_dir(dir.path().join(name)).unwrap();
-            }
-            let (version, _) = latest_version_dir(dir.path()).unwrap();
-            assert_eq!(version, "2.1.260");
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::process::CommandExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use anyhow::{bail, Context, Result};
+
+    use super::*;
+    use crate::procs;
+
+    const DESKTOP_APP: &str = "/Applications/Claude.app";
+    const RENDERER_NOTE: &str =
+        "macOS 不 patch renderer：改 ion-dist 会让 Gatekeeper 判定 app 已损坏并拒绝启动";
+    const WRAPPER_NAME: &str = "claude";
+    const REAL_NAME: &str = "claude-real";
+    const FAST_ONLY: &str = r#"{"fastMode":true}"#;
+
+    fn cli_root() -> Option<PathBuf> {
+        dirs::data_local_dir().map(|d| d.join("Claude-3p").join("claude-code"))
+    }
+
+    /// 版本目录下 CLI 装在自己的 bundle 里，Desktop spawn 的是 bundle 内的可执行文件本体
+    fn cli_bin_dir(version_dir: &Path) -> PathBuf {
+        version_dir.join("claude.app").join("Contents").join("MacOS")
+    }
+
+    fn wrapper_slot(version_dir: &Path) -> (PathBuf, PathBuf) {
+        let bin = cli_bin_dir(version_dir);
+        (bin.join(WRAPPER_NAME), bin.join(REAL_NAME))
+    }
+
+    /// 软链就是我们的 wrapper。不能按体积认：Desktop 启动时只读前 8 字节验 Mach-O 魔数，
+    /// 脚本会被判 not_macho 而重下整个 bundle，所以顶替物必须是软链到 Claude++ 本体
+    fn slot_occupant(exe: &Path) -> SlotOccupant {
+        match exe.symlink_metadata() {
+            Ok(meta) if meta.is_symlink() => SlotOccupant::Wrapper,
+            Ok(_) => SlotOccupant::Official,
+            Err(_) => SlotOccupant::Empty,
         }
+    }
+
+    fn wrapper_state(version_dir: &Path) -> WrapperState {
+        let (exe, real) = wrapper_slot(version_dir);
+        wrapper_state_from(slot_occupant(&exe), real.is_file())
+    }
+
+    /// Info.plist 是 XML，取 CFBundleShortVersionString 不值得引 plist 依赖
+    fn desktop_version() -> Option<String> {
+        let text = fs::read_to_string(Path::new(DESKTOP_APP).join("Contents").join("Info.plist")).ok()?;
+        let after_key = &text[text.find("<key>CFBundleShortVersionString</key>")?..];
+        let start = after_key.find("<string>")? + "<string>".len();
+        let end = after_key[start..].find("</string>")?;
+        Some(after_key[start..start + end].trim().to_string())
+    }
+
+    /// 顶替 bundle 里的 claude：软链到 Claude++ 本体，它是合格的 Mach-O，能过 Desktop 的头部检查。
+    /// bundle 签名随之失效，但 Desktop 用 posix_spawn 直接执行，不过 Gatekeeper
+    fn deploy_wrapper(version_dir: &Path) -> Result<String> {
+        let (exe, real) = wrapper_slot(version_dir);
+        let target = std::env::current_exe().context("定位 Claude++ 自身")?;
+        stage_wrapper_slot(&exe, &real, slot_occupant(&exe))?;
+        std::os::unix::fs::symlink(&target, &exe)
+            .with_context(|| format!("软链 {WRAPPER_NAME} -> {}", target.display()))?;
+        Ok(format!("wrapper 已部署到 {}", dir_label(version_dir)))
+    }
+
+    fn remove_wrapper(version_dir: &Path) -> Result<bool> {
+        let (exe, real) = wrapper_slot(version_dir);
+        remove_wrapper_in(&exe, &real)
+    }
+
+    fn status_light() -> FastModeStatus {
+        let cli = cli_root().and_then(|root| latest_version_dir(&root));
+        let wrapper = cli
+            .as_ref()
+            .map(|(_, dir)| wrapper_state(dir))
+            .unwrap_or(WrapperState::NoCli);
+        FastModeStatus {
+            supported: true,
+            desktop_version: desktop_version(),
+            msix_path: None,
+            cli_version: cli.as_ref().map(|(v, _)| v.clone()),
+            cli_dir: cli.as_ref().map(|(_, d)| d.clone()),
+            wrapper,
+            renderer: RendererInfo {
+                file: None,
+                state: RendererState::Unsupported,
+                missing_anchors: Vec::new(),
+            },
+            settings: load_settings(),
+            speed: SpeedStats::default(),
+        }
+    }
+
+    pub fn status() -> FastModeStatus {
+        let mut status = status_light();
+        let mut settings = status.settings.clone();
+        if adopt_existing(&status, &mut settings) {
+            let _ = save_settings(&settings);
+            status.settings = settings;
+        }
+        status.speed = speed_stats();
+        status
+    }
+
+    pub fn install() -> Result<ActionReport> {
+        if procs::any_desktop_running() {
+            bail!("Claude Desktop 正在运行，请先退出后再安装");
+        }
+        let status = status_light();
+        let cli_dir = status
+            .cli_dir
+            .clone()
+            .context("未找到 bundled CLI 版本目录（Claude-3p/claude-code）")?;
+        let wrapper = deploy_wrapper(&cli_dir)?;
+        let mut settings = load_settings();
+        record_repair(&mut settings, &status);
+        save_settings(&settings)?;
+        Ok(ActionReport { wrapper, renderer: RENDERER_NOTE.to_string() })
+    }
+
+    pub fn uninstall() -> Result<ActionReport> {
+        if procs::any_desktop_running() {
+            bail!("Claude Desktop 正在运行，请先退出后再还原");
+        }
+        let mut restored = 0;
+        if let Some(root) = cli_root() {
+            for entry in fs::read_dir(&root).ok().into_iter().flatten().flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && remove_wrapper(&entry.path())?
+                {
+                    restored += 1;
+                }
+            }
+        }
+        let mut settings = load_settings();
+        settings.installed = false;
+        settings.patched_desktop_version = None;
+        settings.patched_cli_version = None;
+        save_settings(&settings)?;
+        Ok(ActionReport {
+            wrapper: format!("已还原 {restored} 个版本目录的官方 CLI"),
+            renderer: "renderer 无需还原".to_string(),
+        })
+    }
+
+    pub fn set_auto(auto: bool) -> Result<FastModeSettings> {
+        let mut settings = load_settings();
+        settings.auto = auto;
+        save_settings(&settings)?;
+        Ok(settings)
+    }
+
+    /// watch 线程调用：装过且开了自动守护，Desktop 更新出新版本目录后把 wrapper 补上
+    pub fn auto_repair() -> RepairOutcome {
+        let mut settings = load_settings();
+        if !(settings.installed && settings.auto) {
+            return RepairOutcome::Nothing;
+        }
+        if !auto_check_due() {
+            return RepairOutcome::Skipped;
+        }
+        let status = status_light();
+        let key = version_key(&status);
+        if settings.failed_for.as_deref() == Some(key.as_str()) {
+            return RepairOutcome::Nothing;
+        }
+        let Some(cli_dir) = status.cli_dir.clone() else {
+            return RepairOutcome::Nothing;
+        };
+        if status.wrapper == WrapperState::Deployed {
+            return RepairOutcome::Nothing;
+        }
+        if procs::any_desktop_running() {
+            return RepairOutcome::Blocked;
+        }
+        match deploy_wrapper(&cli_dir) {
+            Ok(summary) => {
+                record_repair(&mut settings, &status);
+                let _ = save_settings(&settings);
+                RepairOutcome::Repaired(summary)
+            }
+            Err(error) => {
+                settings.last_failure = Some(error.to_string());
+                settings.failed_for = Some(key);
+                let _ = save_settings(&settings);
+                RepairOutcome::Failed(error.to_string())
+            }
+        }
+    }
+
+    /// mac 全程用户态，没有提权子进程
+    pub fn run_elevated(_mode: &str) -> i32 {
+        1
+    }
+
+    /// Desktop 顺着软链把我们当 bundled CLI 起起来时，argv[0] 是软链自己的路径；
+    /// current_exe() 会解析软链拿到 Claude++ 本体，认不出这一层，只能看 argv[0]
+    pub fn wrapper_argv0() -> Option<PathBuf> {
+        let arg0 = PathBuf::from(std::env::args_os().next()?);
+        (arg0.file_name()? == WRAPPER_NAME).then_some(arg0)
+    }
+
+    /// 保留 Desktop 自带的 disableAutoMode 等键；解析不了就退回只带 fastMode 的最小设置
+    fn merge_fast(settings: &str) -> String {
+        match serde_json::from_str::<serde_json::Value>(settings) {
+            Ok(serde_json::Value::Object(mut map)) => {
+                map.insert("fastMode".into(), serde_json::Value::Bool(true));
+                serde_json::to_string(&serde_json::Value::Object(map))
+                    .unwrap_or_else(|_| FAST_ONLY.to_string())
+            }
+            _ => FAST_ONLY.to_string(),
+        }
+    }
+
+    fn merged_args() -> Vec<OsString> {
+        let settings_flag = std::ffi::OsStr::new("--settings");
+        let mut out = Vec::new();
+        let mut merged = false;
+        let mut rest = std::env::args_os().skip(1);
+        while let Some(arg) = rest.next() {
+            if arg == settings_flag {
+                if let Some(value) = rest.next() {
+                    out.push(arg);
+                    out.push(merge_fast(&value.to_string_lossy()).into());
+                    merged = true;
+                    continue;
+                }
+            }
+            out.push(arg);
+        }
+        if !merged {
+            out.push(settings_flag.to_os_string());
+            out.push(FAST_ONLY.into());
+        }
+        out
+    }
+
+    /// 合并 fastMode 后 exec 官方本体：换的是进程映像不是子进程，PID 不变，
+    /// Desktop 杀 wrapper 就是杀 CLI，不会留孤儿占着管道
+    pub fn run_wrapper(argv0: &Path) -> i32 {
+        let real = argv0.with_file_name(REAL_NAME);
+        let error = Command::new(&real).args(merged_args()).exec();
+        eprintln!("[fast-wrapper] exec {} 失败: {error}", real.display());
+        1
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
         #[test]
-        fn wrapper_state_by_size_and_real() {
+        fn wrapper_symlinks_into_the_bundle() {
             let dir = tempfile::tempdir().unwrap();
-            assert_eq!(wrapper_state(dir.path()), WrapperState::NoCli);
-            fs::write(dir.path().join("claude.exe"), vec![0u8; 2 * 1024 * 1024]).unwrap();
+            let bin = cli_bin_dir(dir.path());
+            fs::create_dir_all(&bin).unwrap();
+            let exe = bin.join(WRAPPER_NAME);
+            let real = bin.join(REAL_NAME);
+            fs::write(&exe, b"official binary").unwrap();
             assert_eq!(wrapper_state(dir.path()), WrapperState::Absent);
-            fs::write(dir.path().join("claude-real.exe"), b"real").unwrap();
-            // 官方大 exe 与 real 并存：Desktop 重下覆盖了 wrapper
-            assert_eq!(wrapper_state(dir.path()), WrapperState::Broken);
-            fs::write(dir.path().join("claude.exe"), b"tiny wrapper").unwrap();
+
+            deploy_wrapper(dir.path()).unwrap();
             assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
-            fs::remove_file(dir.path().join("claude.exe")).unwrap();
-            assert_eq!(wrapper_state(dir.path()), WrapperState::Broken);
-        }
+            // 顶替物必须是软链：Desktop 读前 8 字节验 Mach-O，会跟着链子读到 Claude++ 本体
+            assert!(exe.symlink_metadata().unwrap().is_symlink());
+            assert_eq!(fs::read_link(&exe).unwrap(), std::env::current_exe().unwrap());
+            // 官方本体原样躺在隔壁，没有被复制或改写
+            assert_eq!(fs::read(&real).unwrap(), b"official binary");
 
-        #[test]
-        fn remove_wrapper_puts_official_back() {
-            let dir = tempfile::tempdir().unwrap();
-            fs::write(dir.path().join("claude.exe"), b"wrapper").unwrap();
-            fs::write(dir.path().join("claude-real.exe"), b"official").unwrap();
+            // 重复部署幂等：不会把软链自己当官方藏起来
+            deploy_wrapper(dir.path()).unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
+            assert_eq!(fs::read(&real).unwrap(), b"official binary");
+
             assert!(remove_wrapper(dir.path()).unwrap());
-            assert_eq!(fs::read(dir.path().join("claude.exe")).unwrap(), b"official");
-            assert!(!dir.path().join("claude-real.exe").exists());
-            // 没装过的目录什么都不做
-            assert!(!remove_wrapper(dir.path()).unwrap());
+            assert_eq!(fs::read(&exe).unwrap(), b"official binary");
+            assert!(!real.exists());
         }
 
+        /// Desktop 判 not_macho 后会重下整个 bundle，官方本体盖回槽位：以新官方为准
         #[test]
-        fn settings_roundtrip_and_defaults() {
+        fn official_redownload_takes_over() {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("nested").join("fastmode.json");
-            let defaults = load_settings_from(&path);
-            assert!(defaults.auto && !defaults.installed);
-            let mut s = defaults;
-            s.installed = true;
-            s.patched_cli_version = Some("2.1.260".into());
-            save_settings_to(&path, &s).unwrap();
-            let back = load_settings_from(&path);
-            assert!(back.installed);
-            assert_eq!(back.patched_cli_version.as_deref(), Some("2.1.260"));
-            // 旧文件缺字段也能读：serde default
-            fs::write(&path, r#"{"installed":true}"#).unwrap();
-            let partial = load_settings_from(&path);
-            assert!(partial.installed && partial.auto);
+            let bin = cli_bin_dir(dir.path());
+            fs::create_dir_all(&bin).unwrap();
+            let exe = bin.join(WRAPPER_NAME);
+            fs::write(&exe, b"official v1").unwrap();
+            deploy_wrapper(dir.path()).unwrap();
+
+            fs::remove_file(&exe).unwrap();
+            fs::write(&exe, b"official v2 redownloaded").unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Broken);
+
+            deploy_wrapper(dir.path()).unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
+            assert_eq!(fs::read(bin.join(REAL_NAME)).unwrap(), b"official v2 redownloaded");
         }
 
-        fn status_with(wrapper: WrapperState, renderer: RendererState) -> FastModeStatus {
-            FastModeStatus {
-                supported: true,
-                desktop_version: Some("1.46388.4.0".into()),
-                msix_path: None,
-                cli_version: Some("2.1.260".into()),
-                cli_dir: None,
-                wrapper,
-                renderer: RendererInfo { file: None, state: renderer, missing_anchors: Vec::new() },
-                settings: FastModeSettings::default(),
-                speed: SpeedStats::default(),
-            }
+        /// Claude++ 被移走会让软链断掉，还原不能被 exists() 的假 false 卡住
+        #[test]
+        fn broken_symlink_still_restores() {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = cli_bin_dir(dir.path());
+            fs::create_dir_all(&bin).unwrap();
+            let exe = bin.join(WRAPPER_NAME);
+            let real = bin.join(REAL_NAME);
+            fs::write(&real, b"official").unwrap();
+            std::os::unix::fs::symlink(dir.path().join("moved-away"), &exe).unwrap();
+            assert!(!exe.exists());
+            assert!(exe.symlink_metadata().is_ok());
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
+
+            assert!(remove_wrapper(dir.path()).unwrap());
+            assert_eq!(fs::read(&exe).unwrap(), b"official");
         }
 
         #[test]
-        fn adopt_existing_install_from_script() {
-            let mut settings = FastModeSettings::default();
-            // 官方原样：没什么可认领
-            assert!(!adopt_existing(&status_with(WrapperState::Absent, RendererState::Pristine), &mut settings));
-            assert!(!settings.installed);
-            // wrapper 在位即认领，并记下当前版本组合
-            assert!(adopt_existing(&status_with(WrapperState::Deployed, RendererState::Pristine), &mut settings));
-            assert!(settings.installed);
-            assert_eq!(settings.patched_cli_version.as_deref(), Some("2.1.260"));
-            // 已记账的不再重复认领
-            assert!(!adopt_existing(&status_with(WrapperState::Deployed, RendererState::Patched), &mut settings));
-            // 只剩 renderer patch 也算装过
-            let mut fresh = FastModeSettings::default();
-            assert!(adopt_existing(&status_with(WrapperState::Absent, RendererState::Patched), &mut fresh));
+        fn merge_fast_keeps_desktop_keys() {
+            let merged = merge_fast(r#"{"disableAutoMode":"disable"}"#);
+            let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+            assert_eq!(v["fastMode"], serde_json::json!(true));
+            assert_eq!(v["disableAutoMode"], serde_json::json!("disable"));
+            // 显式关掉的就地改写，不留重复键
+            let over: serde_json::Value =
+                serde_json::from_str(&merge_fast(r#"{"fastMode":false,"x":1}"#)).unwrap();
+            assert_eq!(over["fastMode"], serde_json::json!(true));
+            assert_eq!(over["x"], serde_json::json!(1));
+            // 空的、坏的、不是对象的，一律退回最小设置
+            assert_eq!(merge_fast("{}"), FAST_ONLY);
+            assert_eq!(merge_fast("not json"), FAST_ONLY);
+            assert_eq!(merge_fast("[1,2]"), FAST_ONLY);
         }
 
         #[test]
-        fn version_parsing() {
-            assert_eq!(parse_version("2.1.260"), Some(vec![2, 1, 260]));
-            assert_eq!(parse_version("2.1.260-beta"), None);
-            assert_eq!(parse_version(""), None);
+        fn wrapper_argv0_only_fires_for_the_slot_name() {
+            assert_eq!(PathBuf::from("/x/claude").file_name().unwrap(), WRAPPER_NAME);
+            assert_ne!(PathBuf::from("/x/claude-plus-plus").file_name().unwrap(), WRAPPER_NAME);
+            assert_ne!(PathBuf::from("/x/claude-real").file_name().unwrap(), WRAPPER_NAME);
+        }
+
+        #[test]
+        fn desktop_version_parses_xml_plist() {
+            assert!(desktop_version().is_none() || desktop_version().unwrap().contains('.'));
         }
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
     use anyhow::{bail, Result};
 
     use super::*;
-
-    pub fn load_settings() -> FastModeSettings {
-        FastModeSettings::default()
-    }
 
     pub fn status() -> FastModeStatus {
         FastModeStatus {
@@ -897,5 +1207,142 @@ mod imp {
 
     pub fn run_elevated(_mode: &str) -> i32 {
         1
+    }
+
+    pub fn wrapper_argv0() -> Option<std::path::PathBuf> {
+        None
+    }
+
+    pub fn run_wrapper(_argv0: &std::path::Path) -> i32 {
+        1
+    }
+}
+
+#[cfg(test)]
+mod shared_tests {
+    use super::*;
+
+    fn status_with(wrapper: WrapperState, renderer: RendererState) -> FastModeStatus {
+        FastModeStatus {
+            supported: true,
+            desktop_version: Some("1.46388.4.0".into()),
+            msix_path: None,
+            cli_version: Some("2.1.260".into()),
+            cli_dir: None,
+            wrapper,
+            renderer: RendererInfo { file: None, state: renderer, missing_anchors: Vec::new() },
+            settings: FastModeSettings::default(),
+            speed: SpeedStats::default(),
+        }
+    }
+
+    #[test]
+    fn version_parsing() {
+        assert_eq!(parse_version("2.1.260"), Some(vec![2, 1, 260]));
+        assert_eq!(parse_version("2.1.260-beta"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn latest_version_dir_picks_numeric_max() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["2.1.258", "2.1.260", "2.1.9", "junk", "2.1.260-beta"] {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let (version, _) = latest_version_dir(dir.path()).unwrap();
+        assert_eq!(version, "2.1.260");
+    }
+
+    #[test]
+    fn wrapper_state_covers_every_slot_shape() {
+        use SlotOccupant::*;
+        assert_eq!(wrapper_state_from(Wrapper, true), WrapperState::Deployed);
+        // 官方本体与 real 并存：Desktop 重下覆盖了 wrapper
+        assert_eq!(wrapper_state_from(Official, true), WrapperState::Broken);
+        assert_eq!(wrapper_state_from(Official, false), WrapperState::Absent);
+        // wrapper 在而官方本体丢了：仍报未部署，装的时候会在 stage 阶段拒绝
+        assert_eq!(wrapper_state_from(Wrapper, false), WrapperState::Absent);
+        assert_eq!(wrapper_state_from(Empty, false), WrapperState::NoCli);
+        assert_eq!(wrapper_state_from(Empty, true), WrapperState::Broken);
+    }
+
+    #[test]
+    fn stage_slot_handles_every_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("claude");
+        let real = dir.path().join("claude-real");
+        // 空目录：没得顶替
+        assert!(stage_wrapper_slot(&exe, &real, SlotOccupant::Empty).is_err());
+        // 官方原样：改名让位
+        fs::write(&exe, b"official").unwrap();
+        stage_wrapper_slot(&exe, &real, SlotOccupant::Official).unwrap();
+        assert!(!exe.exists() && real.is_file());
+        // 已装过：旧 wrapper 就地删掉等待重写
+        fs::write(&exe, b"old wrapper").unwrap();
+        stage_wrapper_slot(&exe, &real, SlotOccupant::Wrapper).unwrap();
+        assert!(!exe.exists() && real.is_file());
+        // real 丢了而槽位上是 wrapper：宁可报错也不拿 wrapper 当官方藏起来
+        fs::remove_file(&real).unwrap();
+        fs::write(&exe, b"orphan wrapper").unwrap();
+        assert!(stage_wrapper_slot(&exe, &real, SlotOccupant::Wrapper).is_err());
+        // Desktop 重下过官方：以新官方为准，旧 real 被覆盖
+        fs::write(&real, b"stale real").unwrap();
+        fs::write(&exe, b"fresh official").unwrap();
+        stage_wrapper_slot(&exe, &real, SlotOccupant::Official).unwrap();
+        assert_eq!(fs::read(&real).unwrap(), b"fresh official");
+    }
+
+    #[test]
+    fn remove_wrapper_puts_official_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("claude");
+        let real = dir.path().join("claude-real");
+        fs::write(&exe, b"wrapper").unwrap();
+        fs::write(&real, b"official").unwrap();
+        assert!(remove_wrapper_in(&exe, &real).unwrap());
+        assert_eq!(fs::read(&exe).unwrap(), b"official");
+        assert!(!real.exists());
+        // 没装过的目录什么都不做
+        assert!(!remove_wrapper_in(&exe, &real).unwrap());
+    }
+
+    #[test]
+    fn settings_roundtrip_and_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("fastmode.json");
+        let defaults = load_settings_from(&path);
+        assert!(defaults.auto && !defaults.installed);
+        let mut s = defaults;
+        s.installed = true;
+        s.patched_cli_version = Some("2.1.260".into());
+        save_settings_to(&path, &s).unwrap();
+        let back = load_settings_from(&path);
+        assert!(back.installed);
+        assert_eq!(back.patched_cli_version.as_deref(), Some("2.1.260"));
+        // 旧文件缺字段也能读：serde default
+        fs::write(&path, r#"{"installed":true}"#).unwrap();
+        let partial = load_settings_from(&path);
+        assert!(partial.installed && partial.auto);
+    }
+
+    #[test]
+    fn adopt_existing_install_from_script() {
+        let mut settings = FastModeSettings::default();
+        // 官方原样：没什么可认领
+        assert!(!adopt_existing(&status_with(WrapperState::Absent, RendererState::Pristine), &mut settings));
+        assert!(!settings.installed);
+        // wrapper 在位即认领，并记下当前版本组合
+        assert!(adopt_existing(&status_with(WrapperState::Deployed, RendererState::Pristine), &mut settings));
+        assert!(settings.installed);
+        assert_eq!(settings.patched_cli_version.as_deref(), Some("2.1.260"));
+        // 已记账的不再重复认领
+        assert!(!adopt_existing(&status_with(WrapperState::Deployed, RendererState::Patched), &mut settings));
+        // 只剩 renderer patch 也算装过
+        let mut fresh = FastModeSettings::default();
+        assert!(adopt_existing(&status_with(WrapperState::Absent, RendererState::Patched), &mut fresh));
+        // mac 上 renderer 恒为 Unsupported，认领只看 wrapper
+        let mut mac = FastModeSettings::default();
+        assert!(!adopt_existing(&status_with(WrapperState::Absent, RendererState::Unsupported), &mut mac));
+        assert!(adopt_existing(&status_with(WrapperState::Deployed, RendererState::Unsupported), &mut mac));
     }
 }

@@ -427,6 +427,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    // macOS：被 Desktop 顺着软链当 bundled CLI 起起来，合并 fastMode 后转发，绝不初始化 GUI
+    if let Some(argv0) = fastmode::wrapper_argv0() {
+        std::process::exit(fastmode::run_wrapper(&argv0));
+    }
     // 提权子进程：只做 renderer 写操作，不起窗口不起托盘
     if let Some(mode) = fastmode::elevated_mode_from_args() {
         std::process::exit(fastmode::run_elevated(&mode));

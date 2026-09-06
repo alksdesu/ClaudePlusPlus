@@ -34,7 +34,7 @@ Claude++ 针对这两层分别下手。
 | **Codex 迁移** | 扫描 `~/.codex` 的 rollout 会话并与 Claude 侧对账：已迁移 / Claude 导入镜像 / 孤儿镜像 / Codex 独有。独有会话一键转为 Claude 转录（幂等：threadId 即 sessionId），并回写 Codex 导入台账防止它把产物再同步回去 |
 | **会话预览** | 单击任意会话行弹出独立预览窗口：Markdown 渲染（DOMPurify 消毒）、工具调用聚合为摘要行、大会话只加载末尾 300 条。全程只读 |
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
-| **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数，renderer patch 亮出实时开关并按模型显隐。Desktop / CLI 更新后托盘守护自动重新部署与 patch（renderer 部分弹一次 UAC）。仅 Windows；前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
+| **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 app 资源受 Gatekeeper 完整性校验保护，改不得，只做 wrapper——没有 UI 开关，但每个会话默认就是 fast。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
 
@@ -51,7 +51,8 @@ Claude++ 针对这两层分别下手。
 
 ~/.claude/projects/<cwd编码>/<uuid>.jsonl   # 会话转录，CLI 与 Desktop 共用
 ~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl   # Codex 会话（Codex 迁移页的数据源）
-%APPDATA%\com.claudeplusplus.manager\fastmode.json   # Fast Mode 守护设置与已 patch 的版本记录
+<配置目录>/com.claudeplusplus.manager/fastmode.json   # Fast Mode 守护设置与已生效的版本组合
+                                            # Windows: %APPDATA%；macOS: ~/Library/Application Support
 ```
 
 ### 使用
@@ -62,9 +63,9 @@ Claude++ 针对这两层分别下手。
 4. 「会话迁移」页 → 勾选 CLI 会话 → 注册，打开 Desktop 对应项目即可见、可继续。多分支会话折叠显示，`⑂ N` 可展开挑选特定分支。两列头的「删除」可彻底移除选中会话（二次确认，转录进回收站）
 5. 「Codex 会话迁移」页 → 筛选「Claude 无」→ 一键迁移（需先退出 Codex），完成后回「会话迁移」页注册即可在 Desktop 打开
 6. 任意页面单击会话行即可预览完整对话内容
-7. 「Fast Mode」页 → 安装（需先退出 Desktop，renderer 部分弹一次 UAC）→ 保持自动守护开启，Desktop 或 CLI 更新后会自动补上；页面底部按转录里的 `usage.speed` 验证是否真 fast
+7. 「Fast Mode」页 → 安装（需先退出 Desktop；Windows 的 renderer 部分弹一次 UAC，macOS 全程用户态）→ 保持自动守护开启，Desktop 或 CLI 更新后会自动补上；页面底部按转录里的 `usage.speed` 验证是否真 fast
 
-### Fast Mode 解锁（Windows）
+### Fast Mode 解锁
 
 > 前提：Console API key 本身已开通 fast mode（服务端资格）。这里只解**客户端**的封锁，不绕服务端计费与授权。
 
@@ -72,10 +73,18 @@ Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能�
 
 | 组件 | 做法 | 落点 |
 |---|---|---|
-| wrapper | 顶替版本目录的 `claude.exe`，把 `fastMode:true` 合并进 `--settings` 后转发给改名保留的 `claude-real.exe`；Desktop 只校验 `.verified` 不比 exe 本体 | `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\` |
-| renderer patch | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
+| wrapper（两平台） | 顶替版本目录里的 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给改名保留的官方本体；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
+| renderer patch（仅 Windows） | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
 
-wrapper 管"会话默认 fast"，开关管"实时切换"。写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动自身完成 renderer 改动（弹一次 UAC），提权进程不接受任何路径参数。
+wrapper 管"会话默认 fast"，开关管"实时切换"。
+
+Windows 写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动自身完成 renderer 改动（弹一次 UAC），提权进程不接受任何路径参数。
+
+macOS 只做 wrapper，全程用户态无需提权。
+
+renderer 那半边做不了：`Claude.app` 的资源被代码签名 seal，改动后 Gatekeeper 判定 app「已损坏」、拒绝启动并把它移进废纸篓，而且改回原文件也解不开——判定被 `com.apple.provenance` 与 LaunchServices 缓存住，实测要换 inode 重建 app 才能恢复。
+
+CLI 那半边不走 Gatekeeper 的应用启动路径（Desktop 用 `posix_spawn` 直接执行），bundle 签名失效照常运行。但 Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFACF` 加 cputype，或 `0xCAFEBABE` 的 universal），不合格就判缓存失效、重下整个 bundle。所以顶替物不能是脚本，得是**软链到 Claude++ 自身**——它本身就是合格的 Mach-O，检查顺着软链读到它。Claude++ 发现自己以 `claude` 之名被调起就走 wrapper 分支：把 `fastMode` 并进 `--settings` 后 `exec` 官方本体，同一 PID，不需要 Windows 那套 Job Object。软链断掉（Claude++ 被移走或删掉）时 Desktop 会自动重下官方 CLI，失效模式是"回到原样"。
 
 | 模型 | fast |
 |---|---|
@@ -83,9 +92,11 @@ wrapper 管"会话默认 fast"，开关管"实时切换"。写 WindowsApps 需�
 | Opus 4.6 | 服务端已不再提供，开关不显示 |
 | 其他 | 不支持，开关隐藏 |
 
+模型这一列在 Windows 决定开关显不显示；macOS 没有开关，wrapper 对所有会话一律注入，不支持 fast 的模型由服务端照常回 `standard`。
+
 验证以转录里的 `usage.speed` 为准（页面底部的验证卡统计的就是它），Desktop 状态栏的 Fast 标签有官方显示 bug。
 
-Desktop 更新会同时换掉 CLI 版本目录和 renderer。守护线程监控 CLI 目录并定期核对 MSIX 版本，失效即自动补上；Desktop 运行中则等它退出后执行。若 Desktop 大版本改动让三处锚点匹配不上，页面会列出未命中项：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`。「还原官方」一键撤销全部改动。
+Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。若 Desktop 大版本改动让 Windows 那三处锚点匹配不上，页面会列出未命中项：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`。「还原官方」一键撤销全部改动。
 
 ### 构建
 
@@ -107,7 +118,7 @@ cd src-tauri && cargo test    # 单元测试（junction / 迁移字段 / 墓碑�
 - 会话转录 jsonl 在归一与迁移全程只读；Codex 迁移只新增 Claude 转录、不改 Codex 会话本体；墓碑清理的删除走系统回收站
 - 元数据写入采用临时文件 + 原子改名
 - 预览窗口全程只读，渲染前经 DOMPurify 消毒
-- Fast Mode：renderer 改动前备份 `.orig`，还原即删；官方 CLI 改名保留在原目录，不下载不替换二进制内容；提权子进程不接受任何路径参数，自行定位 MSIX 包
+- Fast Mode：官方 CLI 改名保留在原目录，不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
 
 ### 免责
 
@@ -138,7 +149,7 @@ Claude++ addresses both layers.
 | **Codex import** | Scans `~/.codex` rollouts and classifies every thread against Claude: migrated / mirror imported from Claude / orphan mirror / Codex-only. Codex-only threads convert to Claude transcripts in one click (idempotent: threadId doubles as sessionId), and the conversion is recorded in Codex's import ledger so it never syncs the output back as a duplicate |
 | **Session preview** | Click any session row to open a read-only preview window: markdown rendering (DOMPurify-sanitized), tool calls aggregated into summary lines, only the last 300 messages of huge sessions loaded |
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
-| **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings, and a renderer patch surfaces the live toggle gated by model. When Desktop or the CLI updates, the tray daemon redeploys and re-patches on its own (the renderer step prompts UAC once). Windows only; the key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
+| **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the app's resources are sealed by Gatekeeper's integrity check and cannot be touched, so only the wrapper is deployed — no UI toggle, but every session defaults to fast. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
 
@@ -155,7 +166,8 @@ Claude++ addresses both layers.
 
 ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl   # transcripts, shared by CLI and Desktop
 ~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl   # Codex threads (source of the Codex tab)
-%APPDATA%\com.claudeplusplus.manager\fastmode.json   # Fast Mode daemon settings and patched-version ledger
+<config dir>/com.claudeplusplus.manager/fastmode.json   # Fast Mode daemon settings and active-version ledger
+                                            # Windows: %APPDATA%; macOS: ~/Library/Application Support
 ```
 
 ### Usage
@@ -166,9 +178,9 @@ Claude++ addresses both layers.
 4. Migrate tab → select CLI sessions → Register; open the matching project folder in Desktop to see and resume them. Multi-branch sessions fold into one row — `⑂ N` expands them to pick a specific branch. Either column's Delete button wipes the selected sessions for good (confirmation required; transcripts go to the recycle bin)
 5. Codex tab → filter "not in Claude" → migrate in one click (quit Codex first), then register the results on the Migrate tab to open them in Desktop
 6. Click any session row on any tab to preview the full conversation
-7. Fast Mode tab → Install (quit Desktop first; the renderer step prompts UAC once) → leave auto-guard on and updates to Desktop or the CLI get patched again on their own; the bottom card verifies real fast via `usage.speed` in the transcripts
+7. Fast Mode tab → Install (quit Desktop first; on Windows the renderer step prompts UAC once, macOS stays entirely in user space) → leave auto-guard on and updates to Desktop or the CLI get repaired on their own; the bottom card verifies real fast via `usage.speed` in the transcripts
 
-### Fast Mode unlock (Windows)
+### Fast Mode unlock
 
 > Prerequisite: the Console API key itself is entitled to fast mode server-side. This removes the **client-side** block only; billing and entitlement stay with the server.
 
@@ -176,10 +188,18 @@ Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast
 
 | Component | How | Location |
 |---|---|---|
-| wrapper | Replaces `claude.exe` in the version directory, merges `fastMode:true` into `--settings` and forwards to the renamed `claude-real.exe`; Desktop only checks `.verified`, never the exe itself | `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\` |
-| renderer patch | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
+| wrapper (both platforms) | Replaces the CLI inside the version directory, merges `fastMode:true` into `--settings` and forwards to the renamed official binary; Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
+| renderer patch (Windows only) | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
 
-The wrapper makes sessions fast by default; the toggle switches at runtime. Writing under WindowsApps needs administrator rights: Claude++ relaunches itself with a fixed flag to apply the renderer change (one UAC prompt), and the elevated helper accepts no path arguments.
+The wrapper makes sessions fast by default; the toggle switches at runtime.
+
+On Windows, writing under WindowsApps needs administrator rights: Claude++ relaunches itself with a fixed flag to apply the renderer change (one UAC prompt), and the elevated helper accepts no path arguments.
+
+On macOS only the wrapper is deployed, entirely in user space.
+
+The renderer half is impossible there: `Claude.app`'s resources are sealed by its code signature, and once they change Gatekeeper declares the app "damaged", refuses to launch it and moves it to the Trash — restoring the original file does not help either, because the verdict is cached through `com.apple.provenance` and LaunchServices (in testing, only rebuilding the app under a fresh inode recovered it).
+
+The CLI half does not go through Gatekeeper's app-launch path (Desktop `posix_spawn`s it directly), so it runs fine with a broken bundle signature. But on every start Desktop reads the CLI's **first 8 bytes** and checks the Mach-O magic (`0xFEEDFACF` plus cputype, or a `0xCAFEBABE` universal binary); anything else invalidates the cache and re-downloads the whole bundle. So the stand-in cannot be a script — it is a **symlink to Claude++ itself**, which is a valid Mach-O the check follows the link to. When Claude++ finds it was invoked under the name `claude` it takes the wrapper branch: merge `fastMode` into `--settings`, then `exec` the official binary — same PID, so none of the Job Object machinery Windows needs. If the symlink breaks (Claude++ moved or deleted) Desktop simply re-downloads the official CLI, so the failure mode is "back to stock".
 
 | Model | fast |
 |---|---|
@@ -187,9 +207,11 @@ The wrapper makes sessions fast by default; the toggle switches at runtime. Writ
 | Opus 4.6 | no longer served fast by the backend; toggle hidden |
 | others | unsupported; toggle hidden |
 
+That column decides toggle visibility on Windows. macOS has no toggle: the wrapper injects unconditionally and the backend simply answers `standard` for models without fast.
+
 Trust `usage.speed` in the transcript (the verification card at the bottom of the tab counts exactly that); the Fast label in Desktop's status bar has a known display bug.
 
-A Desktop update replaces both the CLI version directory and the renderer. The daemon watches the CLI directory and periodically checks the MSIX version, repairing as soon as something is missing, or waiting for Desktop to exit first. If a major Desktop release changes the renderer so the three anchors no longer match, the tab lists the misses: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics. "Restore official" undoes everything in one click.
+A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. If a major Desktop release changes the renderer so Windows' three anchors no longer match, the tab lists the misses: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics. "Restore official" undoes everything in one click.
 
 ### Build
 
@@ -211,7 +233,7 @@ cd src-tauri && cargo test    # unit tests (junction / migration fields / tombst
 - Transcripts are strictly read-only during unify and migration; Codex import only adds Claude transcripts and never touches Codex threads; tombstone deletions go to the recycle bin
 - Metadata writes use temp-file + atomic rename
 - Preview windows are read-only; rendered content is DOMPurify-sanitized
-- Fast Mode backs the renderer up as `.orig` before patching and removes it on restore; the official CLI is renamed in place, never downloaded or altered; the elevated helper takes no path arguments and locates the MSIX package itself
+- Fast Mode renames the official CLI in place, never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself; on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
 
 ### Disclaimer
 
