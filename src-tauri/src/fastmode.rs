@@ -575,6 +575,13 @@ mod imp {
 
     /// 认文件靠属性名：函数名随 minify 变，showFastModeToggle 也出现在别的 bundle 里，
     /// fastModeToggleDisabled 才只属于要改的那个
+    /// 认文件靠属性名（函数名随 minify 变），且必须在 patch 前后都成立 ——
+    /// fastModeDisabledReason 正是锚点要抹掉的调用，拿它认文件会导致改完就找不着。
+    /// showFastModeToggle 另一个 bundle 里也有，fastModeToggleDisabled 才只属于目标
+    fn is_renderer(text: &str) -> bool {
+        text.contains("fastModeToggleDisabled") && text.contains("modelSupportsFastMode")
+    }
+
     fn renderer_file(v1: &Path) -> Option<PathBuf> {
         for entry in fs::read_dir(v1).ok()?.flatten() {
             let path = entry.path();
@@ -582,7 +589,7 @@ mod imp {
                 continue;
             }
             let Ok(text) = fs::read_to_string(&path) else { continue };
-            if text.contains("fastModeToggleDisabled") && text.contains("fastModeDisabledReason") {
+            if is_renderer(&text) {
                 return Some(path);
             }
         }
@@ -982,6 +989,16 @@ mod imp {
                 assert!(patched.contains(r#"includes("opus-4-8")"#), "{label} 放行 4.8");
                 // 4.6 只该留在被弃用的 x 定义里，判定里不该再出现
                 assert!(!patched.contains(r#"includes("opus-4-6")||"#), "{label} 不再认 4.6");
+            }
+        }
+
+        #[test]
+        fn renderer_stays_recognisable_after_patching() {
+            for (label, source) in [("1.46388", OLD_RENDERER), ("1.49585", NEW_RENDERER)] {
+                assert!(is_renderer(source), "{label} 原始应被认出");
+                let patched = Renderer::new(source).patch().expect(label);
+                // patch 抹掉 fastModeDisabledReason，识别不能依赖它，否则改完就报未找到
+                assert!(is_renderer(&patched), "{label} patch 后仍应被认出");
             }
         }
 
