@@ -34,7 +34,7 @@ Claude++ 针对这两层分别下手。
 | **Codex 迁移** | 扫描 `~/.codex` 的 rollout 会话并与 Claude 侧对账：已迁移 / Claude 导入镜像 / 孤儿镜像 / Codex 独有。独有会话一键转为 Claude 转录（幂等：threadId 即 sessionId），并回写 Codex 导入台账防止它把产物再同步回去 |
 | **会话预览** | 单击任意会话行弹出独立预览窗口：Markdown 渲染（DOMPurify 消毒）、工具调用聚合为摘要行、大会话只加载末尾 300 条。全程只读 |
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
-| **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 app 资源受 Gatekeeper 完整性校验保护，改不得，只做 wrapper——没有 UI 开关，但每个会话默认就是 fast。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
+| **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 renderer 被 asar 完整性校验与签名封印锁死，只做 wrapper——没有 UI 开关，但每个会话默认就是 fast。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
 
@@ -73,7 +73,7 @@ Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能�
 
 | 组件 | 做法 | 落点 |
 |---|---|---|
-| wrapper（两平台） | 顶替版本目录里的 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给改名保留的官方本体；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
+| wrapper（两平台） | 顶替版本目录里的 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给挪开保留的官方本体（Windows 改名，macOS 连整个 bundle 一起挪）；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
 | renderer patch（仅 Windows） | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。锚点以属性名与字符串字面量为骨架、变量名正则捕获后回填，Desktop 更新重命名 minify 符号不会失配。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
 
 wrapper 管"会话默认 fast"，开关管"实时切换"。
@@ -82,9 +82,11 @@ Windows 写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动�
 
 macOS 只做 wrapper，全程用户态无需提权。
 
-renderer 那半边做不了：`Claude.app` 的资源被代码签名 seal，改动后 Gatekeeper 判定 app「已损坏」、拒绝启动并把它移进废纸篓，而且改回原文件也解不开——判定被 `com.apple.provenance` 与 LaunchServices 缓存住，实测要换 inode 重建 app 才能恢复。
+renderer 那半边做不了，锁有三层：`app.asar` 的 SHA256 封在 `Info.plist` 的 `ElectronAsarIntegrity` 键里，`EnableEmbeddedAsarIntegrityValidation` 与 `OnlyLoadAppFromAsar` 两个 fuse 都开着，改 asar 必被拦；想同步改 `Info.plist` 里那个哈希，它又被主程序签名 seal 住；主程序还开着 hardened runtime，签名一失配 exec 就被内核杀。`RunAsNode`、`EnableNodeOptionsEnvironmentVariable`、`EnableNodeCliInspectArguments` 三个 fuse 也都是关的，运行时注入同样无路。只剩整包重签一条路，但 `com.apple.security.virtualization` 是 Apple 特批的 entitlement，adhoc 签不出来——带着它 AMFI 拒绝加载，去掉它 cowork 沙箱会话全废。另外实测：改过资源的 `Claude.app` 会被 Gatekeeper 判「已损坏」、拒绝启动并移进废纸篓，改回原文件也解不开——判定被 `com.apple.provenance` 与 LaunchServices 缓存住，要换 inode 重建 app 才能恢复。
 
-CLI 那半边不走 Gatekeeper 的应用启动路径（Desktop 用 `posix_spawn` 直接执行），bundle 签名失效照常运行。但 Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFACF` 加 cputype，或 `0xCAFEBABE` 的 universal），不合格就判缓存失效、重下整个 bundle。所以顶替物不能是脚本，得是**软链到 Claude++ 自身**——它本身就是合格的 Mach-O，检查顺着软链读到它。Claude++ 发现自己以 `claude` 之名被调起就走 wrapper 分支：把 `fastMode` 并进 `--settings` 后 `exec` 官方本体，同一 PID，不需要 Windows 那套 Job Object。软链断掉（Claude++ 被移走或删掉）时 Desktop 会自动重下官方 CLI，失效模式是"回到原样"。
+CLI 那半边不走 Gatekeeper 的应用启动路径（Desktop 用 `posix_spawn` 直接执行），但内核的签名校验绕不过：官方 CLI 同样开着 hardened runtime，它的签名配对 `Contents/Info.plist`，一旦被拎出 bundle 或改个名，就不再算那个 bundle 的主程序，签名当场失配、exec 即 SIGKILL（Desktop 会把这个信号一律翻译成「被端点安全拦截」，跟真的 EDR 无关）。所以藏官方本体的办法是连**整个 bundle 一起挪**到 `claude-real.app`——签名只认 `Contents/MacOS/<主程序>` 这层相对结构，bundle 目录叫什么它不在意。腾出来的 `claude.app` 只留一个壳：`MacOS/claude` 软链到 Claude++ 自身，`MacOS/claude-real` 软链回本体。
+
+Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFACF` 加 cputype，或 `0xCAFEBABE` 的 universal），不合格就判缓存失效、重下整个 bundle。所以顶替物不能是脚本，得是**软链到 Claude++ 自身**——它本身就是合格的 Mach-O，检查顺着软链读到它。Claude++ 发现自己以 `claude` 之名被调起就走 wrapper 分支：把 `fastMode` 并进 `--settings` 后 `exec` 官方本体，同一 PID，不需要 Windows 那套 Job Object。软链断掉（Claude++ 被移走或删掉）时 Desktop 会自动重下官方 CLI，失效模式是"回到原样"。
 
 | 模型 | fast |
 |---|---|
@@ -118,7 +120,7 @@ cd src-tauri && cargo test    # 单元测试（junction / 迁移字段 / 墓碑�
 - 会话转录 jsonl 在归一与迁移全程只读；Codex 迁移只新增 Claude 转录、不改 Codex 会话本体；墓碑清理的删除走系统回收站
 - 元数据写入采用临时文件 + 原子改名
 - 预览窗口全程只读，渲染前经 DOMPurify 消毒
-- Fast Mode：官方 CLI 改名保留在原目录，不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包。备份与还原要在包目录里增删 `.orig`，而 WindowsApps 下只有 TrustedInstaller 与 SYSTEM 可写，因此会对 `assets1` 这一层目录取得所有权（不递归、不影响 Desktop 更新，更新后目录重建即恢复默认）；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
+- Fast Mode：官方 CLI 原样保留在版本目录（Windows 改名，macOS 连 bundle 一起挪开），不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包。备份与还原要在包目录里增删 `.orig`，而 WindowsApps 下只有 TrustedInstaller 与 SYSTEM 可写，因此会对 `assets1` 这一层目录取得所有权（不递归、不影响 Desktop 更新，更新后目录重建即恢复默认）；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
 
 ### 免责
 
@@ -149,7 +151,7 @@ Claude++ addresses both layers.
 | **Codex import** | Scans `~/.codex` rollouts and classifies every thread against Claude: migrated / mirror imported from Claude / orphan mirror / Codex-only. Codex-only threads convert to Claude transcripts in one click (idempotent: threadId doubles as sessionId), and the conversion is recorded in Codex's import ledger so it never syncs the output back as a duplicate |
 | **Session preview** | Click any session row to open a read-only preview window: markdown rendering (DOMPurify-sanitized), tool calls aggregated into summary lines, only the last 300 messages of huge sessions loaded |
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
-| **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the app's resources are sealed by Gatekeeper's integrity check and cannot be touched, so only the wrapper is deployed — no UI toggle, but every session defaults to fast. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
+| **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the renderer is locked down by asar integrity validation and a sealed signature, so only the wrapper is deployed — no UI toggle, but every session defaults to fast. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
 
@@ -188,7 +190,7 @@ Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast
 
 | Component | How | Location |
 |---|---|---|
-| wrapper (both platforms) | Replaces the CLI inside the version directory, merges `fastMode:true` into `--settings` and forwards to the renamed official binary; Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
+| wrapper (both platforms) | Replaces the CLI inside the version directory, merges `fastMode:true` into `--settings` and forwards to the stashed official binary (renamed on Windows, moved bundle-and-all on macOS); Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
 | renderer patch (Windows only) | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Anchors are keyed on property names and string literals, with variable names captured by regex and filled back in, so a Desktop update that renames minified symbols does not break them. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
 
 The wrapper makes sessions fast by default; the toggle switches at runtime.
@@ -197,9 +199,11 @@ On Windows, writing under WindowsApps needs administrator rights: Claude++ relau
 
 On macOS only the wrapper is deployed, entirely in user space.
 
-The renderer half is impossible there: `Claude.app`'s resources are sealed by its code signature, and once they change Gatekeeper declares the app "damaged", refuses to launch it and moves it to the Trash — restoring the original file does not help either, because the verdict is cached through `com.apple.provenance` and LaunchServices (in testing, only rebuilding the app under a fresh inode recovered it).
+The renderer half is impossible there, and the lock has three layers: `app.asar`'s SHA256 is sealed into the `ElectronAsarIntegrity` key of `Info.plist`, with both the `EnableEmbeddedAsarIntegrityValidation` and `OnlyLoadAppFromAsar` fuses on, so any asar edit is caught; patching that hash in `Info.plist` fails because the plist itself is sealed by the main executable's signature; and the main executable runs under hardened runtime, so the moment its signature mismatches the kernel kills it at exec. The `RunAsNode`, `EnableNodeOptionsEnvironmentVariable` and `EnableNodeCliInspectArguments` fuses are all off too, so runtime injection is out as well. That leaves re-signing the whole app, but `com.apple.security.virtualization` is an Apple-granted entitlement that ad-hoc signing cannot produce — keep it and AMFI refuses to load the app, drop it and cowork sandbox sessions die. Also observed in testing: once its resources change, `Claude.app` is declared "damaged" by Gatekeeper, refused launch and moved to the Trash — restoring the original file does not help either, because the verdict is cached through `com.apple.provenance` and LaunchServices (only rebuilding the app under a fresh inode recovered it).
 
-The CLI half does not go through Gatekeeper's app-launch path (Desktop `posix_spawn`s it directly), so it runs fine with a broken bundle signature. But on every start Desktop reads the CLI's **first 8 bytes** and checks the Mach-O magic (`0xFEEDFACF` plus cputype, or a `0xCAFEBABE` universal binary); anything else invalidates the cache and re-downloads the whole bundle. So the stand-in cannot be a script — it is a **symlink to Claude++ itself**, which is a valid Mach-O the check follows the link to. When Claude++ finds it was invoked under the name `claude` it takes the wrapper branch: merge `fastMode` into `--settings`, then `exec` the official binary — same PID, so none of the Job Object machinery Windows needs. If the symlink breaks (Claude++ moved or deleted) Desktop simply re-downloads the official CLI, so the failure mode is "back to stock".
+The CLI half does not go through Gatekeeper's app-launch path (Desktop `posix_spawn`s it directly), but there is no getting around the kernel's signature check: the official CLI also runs under hardened runtime, and its signature is paired with `Contents/Info.plist`. Lift it out of the bundle or rename it and it stops counting as that bundle's main executable, the signature mismatches immediately and exec ends in SIGKILL (which Desktop then reports as "blocked by endpoint security", unrelated to any real EDR). So the official binary is stashed by moving **the entire bundle** to `claude-real.app` — the signature only cares about the `Contents/MacOS/<main executable>` structure, not what the bundle directory is called. The vacated `claude.app` keeps just a shell: `MacOS/claude` symlinked to Claude++ itself, `MacOS/claude-real` symlinked back to the real binary.
+
+On every start Desktop reads the CLI's **first 8 bytes** and checks the Mach-O magic (`0xFEEDFACF` plus cputype, or a `0xCAFEBABE` universal binary); anything else invalidates the cache and re-downloads the whole bundle. So the stand-in cannot be a script — it is a **symlink to Claude++ itself**, which is a valid Mach-O the check follows the link to. When Claude++ finds it was invoked under the name `claude` it takes the wrapper branch: merge `fastMode` into `--settings`, then `exec` the official binary — same PID, so none of the Job Object machinery Windows needs. If the symlink breaks (Claude++ moved or deleted) Desktop simply re-downloads the official CLI, so the failure mode is "back to stock".
 
 | Model | fast |
 |---|---|
@@ -233,7 +237,7 @@ cd src-tauri && cargo test    # unit tests (junction / migration fields / tombst
 - Transcripts are strictly read-only during unify and migration; Codex import only adds Claude transcripts and never touches Codex threads; tombstone deletions go to the recycle bin
 - Metadata writes use temp-file + atomic rename
 - Preview windows are read-only; rendered content is DOMPurify-sanitized
-- Fast Mode renames the official CLI in place, never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself. Creating and removing `.orig` means adding and deleting entries inside the package directory, which under WindowsApps only TrustedInstaller and SYSTEM may do, so ownership of the `assets1` directory itself is taken (non-recursive, harmless to Desktop updates, which rebuild the directory with default ACLs); on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
+- Fast Mode stashes the official CLI inside its version directory untouched (renamed on Windows, moved bundle-and-all on macOS), never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself. Creating and removing `.orig` means adding and deleting entries inside the package directory, which under WindowsApps only TrustedInstaller and SYSTEM may do, so ownership of the `assets1` directory itself is taken (non-recursive, harmless to Desktop updates, which rebuild the directory with default ACLs); on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
 
 ### Disclaimer
 

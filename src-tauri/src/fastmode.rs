@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(windows)]
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 pub const ELEVATED_FLAG: &str = "--fastmode-elevated";
@@ -221,7 +223,9 @@ fn wrapper_state_from(slot: SlotOccupant, real_present: bool) -> WrapperState {
     }
 }
 
-/// 空出 wrapper 的位置。官方本体改名让位；若官方已被 Desktop 重新下载覆盖，以新官方为准
+/// 空出 wrapper 的位置。官方本体改名让位；若官方已被 Desktop 重新下载覆盖，以新官方为准。
+/// macOS 不走这条：那边官方本体一改名签名就失配，得连 bundle 一起挪
+#[cfg(windows)]
 fn stage_wrapper_slot(exe: &Path, real: &Path, slot: SlotOccupant) -> Result<()> {
     let name = dir_label(exe);
     let real_name = dir_label(real);
@@ -241,6 +245,7 @@ fn stage_wrapper_slot(exe: &Path, real: &Path, slot: SlotOccupant) -> Result<()>
     Ok(())
 }
 
+#[cfg(windows)]
 fn remove_wrapper_in(exe: &Path, real: &Path) -> Result<bool> {
     if !real.is_file() {
         return Ok(false);
@@ -1057,19 +1062,28 @@ mod imp {
     use crate::procs;
 
     const DESKTOP_APP: &str = "/Applications/Claude.app";
-    const RENDERER_NOTE: &str =
-        "macOS 不 patch renderer：改 ion-dist 会让 Gatekeeper 判定 app 已损坏并拒绝启动";
+    const RENDERER_NOTE: &str = "macOS 不 patch renderer：app.asar 的 SHA256 封在 Info.plist 的 \
+         ElectronAsarIntegrity 键里，Info.plist 又被主程序签名 seal，主程序还开着 hardened runtime，\
+         这三层改任意一层都会在 exec 时被内核杀掉";
     const WRAPPER_NAME: &str = "claude";
     const REAL_NAME: &str = "claude-real";
+    const CLI_BUNDLE: &str = "claude.app";
+    const REAL_BUNDLE: &str = "claude-real.app";
+    /// 壳里指回官方本体：MacOS → Contents → claude.app → 版本目录
+    const REAL_LINK: &str = "../../../claude-real.app/Contents/MacOS/claude";
     const FAST_ONLY: &str = r#"{"fastMode":true}"#;
 
     fn cli_root() -> Option<PathBuf> {
         dirs::data_local_dir().map(|d| d.join("Claude-3p").join("claude-code"))
     }
 
+    fn bundle_bin_dir(bundle: &Path) -> PathBuf {
+        bundle.join("Contents").join("MacOS")
+    }
+
     /// 版本目录下 CLI 装在自己的 bundle 里，Desktop spawn 的是 bundle 内的可执行文件本体
     fn cli_bin_dir(version_dir: &Path) -> PathBuf {
-        version_dir.join("claude.app").join("Contents").join("MacOS")
+        bundle_bin_dir(&version_dir.join(CLI_BUNDLE))
     }
 
     fn wrapper_slot(version_dir: &Path) -> (PathBuf, PathBuf) {
@@ -1087,9 +1101,43 @@ mod imp {
         }
     }
 
+    fn real_bundle_bin(version_dir: &Path) -> PathBuf {
+        bundle_bin_dir(&version_dir.join(REAL_BUNDLE)).join(WRAPPER_NAME)
+    }
+
+    /// 主程序位上放的是官方本体（普通文件），wrapper 那份是软链
+    fn bundle_holds_official(bundle: &Path) -> bool {
+        bundle_bin_dir(bundle)
+            .join(WRAPPER_NAME)
+            .symlink_metadata()
+            .map(|meta| meta.is_file())
+            .unwrap_or(false)
+    }
+
+    /// 0.4.6 之前把官方本体抽出 bundle 改名 claude-real：一改名它就不再是 bundle 主程序，
+    /// 配不上 Contents/Info.plist，签名当场失效，再加 hardened runtime，exec 即被内核 SIGKILL
+    fn legacy_stash(version_dir: &Path) -> Option<PathBuf> {
+        let stash = cli_bin_dir(version_dir).join(REAL_NAME);
+        stash.symlink_metadata().ok().filter(|m| m.is_file()).map(|_| stash)
+    }
+
+    /// 把本体放回主程序位，签名随即恢复有效
+    fn restore_legacy(version_dir: &Path) -> Result<bool> {
+        let Some(stash) = legacy_stash(version_dir) else { return Ok(false) };
+        let exe = cli_bin_dir(version_dir).join(WRAPPER_NAME);
+        if exe.symlink_metadata().is_ok() {
+            fs::remove_file(&exe).context("移除旧 wrapper")?;
+        }
+        fs::rename(&stash, &exe).context("把官方本体放回 bundle 主程序位")?;
+        Ok(true)
+    }
+
     fn wrapper_state(version_dir: &Path) -> WrapperState {
-        let (exe, real) = wrapper_slot(version_dir);
-        wrapper_state_from(slot_occupant(&exe), real.is_file())
+        if legacy_stash(version_dir).is_some() {
+            return WrapperState::Broken;
+        }
+        let (exe, _) = wrapper_slot(version_dir);
+        wrapper_state_from(slot_occupant(&exe), real_bundle_bin(version_dir).is_file())
     }
 
     /// Info.plist 是 XML，取 CFBundleShortVersionString 不值得引 plist 依赖
@@ -1101,20 +1149,61 @@ mod imp {
         Some(after_key[start..start + end].trim().to_string())
     }
 
-    /// 顶替 bundle 里的 claude：软链到 Claude++ 本体，它是合格的 Mach-O，能过 Desktop 的头部检查。
-    /// bundle 签名随之失效，但 Desktop 用 posix_spawn 直接执行，不过 Gatekeeper
+    /// 官方本体连整个 bundle 一起挪进 claude-real.app：签名认的是 Contents/MacOS/<主程序>
+    /// 这层相对结构，bundle 目录叫什么它不在意，但把本体单独拎出来改名就立刻失配。
+    /// 腾出的 claude.app 只留一个壳，Desktop 读前 8 字节验 Mach-O 会顺着软链读到 Claude++ 本体
     fn deploy_wrapper(version_dir: &Path) -> Result<String> {
-        let (exe, real) = wrapper_slot(version_dir);
+        restore_legacy(version_dir)?;
+        let shell = version_dir.join(CLI_BUNDLE);
+        let stash = version_dir.join(REAL_BUNDLE);
+
+        if bundle_holds_official(&shell) {
+            if stash.exists() {
+                fs::remove_dir_all(&stash).context("清掉上一版官方 bundle")?;
+            }
+            fs::rename(&shell, &stash).with_context(|| format!("挪走官方 {CLI_BUNDLE}"))?;
+        } else if !bundle_holds_official(&stash) {
+            bail!("{} 里找不到官方 CLI 本体", dir_label(version_dir));
+        }
+
+        let bin = cli_bin_dir(version_dir);
+        fs::create_dir_all(&bin).context("建 wrapper 壳")?;
+        let plist = stash.join("Contents").join("Info.plist");
+        if plist.is_file() {
+            fs::copy(&plist, shell.join("Contents").join("Info.plist")).context("复制 Info.plist")?;
+        }
+
         let target = std::env::current_exe().context("定位 Claude++ 自身")?;
-        stage_wrapper_slot(&exe, &real, slot_occupant(&exe))?;
+        let (exe, real) = wrapper_slot(version_dir);
+        for link in [&exe, &real] {
+            if link.symlink_metadata().is_ok() {
+                fs::remove_file(link).with_context(|| format!("移除旧 {}", dir_label(link)))?;
+            }
+        }
         std::os::unix::fs::symlink(&target, &exe)
             .with_context(|| format!("软链 {WRAPPER_NAME} -> {}", target.display()))?;
+        std::os::unix::fs::symlink(REAL_LINK, &real)
+            .with_context(|| format!("软链 {REAL_NAME} -> {REAL_LINK}"))?;
         Ok(format!("wrapper 已部署到 {}", dir_label(version_dir)))
     }
 
     fn remove_wrapper(version_dir: &Path) -> Result<bool> {
-        let (exe, real) = wrapper_slot(version_dir);
-        remove_wrapper_in(&exe, &real)
+        let restored = restore_legacy(version_dir)?;
+        let shell = version_dir.join(CLI_BUNDLE);
+        let stash = version_dir.join(REAL_BUNDLE);
+        if !bundle_holds_official(&stash) {
+            return Ok(restored);
+        }
+        // Desktop 重下过官方，壳已被真本体盖回：留着 stash 只会多占一份
+        if bundle_holds_official(&shell) {
+            fs::remove_dir_all(&stash).context("清掉多余的 claude-real.app")?;
+            return Ok(true);
+        }
+        if shell.exists() {
+            fs::remove_dir_all(&shell).context("移除 wrapper 壳")?;
+        }
+        fs::rename(&stash, &shell).with_context(|| format!("还原官方 {CLI_BUNDLE}"))?;
+        Ok(true)
     }
 
     fn status_light() -> FastModeStatus {
@@ -1297,8 +1386,9 @@ mod imp {
     mod tests {
         use super::*;
 
+        /// 官方本体连 bundle 一起挪走，主程序位上的文件名和相对层级都保持原样
         #[test]
-        fn wrapper_symlinks_into_the_bundle() {
+        fn wrapper_shell_stands_in_for_the_bundle() {
             let dir = tempfile::tempdir().unwrap();
             let bin = cli_bin_dir(dir.path());
             fs::create_dir_all(&bin).unwrap();
@@ -1312,17 +1402,19 @@ mod imp {
             // 顶替物必须是软链：Desktop 读前 8 字节验 Mach-O，会跟着链子读到 Claude++ 本体
             assert!(exe.symlink_metadata().unwrap().is_symlink());
             assert_eq!(fs::read_link(&exe).unwrap(), std::env::current_exe().unwrap());
-            // 官方本体原样躺在隔壁，没有被复制或改写
+            // 本体仍叫 claude 且仍在 Contents/MacOS 下，签名才不会失配
+            assert_eq!(fs::read(real_bundle_bin(dir.path())).unwrap(), b"official binary");
+            assert!(real.symlink_metadata().unwrap().is_symlink());
             assert_eq!(fs::read(&real).unwrap(), b"official binary");
 
-            // 重复部署幂等：不会把软链自己当官方藏起来
+            // 重复部署幂等：不会把壳自己当官方挪走
             deploy_wrapper(dir.path()).unwrap();
             assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
-            assert_eq!(fs::read(&real).unwrap(), b"official binary");
+            assert_eq!(fs::read(real_bundle_bin(dir.path())).unwrap(), b"official binary");
 
             assert!(remove_wrapper(dir.path()).unwrap());
             assert_eq!(fs::read(&exe).unwrap(), b"official binary");
-            assert!(!real.exists());
+            assert!(!dir.path().join(REAL_BUNDLE).exists());
         }
 
         /// Desktop 判 not_macho 后会重下整个 bundle，官方本体盖回槽位：以新官方为准
@@ -1341,7 +1433,7 @@ mod imp {
 
             deploy_wrapper(dir.path()).unwrap();
             assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
-            assert_eq!(fs::read(bin.join(REAL_NAME)).unwrap(), b"official v2 redownloaded");
+            assert_eq!(fs::read(real_bundle_bin(dir.path())).unwrap(), b"official v2 redownloaded");
         }
 
         /// Claude++ 被移走会让软链断掉，还原不能被 exists() 的假 false 卡住
@@ -1351,8 +1443,10 @@ mod imp {
             let bin = cli_bin_dir(dir.path());
             fs::create_dir_all(&bin).unwrap();
             let exe = bin.join(WRAPPER_NAME);
-            let real = bin.join(REAL_NAME);
-            fs::write(&real, b"official").unwrap();
+            fs::write(&exe, b"official").unwrap();
+            deploy_wrapper(dir.path()).unwrap();
+
+            fs::remove_file(&exe).unwrap();
             std::os::unix::fs::symlink(dir.path().join("moved-away"), &exe).unwrap();
             assert!(!exe.exists());
             assert!(exe.symlink_metadata().is_ok());
@@ -1360,6 +1454,40 @@ mod imp {
 
             assert!(remove_wrapper(dir.path()).unwrap());
             assert_eq!(fs::read(&exe).unwrap(), b"official");
+        }
+
+        /// 0.4.6 之前装出来的布局：本体被抽出 bundle 改名，一 exec 就 SIGKILL。
+        /// 必须判成待修，让自动守护接手就地迁移
+        #[test]
+        fn legacy_layout_is_detected_and_migrated() {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = cli_bin_dir(dir.path());
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join(REAL_NAME), b"official binary").unwrap();
+            std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join(WRAPPER_NAME))
+                .unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Broken);
+
+            deploy_wrapper(dir.path()).unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
+            assert_eq!(fs::read(real_bundle_bin(dir.path())).unwrap(), b"official binary");
+            // 裸文件换成了软链，本体回到主程序位
+            assert!(bin.join(REAL_NAME).symlink_metadata().unwrap().is_symlink());
+        }
+
+        /// 旧布局上直接卸载：本体放回主程序位就恢复可执行，不用先修再卸
+        #[test]
+        fn legacy_layout_uninstalls_clean() {
+            let dir = tempfile::tempdir().unwrap();
+            let bin = cli_bin_dir(dir.path());
+            fs::create_dir_all(&bin).unwrap();
+            fs::write(bin.join(REAL_NAME), b"official binary").unwrap();
+            std::os::unix::fs::symlink(std::env::current_exe().unwrap(), bin.join(WRAPPER_NAME))
+                .unwrap();
+
+            assert!(remove_wrapper(dir.path()).unwrap());
+            assert_eq!(fs::read(bin.join(WRAPPER_NAME)).unwrap(), b"official binary");
+            assert!(!bin.join(REAL_NAME).exists());
         }
 
         #[test]
@@ -1495,6 +1623,7 @@ mod shared_tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn stage_slot_handles_every_shape() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("claude");
@@ -1521,6 +1650,7 @@ mod shared_tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn remove_wrapper_puts_official_back() {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("claude");
