@@ -28,11 +28,44 @@ pub fn desktop_command_lines() -> Vec<String> {
 /// (npm / native) don't match.
 #[cfg(not(windows))]
 pub fn desktop_command_lines() -> Vec<String> {
-    let mut cmd = Command::new("ps");
-    cmd.args(["-axo", "command="]);
-    collect_lines(cmd)
+    let me = self_exe_lower();
+    let hits: Vec<(String, String)> = ps_by_pid("pid=,comm=")
+        .into_iter()
+        .filter(|(_, exe)| is_desktop_exe_excluding(exe, me))
+        .collect();
+    if hits.is_empty() {
+        return Vec::new();
+    }
+    // userData 只从参数里露出来（crashpad --database、内嵌 CLI 路径），配回完整命令行
+    let commands = ps_by_pid("pid=,command=");
+    hits.into_iter()
+        .map(|(pid, exe)| {
+            commands
+                .iter()
+                .find(|(p, _)| *p == pid)
+                .map(|(_, line)| line.clone())
+                .unwrap_or(exe)
+        })
+        .collect()
 }
 
+/// pid 占首列且靠右对齐，取值本身可能含空格（`Discord Helper`），只切第一个空白
+#[cfg(not(windows))]
+fn ps_by_pid(fields: &str) -> Vec<(String, String)> {
+    let Ok(output) = Command::new("ps").args(["-axo", fields]).output() else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = line.trim_start().split_once(char::is_whitespace)?;
+            let rest = rest.trim();
+            (!rest.is_empty()).then(|| (pid.to_string(), rest.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(windows)]
 fn collect_lines(mut cmd: Command) -> Vec<String> {
     let Ok(output) = cmd.output() else {
         return Vec::new();
@@ -68,19 +101,15 @@ fn self_exe_lower() -> Option<&'static str> {
         .as_deref()
 }
 
-#[cfg(not(windows))]
-fn is_desktop_command_line(line: &str) -> bool {
-    is_desktop_line_excluding(line, self_exe_lower())
-}
-
 // --user-data-dir 是 Electron 通用参数（Discord、VS Code 都带），不能当识别特征；
-// 判定锚定在可执行路径的第一个 .app bundle 名上，参数里出现的路径不参与。
-// Claude++ 自己装在 Claude++.app 里，bundle 名同样含 claude，必须先按自身路径排掉，
-// 否则它会把自己算成 Desktop，写操作全被自己挡住
+// 判定锚定在可执行路径的第一个 .app bundle 名上。只能拿 ps 的 comm 来判，不能拿整条
+// 命令行：任何把 Claude.app/Contents/ 带在参数里的进程（终端、编辑器、构建脚本）
+// 都会被算成 Desktop，把所有写操作挡死。Claude++ 自己装在 Claude++.app 里，
+// bundle 名同样含 claude，必须先按自身路径排掉
 #[cfg(not(windows))]
-fn is_desktop_line_excluding(line: &str, self_exe: Option<&str>) -> bool {
-    let lower = line.to_lowercase();
-    if self_exe.is_some_and(|me| lower.starts_with(me)) {
+fn is_desktop_exe_excluding(exe: &str, self_exe: Option<&str>) -> bool {
+    let lower = exe.to_lowercase();
+    if self_exe.is_some_and(|me| lower == me) {
         return false;
     }
     if lower.contains("/npm/") || lower.contains("node_modules") {
@@ -223,19 +252,23 @@ mod tests {
 
     #[test]
     fn cli_binary_is_not_desktop() {
-        assert!(!is_desktop_command_line(
-            "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js -c"
+        assert!(!is_desktop_exe_excluding(
+            "/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+            None
         ));
-        assert!(!is_desktop_command_line("/Users/x/.local/bin/claude -c"));
-        assert!(is_desktop_command_line(
-            "/Applications/Claude.app/Contents/MacOS/Claude"
+        assert!(!is_desktop_exe_excluding("/Users/x/.local/bin/claude", None));
+        assert!(is_desktop_exe_excluding(
+            "/Applications/Claude.app/Contents/MacOS/Claude",
+            None
         ));
-        assert!(is_desktop_command_line(
-            "/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler --database=/Users/x/Library/Application Support/Claude-3p/Crashpad"
+        assert!(is_desktop_exe_excluding(
+            "/Applications/Claude.app/Contents/Frameworks/Electron Framework.framework/Helpers/chrome_crashpad_handler",
+            None
         ));
         // Desktop 分发的内嵌 claude-code 也是 Desktop 活动
-        assert!(is_desktop_command_line(
-            "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.219/claude.app/Contents/MacOS/claude --resume=x"
+        assert!(is_desktop_exe_excluding(
+            "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.219/claude.app/Contents/MacOS/claude",
+            None
         ));
     }
 
@@ -243,36 +276,40 @@ mod tests {
     #[test]
     fn claude_plus_plus_does_not_block_itself() {
         let me = "/applications/claude++.app/contents/macos/claude-plus-plus";
-        let self_line = "/Applications/Claude++.app/Contents/MacOS/claude-plus-plus";
-        assert!(is_desktop_line_excluding(self_line, None));
-        assert!(!is_desktop_line_excluding(self_line, Some(me)));
+        let self_exe = "/Applications/Claude++.app/Contents/MacOS/claude-plus-plus";
+        assert!(is_desktop_exe_excluding(self_exe, None));
+        assert!(!is_desktop_exe_excluding(self_exe, Some(me)));
         // 排除只认自身这一条路径，Desktop 本体照常识别
-        assert!(is_desktop_line_excluding(
+        assert!(is_desktop_exe_excluding(
             "/Applications/Claude.app/Contents/MacOS/Claude",
             Some(me)
         ));
         // 被软链当 bundled CLI 起起来时 ps 显示的是软链路径，那仍是 Desktop 活动
-        assert!(is_desktop_line_excluding(
-            "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.260/claude.app/Contents/MacOS/claude --resume=y",
-            Some(me)
-        ));
-        // 别的进程把 Claude++ 路径带在参数里，不该被当成自身而漏判
-        assert!(is_desktop_line_excluding(
-            "/Applications/Claude.app/Contents/MacOS/Claude --open /Applications/Claude++.app/Contents/MacOS/claude-plus-plus",
+        assert!(is_desktop_exe_excluding(
+            "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.260/claude.app/Contents/MacOS/claude",
             Some(me)
         ));
     }
 
     #[test]
     fn other_electron_apps_are_not_desktop() {
-        // --user-data-dir 是 Electron 通用参数，Discord 不是 Desktop
-        assert!(!is_desktop_command_line(
-            "/Applications/Discord.app/Contents/Frameworks/Discord Helper.app/Contents/MacOS/Discord Helper --type=gpu-process --user-data-dir=/Users/x/Library/Application Support/discord"
+        assert!(!is_desktop_exe_excluding(
+            "/Applications/Discord.app/Contents/Frameworks/Discord Helper.app/Contents/MacOS/Discord Helper",
+            None
         ));
-        // 参数里出现含 claude 的项目路径不该让 VS Code 变成 Desktop
-        assert!(!is_desktop_command_line(
-            "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper /Users/x/work/ClaudePlusPlus"
+        assert!(!is_desktop_exe_excluding(
+            "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper",
+            None
         ));
+    }
+
+    /// 判定输入必须是 comm 而非整条命令行：把 Claude.app/Contents/ 带在参数里的
+    /// 终端、编辑器、构建脚本一律不是 Desktop，否则写操作会被自己挡死
+    #[test]
+    fn argv_paths_do_not_make_a_desktop() {
+        assert!(!is_desktop_exe_excluding("/bin/zsh", None));
+        assert!(!is_desktop_exe_excluding("/usr/bin/make", None));
+        assert!(!is_desktop_exe_excluding("/opt/homebrew/bin/node", None));
     }
 
     #[test]
