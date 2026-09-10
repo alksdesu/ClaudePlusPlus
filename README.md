@@ -74,7 +74,7 @@ Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能�
 | 组件 | 做法 | 落点 |
 |---|---|---|
 | wrapper（两平台） | 顶替版本目录里的 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给改名保留的官方本体；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
-| renderer patch（仅 Windows） | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
+| renderer patch（仅 Windows） | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。锚点以属性名与字符串字面量为骨架、变量名正则捕获后回填，Desktop 更新重命名 minify 符号不会失配。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
 
 wrapper 管"会话默认 fast"，开关管"实时切换"。
 
@@ -96,7 +96,7 @@ CLI 那半边不走 Gatekeeper 的应用启动路径（Desktop 用 `posix_spawn`
 
 验证以转录里的 `usage.speed` 为准（页面底部的验证卡统计的就是它），Desktop 状态栏的 Fast 标签有官方显示 bug。
 
-Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。若 Desktop 大版本改动让 Windows 那三处锚点匹配不上，页面会列出未命中项：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`。「还原官方」一键撤销全部改动。
+Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`。「还原官方」一键撤销全部改动。
 
 ### 构建
 
@@ -189,7 +189,7 @@ Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast
 | Component | How | Location |
 |---|---|---|
 | wrapper (both platforms) | Replaces the CLI inside the version directory, merges `fastMode:true` into `--settings` and forwards to the renamed official binary; Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
-| renderer patch (Windows only) | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
+| renderer patch (Windows only) | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Anchors are keyed on property names and string literals, with variable names captured by regex and filled back in, so a Desktop update that renames minified symbols does not break them. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
 
 The wrapper makes sessions fast by default; the toggle switches at runtime.
 
@@ -211,7 +211,7 @@ That column decides toggle visibility on Windows. macOS has no toggle: the wrapp
 
 Trust `usage.speed` in the transcript (the verification card at the bottom of the tab counts exactly that); the Fast label in Desktop's status bar has a known display bug.
 
-A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. If a major Desktop release changes the renderer so Windows' three anchors no longer match, the tab lists the misses: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics. "Restore official" undoes everything in one click.
+A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`. "Restore official" undoes everything in one click.
 
 ### Build
 

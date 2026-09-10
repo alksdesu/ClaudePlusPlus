@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "claude-plus-plus"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -335,6 +335,7 @@ dependencies = [
  "junction",
  "memchr",
  "notify",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

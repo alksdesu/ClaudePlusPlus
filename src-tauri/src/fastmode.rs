@@ -374,30 +374,151 @@ mod imp {
         }
     }
 
+    /// 一处改动：pattern 定位原始代码，patched 识别已改的形态，两者都只该命中一次。
+    /// regex crate 不支持反向引用，同一变量的多处出现改为独立命名捕获，由 aliases 声明必须同名
     struct Anchor {
         label: &'static str,
-        from: &'static str,
-        to: &'static str,
+        pattern: &'static str,
+        patched: &'static str,
+        aliases: &'static [(&'static str, &'static str)],
     }
 
-    /// 基于 Desktop 1.46388.4.0 的 minified renderer；版本变化后三处 FROM 需重新定位
+    /// minify 只重命名局部变量与函数，属性名和字符串字面量不动 —— 锚点拿它们当骨架，
+    /// 变量名捕获后回填，Desktop 更新重命名符号也不会失配
+    struct Renderer<'a> {
+        text: &'a str,
+    }
+
     const ANCHORS: [Anchor; 3] = [
         Anchor {
-            label: "Bc 显示条件",
-            from: r#"let u=(r||i)&&a&&o&&!i&&(t?n:e==="local"||e==="ssh")&&!s&&c;return{showFastModeToggle:u,fastModeToggleDisabled:u&&l}"#,
-            to: r#"let u=a&&c;return{showFastModeToggle:u,fastModeToggleDisabled:!1}"#,
+            label: "显示条件",
+            pattern: concat!(
+                r"(?P<sig>fastModeIpcAvailable:(?P<ipc>\w+),(?:\w+:\w+,)*?modelSupportsFastMode:(?P<sup>\w+),",
+                r"(?:\w+:\w+,)*?\w+:\w+\}\)\{)let (?P<show>\w+)=[^;]+;",
+                r"return\{showFastModeToggle:(?P<show2>\w+),fastModeToggleDisabled:[^}]*\}",
+            ),
+            patched: r"return\{showFastModeToggle:\w+,fastModeToggleDisabled:!1\}",
+            aliases: &[("show", "show2")],
         },
         Anchor {
-            label: "zc 模型支持判定",
-            from: r#",S=b&&x,C=t(e=>o(F(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Ue()),[o]),w=b&&!x,"#,
-            to: r#",S=!!(a&&(a.toLowerCase().includes("opus-5")||a.toLowerCase().includes("opus-4-8"))),C=t(e=>!!(e&&(e.toLowerCase().includes("opus-5")||e.toLowerCase().includes("opus-4-8"))),[]),w=!1,"#,
+            label: "模型支持判定",
+            pattern: concat!(
+                r",(?P<sup>\w+)=(?P<has>\w+)&&(?P<is46>\w+),(?P<fnc>\w+)=(?P<cb>\w+)\((?P<arg>\w+)=>",
+                r"\w+\(\w+\((?P<arg2>\w+)\)\)!==void 0&&",
+                r#"\((?P<arg3>\w+)\.toLowerCase\(\)\.includes\("opus-4-6"\)\|\|\w+\(\)\),\[\w+\]\),"#,
+                r"(?P<needs>\w+)=(?P<has2>\w+)&&!(?P<is46b>\w+),",
+            ),
+            patched: r#",\w+=!!\(\w+&&\(\w+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
+            aliases: &[("arg", "arg2"), ("arg", "arg3"), ("has", "has2"), ("is46", "is46b")],
         },
         Anchor {
-            label: "zc 禁用原因",
-            from: r#"D=Vc(r?.fastModeDisabledReason,{hasRaven:E,canManageOrg:m}),O=D!==null"#,
-            to: r#"D=null,O=!1"#,
+            label: "禁用原因",
+            pattern: concat!(
+                r"(?P<msg>\w+)=\w+\(\w+\?\.fastModeDisabledReason,",
+                r"\{hasRaven:\w+,canManageOrg:\w+\}\),(?P<flag>\w+)=(?P<msg2>\w+)!==null",
+            ),
+            patched: r",\w+=null,\w+=!1,",
+            aliases: &[("msg", "msg2")],
         },
     ];
+
+    /// 目标函数的 modelId 形参：全文有多个 modelId: 属性，取被改代码所在函数的那个
+    const MODEL_ID_SIGNATURE: &str = r"function \w+\(\{[^{}]*?modelId:(\w+)[^{}]*?\}\)\{";
+
+    fn rx(pattern: &str) -> regex::Regex {
+        regex::Regex::new(pattern).expect("锚点正则")
+    }
+
+    /// 恰好一处命中才可信：零处说明版本漂移，多处说明骨架太松会误伤
+    fn unique_match<'a>(
+        text: &'a str,
+        pattern: &str,
+        aliases: &[(&str, &str)],
+    ) -> Option<regex::Captures<'a>> {
+        let re = rx(pattern);
+        let mut hits = re.captures_iter(text).filter(|c| {
+            aliases
+                .iter()
+                .all(|(a, b)| c.name(a).map(|m| m.as_str()) == c.name(b).map(|m| m.as_str()))
+        });
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first)
+    }
+
+    impl<'a> Renderer<'a> {
+        fn new(text: &'a str) -> Self {
+            Self { text }
+        }
+
+        fn find(&self, anchor: &Anchor) -> Option<regex::Captures<'a>> {
+            unique_match(self.text, anchor.pattern, anchor.aliases)
+        }
+
+        fn model_id_before(&self, offset: usize) -> Option<String> {
+            rx(MODEL_ID_SIGNATURE)
+                .captures_iter(&self.text[..offset])
+                .last()
+                .map(|c| c[1].to_string())
+        }
+
+        fn is_patched(&self) -> bool {
+            ANCHORS
+                .iter()
+                .all(|a| unique_match(self.text, a.patched, &[]).is_some())
+        }
+
+        fn missing(&self) -> Vec<String> {
+            ANCHORS
+                .iter()
+                .filter(|a| self.find(a).is_none())
+                .map(|a| a.label.to_string())
+                .collect()
+        }
+
+        /// 逐处改写：显示条件收敛为 IPC 可用且模型支持，模型支持改按 ID 判定，禁用原因清空
+        fn patch(&self) -> Result<String> {
+            let show = self.find(&ANCHORS[0]).context("显示条件锚点未唯一命中")?;
+            let replacement = format!(
+                "{}let {}={}&&{};return{{showFastModeToggle:{},fastModeToggleDisabled:!1}}",
+                &show["sig"], &show["show"], &show["ipc"], &show["sup"], &show["show"]
+            );
+            let mut text = self.text.replace(&show[0], &replacement);
+
+            let support = {
+                let staged = Renderer::new(&text);
+                let caps = staged.find(&ANCHORS[1]).context("模型支持锚点未唯一命中")?;
+                let whole = caps[0].to_string();
+                let model_id = staged
+                    .model_id_before(caps.get(0).unwrap().start())
+                    .context("未能在目标函数签名里定位 modelId")?;
+                // Opus 4.6 客户端认它但服务端已不再给 fast，只放 5 与 4.8
+                let supports = |id: &str| {
+                    format!(
+                        r#"!!({id}&&({id}.toLowerCase().includes("opus-5")||{id}.toLowerCase().includes("opus-4-8")))"#
+                    )
+                };
+                let replacement = format!(
+                    ",{}={},{}={}({}=>{},[]),{}=!1,",
+                    &caps["sup"],
+                    supports(&model_id),
+                    &caps["fnc"],
+                    &caps["cb"],
+                    &caps["arg"],
+                    supports(&caps["arg"]),
+                    &caps["needs"]
+                );
+                (whole, replacement)
+            };
+            text = text.replace(&support.0, &support.1);
+
+            let reason = {
+                let staged = Renderer::new(&text);
+                let caps = staged.find(&ANCHORS[2]).context("禁用原因锚点未唯一命中")?;
+                (caps[0].to_string(), format!("{}=null,{}=!1", &caps["msg"], &caps["flag"]))
+            };
+            Ok(text.replace(&reason.0, &reason.1))
+        }
+    }
 
     fn powershell(script: &str) -> Option<String> {
         let mut cmd = Command::new("powershell");
@@ -444,6 +565,8 @@ mod imp {
         )
     }
 
+    /// 认文件靠属性名：函数名随 minify 变，showFastModeToggle 也出现在别的 bundle 里，
+    /// fastModeToggleDisabled 才只属于要改的那个
     fn renderer_file(v1: &Path) -> Option<PathBuf> {
         for entry in fs::read_dir(v1).ok()?.flatten() {
             let path = entry.path();
@@ -451,7 +574,7 @@ mod imp {
                 continue;
             }
             let Ok(text) = fs::read_to_string(&path) else { continue };
-            if text.contains("function Bc(") && text.contains("showFastModeToggle") {
+            if text.contains("fastModeToggleDisabled") && text.contains("fastModeDisabledReason") {
                 return Some(path);
             }
         }
@@ -459,14 +582,11 @@ mod imp {
     }
 
     fn classify(text: &str) -> (RendererState, Vec<String>) {
-        if ANCHORS.iter().all(|a| text.contains(a.to)) {
+        let renderer = Renderer::new(text);
+        if renderer.is_patched() {
             return (RendererState::Patched, Vec::new());
         }
-        let missing: Vec<String> = ANCHORS
-            .iter()
-            .filter(|a| !text.contains(a.from))
-            .map(|a| a.label.to_string())
-            .collect();
+        let missing = renderer.missing();
         if missing.is_empty() {
             (RendererState::Pristine, Vec::new())
         } else {
@@ -474,10 +594,28 @@ mod imp {
         }
     }
 
-    fn apply_anchors(text: &str) -> String {
-        ANCHORS
-            .iter()
-            .fold(text.to_string(), |acc, a| acc.replace(a.from, a.to))
+    /// 供 example 对真实 renderer 做端到端演练，不写文件
+    pub fn probe_patch(text: &str) -> String {
+        let before = classify(text);
+        let patched = match Renderer::new(text).patch() {
+            Ok(patched) => patched,
+            Err(error) => return format!("before={:?} patch failed: {error}", before.0),
+        };
+        let after = classify(&patched);
+        let shown = |pattern: &str| {
+            rx(pattern)
+                .find(&patched)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default()
+        };
+        format!(
+            "before={:?} after={:?} delta={} bytes\n  show: {}\n  supports: {}",
+            before.0,
+            after.0,
+            patched.len() as i64 - text.len() as i64,
+            shown(r"return\{showFastModeToggle:[^}]*\}"),
+            shown(r",\w+=!!\(\w+&&\(\w+\.toLowerCase\(\)[^,]*,"),
+        )
     }
 
     fn renderer_info(msix_root: Option<&Path>) -> RendererInfo {
@@ -572,7 +710,7 @@ mod imp {
 
     /// 始终从 .orig 出发 patch，保证幂等；.orig 必须是官方原始，否则拒绝
     fn patch_renderer(v1: &Path) -> Result<String> {
-        let live = renderer_file(v1).context("未找到含 function Bc( 的 renderer")?;
+        let live = renderer_file(v1).context("未找到 fast mode 所在的 renderer")?;
         take_ownership(&live)?;
         let orig = live.with_extension("js.orig");
         if !orig.exists() {
@@ -586,7 +724,8 @@ mod imp {
             }
             (state, _) => bail!("备份文件状态异常: {state:?}"),
         }
-        fs::write(&live, apply_anchors(&source)).context("写回 renderer")?;
+        let patched = Renderer::new(&source).patch()?;
+        fs::write(&live, patched).context("写回 renderer")?;
         Ok(format!("renderer 已 patch: {}", dir_label(&live)))
     }
 
@@ -792,25 +931,81 @@ mod imp {
     mod tests {
         use super::*;
 
-        fn pristine_text() -> String {
-            format!(
-                "import x;function Bc(){{{}}}function zc(){{{}{}}}showFastModeToggle",
-                ANCHORS[0].from, ANCHORS[1].from, ANCHORS[2].from
-            )
+        /// 1.46388.4.0 的真实片段：变量名与 1.49585 那版不同，用来钉住跨版本能力
+        const OLD_RENDERER: &str = concat!(
+            r#"function zc({sessionRef:t,sessionMeta:n,selectedFolder:r,modelId:a,fastModeFor:o,capabilities:s,config:l,openingKey:u}){"#,
+            r#"let b=i?o(F(i))!==void 0:!1,x=(a?.toLowerCase().includes("opus-4-6")??!1)||Ue(),"#,
+            r#",S=b&&x,C=t(e=>o(F(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Ue()),[o]),w=b&&!x,"#,
+            r#"D=Vc(r?.fastModeDisabledReason,{hasRaven:E,canManageOrg:m}),O=D!==null,j=1}"#,
+            r#"function Bc({isNew:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,perSessionOptInAllowed:o,"#,
+            r#"fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
+            r#"let u=(r||i)&&a&&o&&!i&&(t?n:e==="local"||e==="ssh")&&!s&&c;"#,
+            r#"return{showFastModeToggle:u,fastModeToggleDisabled:u&&l}}"#,
+        );
+
+        /// 1.49585.0.0 的真实片段：函数改名 zc→df / Bc→xf，modelId 形参 a→i
+        const NEW_RENDERER: &str = concat!(
+            r#"function df({sessionRef:t,sessionMeta:n,selectedFolder:r,modelId:i,fastModeFor:o,capabilities:s,config:l,openingKey:u}){"#,
+            r#"let b=i?o(D(i))!==void 0:!1,x=(i?.toLowerCase().includes("opus-4-6")??!1)||Be(),"#,
+            r#",S=b&&x,C=e(e=>o(D(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Be()),[o]),w=b&&!x,"#,
+            r#"O=pf(n?.fastModeDisabledReason,{hasRaven:E,canManageOrg:h}),A=O!==null,j=1}"#,
+            r#"function xf({isNew:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,perSessionOptInAllowed:o,"#,
+            r#"fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
+            r#"let u=(r||i)&&a&&o&&!i&&(t?n:e==="local"||e==="ssh")&&!s&&c;"#,
+            r#"return{showFastModeToggle:u,fastModeToggleDisabled:u&&l}}"#,
+        );
+
+        #[test]
+        fn patches_both_desktop_versions() {
+            for (label, source) in [("1.46388", OLD_RENDERER), ("1.49585", NEW_RENDERER)] {
+                assert_eq!(classify(source).0, RendererState::Pristine, "{label} 原始识别");
+                let patched = Renderer::new(source).patch().expect(label);
+                assert_eq!(classify(&patched).0, RendererState::Patched, "{label} patch 后识别");
+                assert!(patched.contains("fastModeToggleDisabled:!1"), "{label} 开关不再禁用");
+                assert!(!patched.contains("fastModeDisabledReason,"), "{label} 禁用原因已断开");
+                assert!(patched.contains(r#"includes("opus-4-8")"#), "{label} 放行 4.8");
+                // 4.6 只该留在被弃用的 x 定义里，判定里不该再出现
+                assert!(!patched.contains(r#"includes("opus-4-6")||"#), "{label} 不再认 4.6");
+            }
         }
 
         #[test]
-        fn classify_three_states() {
-            let pristine = pristine_text();
-            assert_eq!(classify(&pristine).0, RendererState::Pristine);
-            let patched = apply_anchors(&pristine);
-            assert_eq!(classify(&patched).0, RendererState::Patched);
-            // 再 patch 一次不变：幂等
-            assert_eq!(apply_anchors(&patched), patched);
-            let drifted = pristine.replace(ANCHORS[1].from, "S=something_else,");
+        fn model_id_comes_from_the_target_function() {
+            // 两版的 modelId 形参不同名，硬编码任一个都会在另一版生成引用错变量的代码
+            for (source, model_id, other) in [(OLD_RENDERER, "a", "i"), (NEW_RENDERER, "i", "a")] {
+                let patched = Renderer::new(source).patch().unwrap();
+                let expected = format!(r#"!!({model_id}&&({model_id}.toLowerCase()"#);
+                assert!(patched.contains(&expected), "应引用 {model_id}");
+                assert!(
+                    !patched.contains(&format!(r#"!!({other}&&({other}.toLowerCase()"#)),
+                    "不该引用 {other}"
+                );
+            }
+        }
+
+        #[test]
+        fn patch_is_idempotent() {
+            let once = Renderer::new(NEW_RENDERER).patch().unwrap();
+            // 已改过的文本锚点不再命中，重复 patch 直接报错而非改坏
+            assert!(Renderer::new(&once).patch().is_err());
+            assert_eq!(classify(&once).0, RendererState::Patched);
+        }
+
+        #[test]
+        fn drifted_anchor_is_reported_not_patched() {
+            let drifted = NEW_RENDERER.replace(",S=b&&x,C=e(", ",S=totally_new_shape,C=e(");
             let (state, missing) = classify(&drifted);
             assert_eq!(state, RendererState::Mismatch);
-            assert_eq!(missing, vec!["zc 模型支持判定".to_string()]);
+            assert_eq!(missing, vec!["模型支持判定".to_string()]);
+            assert!(Renderer::new(&drifted).patch().is_err());
+        }
+
+        #[test]
+        fn ambiguous_match_is_refused() {
+            // 骨架太松会误伤：同一形态出现两次即视为不可信
+            let doubled = format!("{NEW_RENDERER}{NEW_RENDERER}");
+            assert_eq!(classify(&doubled).0, RendererState::Mismatch);
+            assert!(Renderer::new(&doubled).patch().is_err());
         }
     }
 }
