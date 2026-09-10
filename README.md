@@ -118,7 +118,7 @@ cd src-tauri && cargo test    # 单元测试（junction / 迁移字段 / 墓碑�
 - 会话转录 jsonl 在归一与迁移全程只读；Codex 迁移只新增 Claude 转录、不改 Codex 会话本体；墓碑清理的删除走系统回收站
 - 元数据写入采用临时文件 + 原子改名
 - 预览窗口全程只读，渲染前经 DOMPurify 消毒
-- Fast Mode：官方 CLI 改名保留在原目录，不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
+- Fast Mode：官方 CLI 改名保留在原目录，不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包。备份与还原要在包目录里增删 `.orig`，而 WindowsApps 下只有 TrustedInstaller 与 SYSTEM 可写，因此会对 `assets1` 这一层目录取得所有权（不递归、不影响 Desktop 更新，更新后目录重建即恢复默认）；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
 
 ### 免责
 
@@ -233,7 +233,7 @@ cd src-tauri && cargo test    # unit tests (junction / migration fields / tombst
 - Transcripts are strictly read-only during unify and migration; Codex import only adds Claude transcripts and never touches Codex threads; tombstone deletions go to the recycle bin
 - Metadata writes use temp-file + atomic rename
 - Preview windows are read-only; rendered content is DOMPurify-sanitized
-- Fast Mode renames the official CLI in place, never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself; on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
+- Fast Mode renames the official CLI in place, never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself. Creating and removing `.orig` means adding and deleting entries inside the package directory, which under WindowsApps only TrustedInstaller and SYSTEM may do, so ownership of the `assets1` directory itself is taken (non-recursive, harmless to Desktop updates, which rebuild the directory with default ACLs); on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
 
 ### Disclaimer
 

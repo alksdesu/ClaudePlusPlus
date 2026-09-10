@@ -530,10 +530,18 @@ mod imp {
     }
 
     fn quiet(program: &str, args: &[&str]) -> bool {
+        run_checked(program, args).is_ok()
+    }
+
+    fn run_checked(program: &str, args: &[&str]) -> Result<()> {
         let mut cmd = Command::new(program);
         cmd.args(args);
         cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.output().map(|o| o.status.success()).unwrap_or(false)
+        let output = cmd.output().with_context(|| format!("执行 {program}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        bail!("{program} 退出码 {:?}", output.status.code())
     }
 
     /// (version, install root)；WindowsApps 根目录用户态不可列，只能从包注册表问
@@ -695,27 +703,33 @@ mod imp {
         remove_wrapper_in(&dir.join("claude.exe"), &dir.join("claude-real.exe"))
     }
 
-    fn take_ownership(path: &Path) -> Result<()> {
-        let file = path.to_string_lossy().into_owned();
+    /// WindowsApps 下 TrustedInstaller 与 SYSTEM 之外无人可写，管理员也不行。
+    /// 改文件内容只需文件权限，新建或删除 .orig 是在目录里增删条目，还要目录权限。
+    fn grant_write(path: &Path) -> Result<()> {
+        let target = path.to_string_lossy().into_owned();
         let user = std::env::var("USERNAME").context("读取 USERNAME")?;
-        if !quiet("takeown", &["/f", &file]) {
-            bail!("takeown 失败: {file}");
-        }
-        let grant = format!("{user}:F");
-        if !quiet("icacls", &[&file, "/grant", &grant]) {
-            bail!("icacls 失败: {file}");
-        }
+        run_checked("takeown", &["/f", &target])
+            .with_context(|| format!("接管 {target}"))?;
+        // 目录加 (OI)(CI)，让之后建出来的 .orig 直接继承可写
+        let grant = if path.is_dir() {
+            format!("{user}:(OI)(CI)F")
+        } else {
+            format!("{user}:F")
+        };
+        run_checked("icacls", &[&target, "/grant", &grant])
+            .with_context(|| format!("授权 {target}"))?;
         Ok(())
     }
 
     /// 始终从 .orig 出发 patch，保证幂等；.orig 必须是官方原始，否则拒绝
     fn patch_renderer(v1: &Path) -> Result<String> {
         let live = renderer_file(v1).context("未找到 fast mode 所在的 renderer")?;
-        take_ownership(&live)?;
         let orig = live.with_extension("js.orig");
         if !orig.exists() {
+            grant_write(v1)?;
             fs::copy(&live, &orig).context("备份 .orig")?;
         }
+        grant_write(&live)?;
         let source = fs::read_to_string(&orig).context("读取 .orig")?;
         match classify(&source) {
             (RendererState::Pristine, _) => {}
@@ -737,9 +751,11 @@ mod imp {
                 continue;
             }
             let live = orig.with_extension("");
-            take_ownership(&live)?;
+            grant_write(&live)?;
             fs::copy(&orig, &live).with_context(|| format!("还原 {}", live.display()))?;
-            fs::remove_file(&orig)?;
+            // 删 .orig 同样是改目录条目
+            grant_write(v1)?;
+            fs::remove_file(&orig).with_context(|| format!("移除 {}", orig.display()))?;
             restored += 1;
         }
         Ok(restored)
@@ -800,7 +816,7 @@ mod imp {
             Ok(message) => ElevatedResult { ok: true, message },
             Err(error) => ElevatedResult {
                 ok: false,
-                message: error.to_string(),
+                message: format!("{error:#}"),
             },
         };
         let _ = fs::create_dir_all(settings_dir());
@@ -919,10 +935,10 @@ mod imp {
                 RepairOutcome::Repaired(summary)
             }
             Err(error) => {
-                settings.last_failure = Some(error.to_string());
+                settings.last_failure = Some(format!("{error:#}"));
                 settings.failed_for = Some(key);
                 let _ = save_settings(&settings);
-                RepairOutcome::Failed(error.to_string())
+                RepairOutcome::Failed(format!("{error:#}"))
             }
         }
     }
@@ -1196,10 +1212,10 @@ mod imp {
                 RepairOutcome::Repaired(summary)
             }
             Err(error) => {
-                settings.last_failure = Some(error.to_string());
+                settings.last_failure = Some(format!("{error:#}"));
                 settings.failed_for = Some(key);
                 let _ = save_settings(&settings);
-                RepairOutcome::Failed(error.to_string())
+                RepairOutcome::Failed(format!("{error:#}"))
             }
         }
     }

@@ -437,7 +437,7 @@ pub fn purge_tombstones(
                 match remove_path(&jsonl, recycle) {
                     Ok(()) => outcome.transcript_removed = true,
                     Err(error) => {
-                        outcome.error = Some(error.to_string());
+                        outcome.error = Some(format!("{error:#}"));
                         outcomes.push(outcome);
                         continue;
                     }
@@ -446,7 +446,7 @@ pub fn purge_tombstones(
         }
         match remove_path(&code_dir.join(name), recycle) {
             Ok(()) => outcome.marker_removed = true,
-            Err(error) => outcome.error = Some(error.to_string()),
+            Err(error) => outcome.error = Some(format!("{error:#}")),
         }
         outcomes.push(outcome);
     }

@@ -93,7 +93,7 @@ fn apply_unify_all() -> Result<Vec<UnifyReport>, String> {
             if plan.to_merge.is_empty() {
                 continue;
             }
-            results.push(unify::apply_unify(&plan).map_err(|e| e.to_string())?);
+            results.push(unify::apply_unify(&plan).map_err(|e| format!("{e:#}"))?);
         }
     }
     Ok(results)
@@ -102,7 +102,7 @@ fn apply_unify_all() -> Result<Vec<UnifyReport>, String> {
 #[tauri::command(async)]
 fn restore_combo(path: String, org_id: String) -> Result<(), String> {
     ensure_desktop_stopped()?;
-    unify::restore_combo(&PathBuf::from(path), &org_id).map_err(|e| e.to_string())
+    unify::restore_combo(&PathBuf::from(path), &org_id).map_err(|e| format!("{e:#}"))
 }
 
 fn canonical_code_dir() -> Result<PathBuf, String> {
@@ -160,7 +160,7 @@ fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<Reg
             Err(error) => results.push(RegisterReport {
                 session_id: id,
                 outcome: None,
-                error: Some(error.to_string()),
+                error: Some(format!("{error:#}")),
             }),
         }
     }
@@ -182,7 +182,7 @@ fn unregister_sessions(metadata_files: Vec<String>, hard_delete: bool) -> Result
             Err(error) => results.push(UnregisterReport {
                 metadata_file: file,
                 outcome: None,
-                error: Some(error.to_string()),
+                error: Some(format!("{error:#}")),
             }),
         }
     }
@@ -252,7 +252,7 @@ fn delete_sessions(
             Err(error) => results.push(DeleteReport {
                 target: file,
                 outcome: None,
-                error: Some(error.to_string()),
+                error: Some(format!("{error:#}")),
             }),
         }
     }
@@ -269,7 +269,7 @@ fn delete_sessions(
             Err(error) => results.push(DeleteReport {
                 target: id,
                 outcome: None,
-                error: Some(error.to_string()),
+                error: Some(format!("{error:#}")),
             }),
         }
     }
@@ -322,7 +322,7 @@ fn migrate_codex_sessions(thread_ids: Vec<String>) -> Result<Vec<CodexMigrateRep
             Err(error) => results.push(CodexMigrateReport {
                 thread_id: id,
                 outcome: None,
-                error: Some(error.to_string()),
+                error: Some(format!("{error:#}")),
             }),
         }
     }
@@ -355,7 +355,7 @@ async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: St
         .min_inner_size(480.0, 360.0)
         .decorations(false)
         .build()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("{e:#}"))?;
     Ok(())
 }
 
@@ -369,19 +369,19 @@ fn load_preview(kind: String, id: String) -> Result<preview::SessionPreview, Str
             let projects = cli_projects_dir()?;
             let target = format!("{id}.jsonl");
             let path = std::fs::read_dir(&projects)
-                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("{e:#}"))?
                 .flatten()
                 .map(|p| p.path().join(&target))
                 .find(|p| p.is_file())
                 .ok_or("找不到该会话的转录（可能已删除或位于沙箱内）")?;
-            preview::preview_claude_jsonl(&path).map_err(|e| e.to_string())
+            preview::preview_claude_jsonl(&path).map_err(|e| format!("{e:#}"))
         }
         "codex" => {
             let session = codex::list_codex_sessions()
                 .into_iter()
                 .find(|s| s.thread_id == id)
                 .ok_or("找不到该 Codex 会话")?;
-            preview::preview_codex_rollout(&session.rollout_path).map_err(|e| e.to_string())
+            preview::preview_codex_rollout(&session.rollout_path).map_err(|e| format!("{e:#}"))
         }
         _ => Err("未知预览类型".into()),
     }
@@ -405,17 +405,17 @@ fn fastmode_status() -> FastModeStatus {
 
 #[tauri::command(async)]
 fn fastmode_install() -> Result<ActionReport, String> {
-    fastmode::install().map_err(|e| e.to_string())
+    fastmode::install().map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
 fn fastmode_uninstall() -> Result<ActionReport, String> {
-    fastmode::uninstall().map_err(|e| e.to_string())
+    fastmode::uninstall().map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
 fn fastmode_set_auto(auto: bool) -> Result<FastModeSettings, String> {
-    fastmode::set_auto(auto).map_err(|e| e.to_string())
+    fastmode::set_auto(auto).map_err(|e| format!("{e:#}"))
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -499,7 +499,7 @@ pub fn run() {
                                     let _ = app.emit("unify-noop", "已全部归一");
                                 }
                                 Err(error) => {
-                                    let _ = app.emit("unify-error", error.to_string());
+                                    let _ = app.emit("unify-error", format!("{error:#}"));
                                 }
                             }
                         });
