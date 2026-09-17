@@ -398,37 +398,42 @@ mod imp {
         Anchor {
             label: "显示条件",
             pattern: concat!(
-                r"(?P<sig>fastModeIpcAvailable:(?P<ipc>\w+),(?:\w+:\w+,)*?modelSupportsFastMode:(?P<sup>\w+),",
-                r"(?:\w+:\w+,)*?\w+:\w+\}\)\{)let (?P<show>\w+)=[^;]+;",
-                r"return\{showFastModeToggle:(?P<show2>\w+),fastModeToggleDisabled:[^}]*\}",
+                r"(?P<sig>fastModeIpcAvailable:(?P<ipc>[\w$]+),(?:[\w$]+:[\w$]+,)*?modelSupportsFastMode:(?P<sup>[\w$]+),",
+                r"(?:[\w$]+:[\w$]+,)*?[\w$]+:[\w$]+\}\)\{)let (?P<show>[\w$]+)=[^;]+;",
+                r"return\{showFastModeToggle:(?P<show2>[\w$]+),fastModeToggleDisabled:[^}]*\}",
             ),
-            patched: r"return\{showFastModeToggle:\w+,fastModeToggleDisabled:!1\}",
+            patched: r"return\{showFastModeToggle:[\w$]+,fastModeToggleDisabled:!1\}",
             aliases: &[("show", "show2")],
         },
         Anchor {
             label: "模型支持判定",
             pattern: concat!(
-                r",(?P<sup>\w+)=(?P<has>\w+)&&(?P<is46>\w+),(?P<fnc>\w+)=(?P<cb>\w+)\((?P<arg>\w+)=>",
-                r"\w+\(\w+\((?P<arg2>\w+)\)\)!==void 0&&",
-                r#"\((?P<arg3>\w+)\.toLowerCase\(\)\.includes\("opus-4-6"\)\|\|\w+\(\)\),\[\w+\]\),"#,
-                r"(?P<needs>\w+)=(?P<has2>\w+)&&!(?P<is46b>\w+),",
+                r",(?P<sup>[\w$]+)=(?P<has>[\w$]+)&&(?P<is46>[\w$]+),(?P<fnc>[\w$]+)=(?P<cb>[\w$]+)\((?P<arg>[\w$]+)=>",
+                r"[\w$]+\([\w$]+\((?P<arg2>[\w$]+)\)\)!==void 0&&",
+                r#"\((?P<arg3>[\w$]+)\.toLowerCase\(\)\.includes\("opus-4-6"\)\|\|[\w$]+\(\)\),\[[\w$]+\]\),"#,
+                r"(?P<needs>[\w$]+)=(?P<has2>[\w$]+)&&!(?P<is46b>[\w$]+),",
             ),
-            patched: r#",\w+=!!\(\w+&&\(\w+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
+            patched: r#",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
             aliases: &[("arg", "arg2"), ("arg", "arg3"), ("has", "has2"), ("is46", "is46b")],
         },
         Anchor {
             label: "禁用原因",
             pattern: concat!(
-                r"(?P<msg>\w+)=\w+\(\w+\?\.fastModeDisabledReason,",
-                r"\{hasRaven:\w+,canManageOrg:\w+\}\),(?P<flag>\w+)=(?P<msg2>\w+)!==null",
+                r"(?P<msg>[\w$]+)=[\w$]+\([\w$]+\?\.fastModeDisabledReason,",
+                r"\{hasRaven:[\w$]+,canManageOrg:[\w$]+\}\),(?P<flag>[\w$]+)=(?P<msg2>[\w$]+)!==null",
+                r"|(?P<direct_flag>[\w$]+)=[\w$]+\([\w$]+\?\.fastModeDisabledReason\)",
+                r"(?P<tail>,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,)",
             ),
-            patched: r",\w+=null,\w+=!1,",
+            patched: concat!(
+                r"[\w$]+=null,[\w$]+=!1,",
+                r"|[\w$]+=!1,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
+            ),
             aliases: &[("msg", "msg2")],
         },
     ];
 
     /// 目标函数的 modelId 形参：全文有多个 modelId: 属性，取被改代码所在函数的那个
-    const MODEL_ID_SIGNATURE: &str = r"function \w+\(\{[^{}]*?modelId:(\w+)[^{}]*?\}\)\{";
+    const MODEL_ID_SIGNATURE: &str = r"function [\w$]+\(\{[^{}]*?modelId:([\w$]+)[^{}]*?\}\)\{";
 
     fn rx(pattern: &str) -> regex::Regex {
         regex::Regex::new(pattern).expect("锚点正则")
@@ -519,7 +524,11 @@ mod imp {
             let reason = {
                 let staged = Renderer::new(&text);
                 let caps = staged.find(&ANCHORS[2]).context("禁用原因锚点未唯一命中")?;
-                (caps[0].to_string(), format!("{}=null,{}=!1", &caps["msg"], &caps["flag"]))
+                let replacement = match caps.name("direct_flag") {
+                    Some(flag) => format!("{}=!1{}", flag.as_str(), &caps["tail"]),
+                    None => format!("{}=null,{}=!1", &caps["msg"], &caps["flag"]),
+                };
+                (caps[0].to_string(), replacement)
             };
             Ok(text.replace(&reason.0, &reason.1))
         }
@@ -634,7 +643,7 @@ mod imp {
             after.0,
             patched.len() as i64 - text.len() as i64,
             shown(r"return\{showFastModeToggle:[^}]*\}"),
-            shown(r",\w+=!!\(\w+&&\(\w+\.toLowerCase\(\)[^,]*,"),
+            shown(r",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)[^,]*,"),
         )
     }
 
@@ -963,7 +972,7 @@ mod imp {
         const OLD_RENDERER: &str = concat!(
             r#"function zc({sessionRef:t,sessionMeta:n,selectedFolder:r,modelId:a,fastModeFor:o,capabilities:s,config:l,openingKey:u}){"#,
             r#"let b=i?o(F(i))!==void 0:!1,x=(a?.toLowerCase().includes("opus-4-6")??!1)||Ue(),"#,
-            r#",S=b&&x,C=t(e=>o(F(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Ue()),[o]),w=b&&!x,"#,
+            r#"S=b&&x,C=t(e=>o(F(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Ue()),[o]),w=b&&!x,"#,
             r#"D=Vc(r?.fastModeDisabledReason,{hasRaven:E,canManageOrg:m}),O=D!==null,j=1}"#,
             r#"function Bc({isNew:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,perSessionOptInAllowed:o,"#,
             r#"fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
@@ -975,7 +984,7 @@ mod imp {
         const NEW_RENDERER: &str = concat!(
             r#"function df({sessionRef:t,sessionMeta:n,selectedFolder:r,modelId:i,fastModeFor:o,capabilities:s,config:l,openingKey:u}){"#,
             r#"let b=i?o(D(i))!==void 0:!1,x=(i?.toLowerCase().includes("opus-4-6")??!1)||Be(),"#,
-            r#",S=b&&x,C=e(e=>o(D(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Be()),[o]),w=b&&!x,"#,
+            r#"S=b&&x,C=e(e=>o(D(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Be()),[o]),w=b&&!x,"#,
             r#"O=pf(n?.fastModeDisabledReason,{hasRaven:E,canManageOrg:h}),A=O!==null,j=1}"#,
             r#"function xf({isNew:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,perSessionOptInAllowed:o,"#,
             r#"fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
@@ -983,14 +992,33 @@ mod imp {
             r#"return{showFastModeToggle:u,fastModeToggleDisabled:u&&l}}"#,
         );
 
+        const CURRENT_RENDERER: &str = concat!(
+            r#"function ul({sessionRef:e,sessionMeta:t,selectedFolder:n,modelId:i,fastModeFor:a,capabilities:o,config:s,openingKey:c}){"#,
+            r#"let y=i?a(F(i))!==void 0:!1,b=(i?.toLowerCase().includes("opus-4-6")??!1)||Le(),"#,
+            r#"x=y&&b,S=p(e=>a(F(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Le()),[a]),C=y&&!b,"#,
+            r#"w=s?.fastModePerSessionOptIn?.value!==!1,T=fl(t?.fastModeDisabledReason),E=s?.fastMode?.value===!0,"#,
+            r#"D=s?.fastModePerSessionOptIn?.value===!0;"#,
+            r#"return{modelSupportsFastMode:x,modelSupportsFastModeFor:S,fastModeNeedsDesktopUpdate:C,fastModeBlocked:T}}"#,
+            r#"function dl({envType:e,sessionRef:t,isLocalSession:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,"#,
+            r#"perSessionOptInAllowed:o,fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
+            r#"let u=(r||i)&&a&&o&&!i&&(t?n:e==="local"||e==="ssh")&&!s&&c;"#,
+            r#"return{showFastModeToggle:u,fastModeToggleDisabled:u&&l}}"#,
+        );
+
+        const RENDERER_CASES: [(&str, &str); 3] = [
+            ("1.46388.4.0", OLD_RENDERER),
+            ("1.49585.0.0", NEW_RENDERER),
+            ("2.110.0.0", CURRENT_RENDERER),
+        ];
+
         #[test]
-        fn patches_both_desktop_versions() {
-            for (label, source) in [("1.46388", OLD_RENDERER), ("1.49585", NEW_RENDERER)] {
+        fn patches_supported_desktop_versions() {
+            for (label, source) in RENDERER_CASES {
                 assert_eq!(classify(source).0, RendererState::Pristine, "{label} 原始识别");
                 let patched = Renderer::new(source).patch().expect(label);
                 assert_eq!(classify(&patched).0, RendererState::Patched, "{label} patch 后识别");
                 assert!(patched.contains("fastModeToggleDisabled:!1"), "{label} 开关不再禁用");
-                assert!(!patched.contains("fastModeDisabledReason,"), "{label} 禁用原因已断开");
+                assert!(!patched.contains("fastModeDisabledReason"), "{label} 禁用原因已断开");
                 assert!(patched.contains(r#"includes("opus-4-8")"#), "{label} 放行 4.8");
                 // 4.6 只该留在被弃用的 x 定义里，判定里不该再出现
                 assert!(!patched.contains(r#"includes("opus-4-6")||"#), "{label} 不再认 4.6");
@@ -999,7 +1027,7 @@ mod imp {
 
         #[test]
         fn renderer_stays_recognisable_after_patching() {
-            for (label, source) in [("1.46388", OLD_RENDERER), ("1.49585", NEW_RENDERER)] {
+            for (label, source) in RENDERER_CASES {
                 assert!(is_renderer(source), "{label} 原始应被认出");
                 let patched = Renderer::new(source).patch().expect(label);
                 // patch 抹掉 fastModeDisabledReason，识别不能依赖它，否则改完就报未找到
@@ -1009,8 +1037,12 @@ mod imp {
 
         #[test]
         fn model_id_comes_from_the_target_function() {
-            // 两版的 modelId 形参不同名，硬编码任一个都会在另一版生成引用错变量的代码
-            for (source, model_id, other) in [(OLD_RENDERER, "a", "i"), (NEW_RENDERER, "i", "a")] {
+            // modelId 形参不同名，硬编码会在另一版生成引用错变量的代码
+            for (source, model_id, other) in [
+                (OLD_RENDERER, "a", "i"),
+                (NEW_RENDERER, "i", "a"),
+                (CURRENT_RENDERER, "i", "a"),
+            ] {
                 let patched = Renderer::new(source).patch().unwrap();
                 let expected = format!(r#"!!({model_id}&&({model_id}.toLowerCase()"#);
                 assert!(patched.contains(&expected), "应引用 {model_id}");
@@ -1023,10 +1055,13 @@ mod imp {
 
         #[test]
         fn patch_is_idempotent() {
-            let once = Renderer::new(NEW_RENDERER).patch().unwrap();
-            // 已改过的文本锚点不再命中，重复 patch 直接报错而非改坏
-            assert!(Renderer::new(&once).patch().is_err());
-            assert_eq!(classify(&once).0, RendererState::Patched);
+            for (label, source) in RENDERER_CASES {
+                let once = Renderer::new(source).patch().unwrap();
+                // 已改过的文本锚点不再命中，重复 patch 直接报错而非改坏
+                assert!(Renderer::new(&once).patch().is_err(), "{label}");
+                assert_eq!(classify(&once).0, RendererState::Patched, "{label}");
+                assert_eq!(Renderer::new(source).patch().unwrap(), once, "{label} 备份重放");
+            }
         }
 
         #[test]
@@ -1040,10 +1075,81 @@ mod imp {
 
         #[test]
         fn ambiguous_match_is_refused() {
-            // 骨架太松会误伤：同一形态出现两次即视为不可信
-            let doubled = format!("{NEW_RENDERER}{NEW_RENDERER}");
-            assert_eq!(classify(&doubled).0, RendererState::Mismatch);
-            assert!(Renderer::new(&doubled).patch().is_err());
+            for (label, source) in RENDERER_CASES {
+                let doubled = format!("{source}{source}");
+                assert_eq!(classify(&doubled).0, RendererState::Mismatch, "{label}");
+                assert!(Renderer::new(&doubled).patch().is_err(), "{label}");
+            }
+        }
+
+        #[test]
+        fn direct_reason_preserves_settings_and_consumers() {
+            let patched = Renderer::new(CURRENT_RENDERER).patch().unwrap();
+            assert!(patched.contains(
+                ",T=!1,E=s?.fastMode?.value===!0,D=s?.fastModePerSessionOptIn?.value===!0;"
+            ));
+            assert!(patched.contains("fastModeBlocked:T}"));
+        }
+
+        #[test]
+        fn identifiers_can_contain_dollars() {
+            let identifiers = rx(r"\b(?:[A-Za-z]|zc|df|Bc|xf|ul|dl)\b");
+            for (label, source) in RENDERER_CASES {
+                let renamed = identifiers.replace_all(source, |caps: &regex::Captures<'_>| {
+                    format!("${}$", &caps[0])
+                });
+                assert_eq!(classify(&renamed).0, RendererState::Pristine, "{label}");
+                let patched = Renderer::new(&renamed).patch().unwrap();
+                assert_eq!(classify(&patched).0, RendererState::Patched, "{label}");
+                assert!(is_renderer(&patched), "{label}");
+                let model_id = if source == OLD_RENDERER { "$a$" } else { "$i$" };
+                assert!(
+                    patched.contains(&format!("!!({model_id}&&({model_id}.toLowerCase()")),
+                    "{label}"
+                );
+            }
+        }
+
+        #[test]
+        fn mixed_reason_shapes_are_ambiguous() {
+            let legacy = Renderer::new(NEW_RENDERER).find(&ANCHORS[2]).unwrap();
+            let mixed = format!("{CURRENT_RENDERER}function extra(){{let {},j=1}}", &legacy[0]);
+            assert_eq!(classify(&mixed), (RendererState::Mismatch, vec!["禁用原因".to_string()]));
+            assert!(Renderer::new(&mixed).patch().is_err());
+
+            let patched = Renderer::new(CURRENT_RENDERER).patch().unwrap();
+            let mixed = format!("{patched}function extra(){{let j=1,O=null,A=!1,k=2}}");
+            assert_eq!(classify(&mixed).0, RendererState::Mismatch);
+
+            for reason in [
+                "T=!1,E=s?.fastMode?.value===!0,O=null,A=!1,",
+                "O=null,A=!1,T=!1,E=s?.fastMode?.value===!0,",
+            ] {
+                let mixed = patched.replace("T=!1,E=s?.fastMode?.value===!0,", reason);
+                assert_eq!(classify(&mixed).0, RendererState::Mismatch, "{reason}");
+            }
+        }
+
+        #[test]
+        fn direct_reason_requires_settings_context() {
+            let drifted = CURRENT_RENDERER.replace("E=s?.fastMode?.value===!0,", "E=!0,");
+            assert_eq!(classify(&drifted), (RendererState::Mismatch, vec!["禁用原因".to_string()]));
+            assert!(Renderer::new(&drifted).patch().is_err());
+
+            let patched = Renderer::new(CURRENT_RENDERER).patch().unwrap();
+            let incomplete = patched.replace(
+                "T=!1,E=s?.fastMode?.value===!0,",
+                "T=fl(t?.fastModeDisabledReason),E=!0,"
+            );
+            let unrelated = format!("{incomplete}function extra(){{let a=1,b=!1,c=2}}");
+            assert_eq!(classify(&unrelated).0, RendererState::Mismatch);
+        }
+
+        #[test]
+        fn legacy_reason_requires_the_same_message_variable() {
+            let drifted = NEW_RENDERER.replace("A=O!==null", "A=other!==null");
+            assert_eq!(classify(&drifted), (RendererState::Mismatch, vec!["禁用原因".to_string()]));
+            assert!(Renderer::new(&drifted).patch().is_err());
         }
     }
 }
