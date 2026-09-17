@@ -100,7 +100,7 @@ interface DeleteReport {
 }
 
 type WrapperState = "deployed" | "absent" | "broken" | "noCli";
-type RendererState = "patched" | "pristine" | "mismatch" | "notFound" | "unreadable" | "unsupported";
+type RendererState = "patched" | "outdated" | "pristine" | "mismatch" | "notFound" | "unreadable" | "unsupported";
 
 interface FastModeSettings {
   auto: boolean;
@@ -1214,6 +1214,7 @@ const WRAPPER_META: Record<WrapperState, { label: string; cls: string }> = {
 
 const RENDERER_META: Record<RendererState, { label: string; cls: string }> = {
   patched: { label: "已 patch", cls: "pill-registered" },
+  outdated: { label: "补丁需更新", cls: "pill-pending" },
   pristine: { label: "官方原样", cls: "pill-pending" },
   mismatch: { label: "锚点失配", cls: "pill-tombstone" },
   notFound: { label: "未找到", cls: "pill-foreign" },
@@ -1239,7 +1240,9 @@ function renderFastMode(): string {
           ${
             fm?.supported
               ? `<button class="btn btn-secondary" data-action="fastmode-uninstall" ${
-                  anyDesktopRunning() || state.busy || (fm.wrapper !== "deployed" && fm.renderer.state !== "patched")
+                  anyDesktopRunning() ||
+                  state.busy ||
+                  (fm.wrapper !== "deployed" && fm.renderer.state !== "patched" && fm.renderer.state !== "outdated")
                     ? "disabled"
                     : ""
                 }>还原官方</button>
@@ -1272,7 +1275,9 @@ function renderFastMode(): string {
   const anchorsNote =
     fm.renderer.state === "mismatch"
       ? `<span>未命中：${fm.renderer.missingAnchors.map(esc).join("、")}（Desktop 大版本变化，需重新适配锚点；wrapper 仍让 Opus 会话默认 fast）</span>`
-      : "";
+      : fm.renderer.state === "outdated"
+        ? "<span>检测到旧版补丁，请退出 Desktop 后点击修复以补齐模型菜单开关</span>"
+        : "";
   const total = fm.speed.fast + fm.speed.standard;
   const speedNote =
     total === 0

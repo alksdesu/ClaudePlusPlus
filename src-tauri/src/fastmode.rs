@@ -30,6 +30,7 @@ pub enum WrapperState {
 #[serde(rename_all = "camelCase")]
 pub enum RendererState {
     Patched,
+    Outdated,
     Pristine,
     Mismatch,
     NotFound,
@@ -316,7 +317,9 @@ fn adopt_existing(status: &FastModeStatus, settings: &mut FastModeSettings) -> b
     if settings.installed {
         return false;
     }
-    if status.wrapper != WrapperState::Deployed && status.renderer.state != RendererState::Patched {
+    if status.wrapper != WrapperState::Deployed
+        && !matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated)
+    {
         return false;
     }
     settings.installed = true;
@@ -383,6 +386,7 @@ mod imp {
     /// regex crate 不支持反向引用，同一变量的多处出现改为独立命名捕获，由 aliases 声明必须同名
     struct Anchor {
         label: &'static str,
+        required_marker: Option<&'static str>,
         pattern: &'static str,
         patched: &'static str,
         aliases: &'static [(&'static str, &'static str)],
@@ -394,9 +398,10 @@ mod imp {
         text: &'a str,
     }
 
-    const ANCHORS: [Anchor; 3] = [
+    const ANCHORS: [Anchor; 4] = [
         Anchor {
             label: "显示条件",
+            required_marker: None,
             pattern: concat!(
                 r"(?P<sig>fastModeIpcAvailable:(?P<ipc>[\w$]+),(?:[\w$]+:[\w$]+,)*?modelSupportsFastMode:(?P<sup>[\w$]+),",
                 r"(?:[\w$]+:[\w$]+,)*?[\w$]+:[\w$]+\}\)\{)let (?P<show>[\w$]+)=[^;]+;",
@@ -407,6 +412,7 @@ mod imp {
         },
         Anchor {
             label: "模型支持判定",
+            required_marker: None,
             pattern: concat!(
                 r",(?P<sup>[\w$]+)=(?P<has>[\w$]+)&&(?P<is46>[\w$]+),(?P<fnc>[\w$]+)=(?P<cb>[\w$]+)\((?P<arg>[\w$]+)=>",
                 r"[\w$]+\([\w$]+\((?P<arg2>[\w$]+)\)\)!==void 0&&",
@@ -418,6 +424,7 @@ mod imp {
         },
         Anchor {
             label: "禁用原因",
+            required_marker: None,
             pattern: concat!(
                 r"(?P<msg>[\w$]+)=[\w$]+\([\w$]+\?\.fastModeDisabledReason,",
                 r"\{hasRaven:[\w$]+,canManageOrg:[\w$]+\}\),(?P<flag>[\w$]+)=(?P<msg2>[\w$]+)!==null",
@@ -430,7 +437,28 @@ mod imp {
             ),
             aliases: &[("msg", "msg2")],
         },
+        Anchor {
+            label: "模型菜单",
+            required_marker: Some("epitaxy-cds-model-selector"),
+            pattern: concat!(
+                r"(?P<models>return\{\.\.\.[\w$]+,models:[\w$]+\.map\([\w$]+\))",
+                r"(?P<tail>\}\},\[[^\]]*\]\),[\w$]+=[\w$]+\?\.models\.find\()",
+            ),
+            patched: concat!(
+                r"return\{\.\.\.[\w$]+,models:[\w$]+\.map\([\w$]+\)\.map\([\w$]+=>[^{};]+",
+                r#"\?\{\.\.\.[\w$]+,fast_mode:\{type:"toggle",name:"Fast mode",options:\["#,
+                r#"\{id:"fast",name:"Enable fast mode",selector_label:"Fast"\},\{id:"off",name:"Off"\}"#,
+                r"\]\}\}:[\w$]+\)",
+            ),
+            aliases: &[],
+        },
     ];
+
+    fn supports_fast_js(id: &str) -> String {
+        format!(
+            r#"!!({id}&&({id}.toLowerCase().includes("opus-5")||{id}.toLowerCase().includes("opus-4-8")))"#
+        )
+    }
 
     /// 目标函数的 modelId 形参：全文有多个 modelId: 属性，取被改代码所在函数的那个
     const MODEL_ID_SIGNATURE: &str = r"function [\w$]+\(\{[^{}]*?modelId:([\w$]+)[^{}]*?\}\)\{";
@@ -464,6 +492,10 @@ mod imp {
             unique_match(self.text, anchor.pattern, anchor.aliases)
         }
 
+        fn anchors(&self) -> impl Iterator<Item = &'static Anchor> + '_ {
+            ANCHORS.iter().filter(|a| a.required_marker.map(|m| self.text.contains(m)).unwrap_or(true))
+        }
+
         fn model_id_before(&self, offset: usize) -> Option<String> {
             rx(MODEL_ID_SIGNATURE)
                 .captures_iter(&self.text[..offset])
@@ -472,14 +504,18 @@ mod imp {
         }
 
         fn is_patched(&self) -> bool {
-            ANCHORS
-                .iter()
+            self.anchors()
                 .all(|a| unique_match(self.text, a.patched, &[]).is_some())
         }
 
+        fn is_outdated(&self) -> bool {
+            self.text.contains(ANCHORS[3].required_marker.unwrap())
+                && ANCHORS[..3].iter().all(|a| unique_match(self.text, a.patched, &[]).is_some())
+                && self.find(&ANCHORS[3]).is_some()
+        }
+
         fn missing(&self) -> Vec<String> {
-            ANCHORS
-                .iter()
+            self.anchors()
                 .filter(|a| self.find(a).is_none())
                 .map(|a| a.label.to_string())
                 .collect()
@@ -502,19 +538,14 @@ mod imp {
                     .model_id_before(caps.get(0).unwrap().start())
                     .context("未能在目标函数签名里定位 modelId")?;
                 // Opus 4.6 客户端认它但服务端已不再给 fast，只放 5 与 4.8
-                let supports = |id: &str| {
-                    format!(
-                        r#"!!({id}&&({id}.toLowerCase().includes("opus-5")||{id}.toLowerCase().includes("opus-4-8")))"#
-                    )
-                };
                 let replacement = format!(
                     ",{}={},{}={}({}=>{},[]),{}=!1,",
                     &caps["sup"],
-                    supports(&model_id),
+                    supports_fast_js(&model_id),
                     &caps["fnc"],
                     &caps["cb"],
                     &caps["arg"],
-                    supports(&caps["arg"]),
+                    supports_fast_js(&caps["arg"]),
                     &caps["needs"]
                 );
                 (whole, replacement)
@@ -530,7 +561,27 @@ mod imp {
                 };
                 (caps[0].to_string(), replacement)
             };
-            Ok(text.replace(&reason.0, &reason.1))
+            text = text.replace(&reason.0, &reason.1);
+
+            if self.text.contains(ANCHORS[3].required_marker.unwrap()) {
+                let staged = Renderer::new(&text);
+                let caps = staged.find(&ANCHORS[3]).context("模型菜单锚点未唯一命中")?;
+                let replacement = format!(
+                    concat!(
+                        "{}.map(e=>{}&&",
+                        r#"!(e.fast_mode?.type==="toggle"&&e.fast_mode.options?.some(e=>e.id==="fast"))"#,
+                        r#"?{{...e,fast_mode:{{type:"toggle",name:"Fast mode",options:["#,
+                        r#"{{id:"fast",name:"Enable fast mode",selector_label:"Fast"}},{{id:"off",name:"Off"}}"#,
+                        "]}}}}:e){}"
+                    ),
+                    &caps["models"], supports_fast_js("e.id"), &caps["tail"]
+                );
+                text = text.replace(&caps[0], &replacement);
+            }
+            if !Renderer::new(&text).is_patched() {
+                bail!("renderer 改写后未通过完整补丁校验");
+            }
+            Ok(text)
         }
     }
 
@@ -614,6 +665,9 @@ mod imp {
         let renderer = Renderer::new(text);
         if renderer.is_patched() {
             return (RendererState::Patched, Vec::new());
+        }
+        if renderer.is_outdated() {
+            return (RendererState::Outdated, Vec::new());
         }
         let missing = renderer.missing();
         if missing.is_empty() {
@@ -865,7 +919,7 @@ mod imp {
         let wrapper = deploy_wrapper(&cli_dir)?;
         let renderer = match status.renderer.state {
             RendererState::Patched => "renderer 已是 patch 状态".to_string(),
-            RendererState::Pristine => run_with_elevation("apply")?,
+            RendererState::Pristine | RendererState::Outdated => run_with_elevation("apply")?,
             RendererState::Mismatch => format!(
                 "renderer 锚点未命中（{}），跳过；wrapper 仍让 Opus 会话默认 fast",
                 status.renderer.missing_anchors.join("、")
@@ -897,7 +951,7 @@ mod imp {
         let wrapper = format!("已还原 {restored} 个版本目录的官方 CLI");
         let status = status_light();
         let renderer = match status.renderer.state {
-            RendererState::Patched => run_with_elevation("restore")?,
+            RendererState::Patched | RendererState::Outdated => run_with_elevation("restore")?,
             _ => "renderer 无需还原".to_string(),
         };
         let mut settings = load_settings();
@@ -930,7 +984,7 @@ mod imp {
             return RepairOutcome::Nothing;
         }
         let need_wrapper = status.cli_dir.is_some() && status.wrapper != WrapperState::Deployed;
-        let need_renderer = status.renderer.state == RendererState::Pristine;
+        let need_renderer = matches!(status.renderer.state, RendererState::Pristine | RendererState::Outdated);
         if !need_wrapper && !need_renderer {
             return RepairOutcome::Nothing;
         }
@@ -1010,6 +1064,64 @@ mod imp {
             ("1.49585.0.0", NEW_RENDERER),
             ("2.110.0.0", CURRENT_RENDERER),
         ];
+
+        const MODEL_MENU: &str = concat!(
+            r#"function Rd({catalog:E,contextModel:i}){let k=x(()=>{let s=E.models,a=e=>e;"#,
+            r#"return{...E,models:s.map(a)}},[E,i]),A=k?.models.find(e=>e.id===i);"#,
+            r#"return dr({contextModel:i,shapedCatalog:k,"data-testid":"epitaxy-cds-model-selector"})}"#,
+        );
+
+        #[test]
+        fn model_menu_patch_is_required_for_the_cds_selector() {
+            let source = format!("{CURRENT_RENDERER}{MODEL_MENU}");
+            assert_eq!(classify(&source).0, RendererState::Pristine);
+            let patched = Renderer::new(&source).patch().unwrap();
+            assert_eq!(classify(&patched).0, RendererState::Patched);
+            assert!(patched.contains(r#"fast_mode:{type:"toggle",name:"Fast mode""#));
+            assert!(patched.contains(r#"selector_label:"Fast""#));
+            assert!(Renderer::new(&patched).patch().is_err());
+
+            let legacy = format!("{}{MODEL_MENU}", Renderer::new(CURRENT_RENDERER).patch().unwrap());
+            assert_eq!(classify(&legacy).0, RendererState::Outdated);
+            assert_eq!(serde_json::to_string(&RendererState::Outdated).unwrap(), r#""outdated""#);
+            assert!(Renderer::new(&legacy).patch().is_err());
+            assert_eq!(Renderer::new(&source).patch().unwrap(), patched);
+        }
+
+        #[test]
+        fn model_menu_is_not_injected_into_legacy_selectors() {
+            let menu = MODEL_MENU.replace("epitaxy-cds-model-selector", "legacy-model-selector");
+            let source = format!("{OLD_RENDERER}{menu}");
+            let patched = Renderer::new(&source).patch().unwrap();
+            assert_eq!(classify(&patched).0, RendererState::Patched);
+            assert!(!patched.contains("fast_mode:"));
+            assert!(patched.ends_with(&menu));
+        }
+
+        #[test]
+        fn model_menu_drift_and_duplicates_are_refused() {
+            let drifted_menu = MODEL_MENU.replace("models:s.map(a)", "models:s.flatMap(a)");
+            for menu in [drifted_menu, format!("{MODEL_MENU}{MODEL_MENU}")] {
+                let source = format!("{CURRENT_RENDERER}{menu}");
+                assert_eq!(classify(&source), (RendererState::Mismatch, vec!["模型菜单".to_string()]));
+                assert!(Renderer::new(&source).patch().is_err());
+                let legacy = format!("{}{menu}", Renderer::new(CURRENT_RENDERER).patch().unwrap());
+                assert_eq!(classify(&legacy).0, RendererState::Mismatch);
+            }
+        }
+
+        #[test]
+        fn model_menu_identifiers_can_be_renamed() {
+            let identifiers = rx(r"\b(?:[A-Za-z]|Rd)\b");
+            let source = format!("{CURRENT_RENDERER}{MODEL_MENU}");
+            let renamed = identifiers.replace_all(&source, |caps: &regex::Captures<'_>| {
+                format!("${}$", &caps[0])
+            });
+            assert_eq!(classify(&renamed).0, RendererState::Pristine);
+            let patched = Renderer::new(&renamed).patch().unwrap();
+            assert_eq!(classify(&patched).0, RendererState::Patched);
+            assert!(patched.contains("models:$s$.map($a$).map("));
+        }
 
         #[test]
         fn patches_supported_desktop_versions() {
@@ -1804,6 +1916,9 @@ mod shared_tests {
         // 只剩 renderer patch 也算装过
         let mut fresh = FastModeSettings::default();
         assert!(adopt_existing(&status_with(WrapperState::Absent, RendererState::Patched), &mut fresh));
+
+        let mut outdated = FastModeSettings::default();
+        assert!(adopt_existing(&status_with(WrapperState::Absent, RendererState::Outdated), &mut outdated));
         // mac 上 renderer 恒为 Unsupported，认领只看 wrapper
         let mut mac = FastModeSettings::default();
         assert!(!adopt_existing(&status_with(WrapperState::Absent, RendererState::Unsupported), &mut mac));

@@ -74,9 +74,11 @@ Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能�
 | 组件 | 做法 | 落点 |
 |---|---|---|
 | wrapper（两平台） | 顶替版本目录里的 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给挪开保留的官方本体（Windows 改名，macOS 连整个 bundle 一起挪）；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
-| renderer patch（仅 Windows） | 改写 minified renderer 的三处锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因。锚点以属性名与字符串字面量为骨架、变量名正则捕获后回填，Desktop 更新重命名 minify 符号不会失配。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
+| renderer patch（仅 Windows） | 改写 minified renderer 的相关锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因，并为新版模型菜单补齐 `fast_mode` 配置。锚点以属性名与字符串字面量为骨架、变量名正则捕获后回填，Desktop 更新重命名 minify 符号不会失配。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
 
 wrapper 管"会话默认 fast"，开关管"实时切换"。
+
+Desktop 2.110 已将独立 Fast 按钮移入模型菜单底部，选择支持的模型后可看到「Enable fast mode」。已安装旧版补丁时，退出 Desktop 后在 Claude++ 的「Fast Mode」页点击「修复」，再重新打开 Desktop。补丁仍兼容旧版 Desktop 的独立开关。
 
 Windows 写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动自身完成 renderer 改动（弹一次 UAC），提权进程不接受任何路径参数。
 
@@ -191,9 +193,11 @@ Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast
 | Component | How | Location |
 |---|---|---|
 | wrapper (both platforms) | Replaces the CLI inside the version directory, merges `fastMode:true` into `--settings` and forwards to the stashed official binary (renamed on Windows, moved bundle-and-all on macOS); Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
-| renderer patch (Windows only) | Rewrites three anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason. Anchors are keyed on property names and string literals, with variable names captured by regex and filled back in, so a Desktop update that renames minified symbols does not break them. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
+| renderer patch (Windows only) | Rewrites the relevant anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason, and supply the `fast_mode` configuration for the newer model menu. Anchors are keyed on property names and string literals, with variable names captured by regex and filled back in, so a Desktop update that renames minified symbols does not break them. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
 
 The wrapper makes sessions fast by default; the toggle switches at runtime.
+
+Desktop 2.110 moved the standalone Fast button to the bottom of the model menu, where "Enable fast mode" appears after selecting a supported model. To upgrade an existing patch, quit Desktop, click "Repair" on Claude++'s Fast Mode tab, then reopen Desktop. The patch remains compatible with the standalone toggle in older Desktop versions.
 
 On Windows, writing under WindowsApps needs administrator rights: Claude++ relaunches itself with a fixed flag to apply the renderer change (one UAC prompt), and the elevated helper accepts no path arguments.
 
