@@ -432,7 +432,7 @@ mod imp {
                 r"(?P<tail>,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,)",
             ),
             patched: concat!(
-                r"[\w$]+=null,[\w$]+=!1,",
+                r"[\w$]+=null,[\w$]+=!1,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
                 r"|[\w$]+=!1,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
             ),
             aliases: &[("msg", "msg2")],
@@ -521,8 +521,16 @@ mod imp {
                 .collect()
         }
 
-        /// 逐处改写：显示条件收敛为 IPC 可用且模型支持，模型支持改按 ID 判定，禁用原因清空
         fn patch(&self) -> Result<String> {
+            let text = self.patch_unchecked()?;
+            if !Renderer::new(&text).is_patched() {
+                bail!("renderer 改写后未通过完整补丁校验");
+            }
+            Ok(text)
+        }
+
+        /// 逐处改写：显示条件收敛为 IPC 可用且模型支持，模型支持改按 ID 判定，禁用原因清空
+        fn patch_unchecked(&self) -> Result<String> {
             let show = self.find(&ANCHORS[0]).context("显示条件锚点未唯一命中")?;
             let replacement = format!(
                 "{}let {}={}&&{};return{{showFastModeToggle:{},fastModeToggleDisabled:!1}}",
@@ -577,9 +585,6 @@ mod imp {
                     &caps["models"], supports_fast_js("e.id"), &caps["tail"]
                 );
                 text = text.replace(&caps[0], &replacement);
-            }
-            if !Renderer::new(&text).is_patched() {
-                bail!("renderer 改写后未通过完整补丁校验");
             }
             Ok(text)
         }
@@ -677,28 +682,40 @@ mod imp {
         }
     }
 
-    /// 供 example 对真实 renderer 做端到端演练，不写文件
+    /// 供 example 对真实 renderer 做端到端演练，不写文件。
+    /// 逐锚点报告命中数：Desktop 更新后靠这个定位是哪一处漂了
     pub fn probe_patch(text: &str) -> String {
-        let before = classify(text);
-        let patched = match Renderer::new(text).patch() {
-            Ok(patched) => patched,
-            Err(error) => return format!("before={:?} patch failed: {error}", before.0),
-        };
-        let after = classify(&patched);
-        let shown = |pattern: &str| {
-            rx(pattern)
-                .find(&patched)
-                .map(|m| m.as_str().to_string())
-                .unwrap_or_default()
-        };
-        format!(
-            "before={:?} after={:?} delta={} bytes\n  show: {}\n  supports: {}",
-            before.0,
-            after.0,
-            patched.len() as i64 - text.len() as i64,
-            shown(r"return\{showFastModeToggle:[^}]*\}"),
-            shown(r",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)[^,]*,"),
-        )
+        let renderer = Renderer::new(text);
+        let mut out = vec![format!("before={:?}", classify(text).0)];
+        for anchor in renderer.anchors() {
+            out.push(format!(
+                "  [{}] pattern={} patched={}",
+                anchor.label,
+                rx(anchor.pattern).find_iter(text).count(),
+                rx(anchor.patched).find_iter(text).count(),
+            ));
+        }
+        match renderer.patch_unchecked() {
+            Ok(patched) => {
+                let after = Renderer::new(&patched);
+                out.push(format!(
+                    "after={:?} delta={} bytes",
+                    classify(&patched).0,
+                    patched.len() as i64 - text.len() as i64
+                ));
+                for anchor in after.anchors() {
+                    let hits = rx(anchor.patched).find_iter(&patched).count();
+                    out.push(format!(
+                        "  [{}] patched={}{}",
+                        anchor.label,
+                        hits,
+                        if hits == 1 { "" } else { "   <-- 校验卡在这里" }
+                    ));
+                }
+            }
+            Err(error) => out.push(format!("patch failed: {error:#}")),
+        }
+        out.join("\n")
     }
 
     fn renderer_info(msix_root: Option<&Path>) -> RendererInfo {
@@ -1027,7 +1044,7 @@ mod imp {
             r#"function zc({sessionRef:t,sessionMeta:n,selectedFolder:r,modelId:a,fastModeFor:o,capabilities:s,config:l,openingKey:u}){"#,
             r#"let b=i?o(F(i))!==void 0:!1,x=(a?.toLowerCase().includes("opus-4-6")??!1)||Ue(),"#,
             r#"S=b&&x,C=t(e=>o(F(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Ue()),[o]),w=b&&!x,"#,
-            r#"D=Vc(r?.fastModeDisabledReason,{hasRaven:E,canManageOrg:m}),O=D!==null,j=1}"#,
+            r#"D=Vc(r?.fastModeDisabledReason,{hasRaven:E,canManageOrg:m}),O=D!==null,j=l?.fastMode?.value===!0,M=1}"#,
             r#"function Bc({isNew:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,perSessionOptInAllowed:o,"#,
             r#"fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
             r#"let u=(r||i)&&a&&o&&!i&&(t?n:e==="local"||e==="ssh")&&!s&&c;"#,
@@ -1039,7 +1056,7 @@ mod imp {
             r#"function df({sessionRef:t,sessionMeta:n,selectedFolder:r,modelId:i,fastModeFor:o,capabilities:s,config:l,openingKey:u}){"#,
             r#"let b=i?o(D(i))!==void 0:!1,x=(i?.toLowerCase().includes("opus-4-6")??!1)||Be(),"#,
             r#"S=b&&x,C=e(e=>o(D(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||Be()),[o]),w=b&&!x,"#,
-            r#"O=pf(n?.fastModeDisabledReason,{hasRaven:E,canManageOrg:h}),A=O!==null,j=1}"#,
+            r#"O=pf(n?.fastModeDisabledReason,{hasRaven:E,canManageOrg:h}),A=O!==null,j=l?.fastMode?.value===!0,M=1}"#,
             r#"function xf({isNew:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,perSessionOptInAllowed:o,"#,
             r#"fastModeNeedsDesktopUpdate:s,modelSupportsFastMode:c,fastModeBlocked:l}){"#,
             r#"let u=(r||i)&&a&&o&&!i&&(t?n:e==="local"||e==="ssh")&&!s&&c;"#,
@@ -1064,6 +1081,13 @@ mod imp {
             ("1.49585.0.0", NEW_RENDERER),
             ("2.110.0.0", CURRENT_RENDERER),
         ];
+
+        /// 与 fast mode 无关、形态却相近的真实片段：精简样本里没有这种噪声，
+        /// patched 正则写松了也测不出来
+        const DECOY: &str = concat!(
+            r#"function jh({doc:e}=R,t=e.defaultView,n=!1,r=()=>{U.current&&W(null,!0)},"#,
+            r#"i=e=>{H.current=null,n=!1,r(),W(R.tileOf(e.target))}){return null}"#,
+        );
 
         const MODEL_MENU: &str = concat!(
             r#"function Rd({catalog:E,contextModel:i}){let k=x(()=>{let s=E.models,a=e=>e;"#,
@@ -1134,6 +1158,25 @@ mod imp {
                 assert!(patched.contains(r#"includes("opus-4-8")"#), "{label} 放行 4.8");
                 // 4.6 只该留在被弃用的 x 定义里，判定里不该再出现
                 assert!(!patched.contains(r#"includes("opus-4-6")||"#), "{label} 不再认 4.6");
+            }
+        }
+
+        #[test]
+        fn patched_markers_never_match_untouched_code() {
+            for (label, base) in RENDERER_CASES {
+                let source = format!("{DECOY}{base}");
+                for anchor in Renderer::new(&source).anchors() {
+                    // 原始文本里就命中，patch 后会变成两处，唯一性校验随之失败
+                    assert_eq!(
+                        rx(anchor.patched).find_iter(&source).count(),
+                        0,
+                        "{label} 的「{}」patched 正则误命中未改动代码",
+                        anchor.label
+                    );
+                }
+                assert_eq!(classify(&source).0, RendererState::Pristine, "{label} 原始识别");
+                let patched = Renderer::new(&source).patch().expect(label);
+                assert_eq!(classify(&patched).0, RendererState::Patched, "{label} patch 后识别");
             }
         }
 
@@ -1229,16 +1272,19 @@ mod imp {
             assert_eq!(classify(&mixed), (RendererState::Mismatch, vec!["禁用原因".to_string()]));
             assert!(Renderer::new(&mixed).patch().is_err());
 
+            // 复制一整段改完的形态才算真歧义：只有 x=null,y=!1 这种碎片属于无关代码，不该参与判定
             let patched = Renderer::new(CURRENT_RENDERER).patch().unwrap();
-            let mixed = format!("{patched}function extra(){{let j=1,O=null,A=!1,k=2}}");
+            let direct = "T=!1,E=s?.fastMode?.value===!0,";
+            assert!(patched.contains(direct));
+            let mixed = format!("{patched}function extra(){{let {direct}k=2}}");
             assert_eq!(classify(&mixed).0, RendererState::Mismatch);
 
-            for reason in [
-                "T=!1,E=s?.fastMode?.value===!0,O=null,A=!1,",
-                "O=null,A=!1,T=!1,E=s?.fastMode?.value===!0,",
-            ] {
-                let mixed = patched.replace("T=!1,E=s?.fastMode?.value===!0,", reason);
-                assert_eq!(classify(&mixed).0, RendererState::Mismatch, "{reason}");
+            let legacy_patched = Renderer::new(NEW_RENDERER).patch().unwrap();
+            let legacy = "O=null,A=!1,j=l?.fastMode?.value===!0,";
+            assert!(legacy_patched.contains(legacy));
+            for extra in [legacy, direct] {
+                let mixed = format!("{legacy_patched}function extra(){{let {extra}k=2}}");
+                assert_eq!(classify(&mixed).0, RendererState::Mismatch, "{extra}");
             }
         }
 
