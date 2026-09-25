@@ -402,9 +402,10 @@ mod imp {
         Anchor {
             label: "显示条件",
             required_marker: None,
+            // let 里可能先声明别的中间量，只改被 return 的那一个
             pattern: concat!(
                 r"(?P<sig>fastModeIpcAvailable:(?P<ipc>[\w$]+),(?:[\w$]+:[\w$]+,)*?modelSupportsFastMode:(?P<sup>[\w$]+),",
-                r"(?:[\w$]+:[\w$]+,)*?[\w$]+:[\w$]+\}\)\{)let (?P<show>[\w$]+)=[^;]+;",
+                r"(?:[\w$]+:[\w$]+,)*?[\w$]+:[\w$]+\}\)\{)let (?P<pre>[^;]*,)?(?P<show>[\w$]+)=[^=>;][^;]*;",
                 r"return\{showFastModeToggle:(?P<show2>[\w$]+),fastModeToggleDisabled:[^}]*\}",
             ),
             patched: r"return\{showFastModeToggle:[\w$]+,fastModeToggleDisabled:!1\}",
@@ -413,14 +414,26 @@ mod imp {
         Anchor {
             label: "模型支持判定",
             required_marker: None,
+            // 本地形态与带 remote 的形态各用一组捕获，别名要求同在同缺，混搭的结构匹配不上
             pattern: concat!(
-                r",(?P<sup>[\w$]+)=(?P<has>[\w$]+)&&(?P<is46>[\w$]+),(?P<fnc>[\w$]+)=(?P<cb>[\w$]+)\((?P<arg>[\w$]+)=>",
+                r",(?P<sup>[\w$]+)=(?:(?P<has>[\w$]+)&&(?P<is46>[\w$]+)",
+                r"|(?P<rhas>[\w$]+)&&\((?P<remote>[\w$]+)\|\|(?P<ris46>[\w$]+)\)),",
+                r"(?P<fnc>[\w$]+)=(?P<cb>[\w$]+)\((?P<arg>[\w$]+)=>",
                 r"[\w$]+\([\w$]+\((?P<arg2>[\w$]+)\)\)!==void 0&&",
                 r#"\((?P<arg3>[\w$]+)\.toLowerCase\(\)\.includes\("opus-4-6"\)\|\|[\w$]+\(\)\),\[[\w$]+\]\),"#,
-                r"(?P<needs>[\w$]+)=(?P<has2>[\w$]+)&&!(?P<is46b>[\w$]+),",
+                r"(?P<needs>[\w$]+)=(?:(?P<has2>[\w$]+)&&!(?P<is46b>[\w$]+)",
+                r"|!(?P<remote2>[\w$]+)&&(?P<rhas2>[\w$]+)&&!(?P<ris46b>[\w$]+)),",
             ),
             patched: r#",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
-            aliases: &[("arg", "arg2"), ("arg", "arg3"), ("has", "has2"), ("is46", "is46b")],
+            aliases: &[
+                ("arg", "arg2"),
+                ("arg", "arg3"),
+                ("has", "has2"),
+                ("is46", "is46b"),
+                ("rhas", "rhas2"),
+                ("remote", "remote2"),
+                ("ris46", "ris46b"),
+            ],
         },
         Anchor {
             label: "禁用原因",
@@ -428,7 +441,8 @@ mod imp {
             pattern: concat!(
                 r"(?P<msg>[\w$]+)=[\w$]+\([\w$]+\?\.fastModeDisabledReason,",
                 r"\{hasRaven:[\w$]+,canManageOrg:[\w$]+\}\),(?P<flag>[\w$]+)=(?P<msg2>[\w$]+)!==null",
-                r"|(?P<direct_flag>[\w$]+)=[\w$]+\([\w$]+\?\.fastModeDisabledReason\)",
+                // 前缀是 remote 会话的 CLI 版本拦截，本地会话恒假，随禁用原因一并清掉
+                r"|(?P<direct_flag>[\w$]+)=(?:[\w$]+\|\|)?[\w$]+\([\w$]+\?\.fastModeDisabledReason\)",
                 r"(?P<tail>,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,)",
             ),
             patched: concat!(
@@ -442,7 +456,8 @@ mod imp {
             required_marker: Some("epitaxy-cds-model-selector"),
             pattern: concat!(
                 r"(?P<models>return\{\.\.\.[\w$]+,models:[\w$]+\.map\([\w$]+\))",
-                r"(?P<tail>\}\},\[[^\]]*\]\),[\w$]+=[\w$]+\?\.models\.find\()",
+                // memo 结束到读取 .models.find 之间可能夹着别的声明
+                r"(?P<tail>\}\},\[[^\]]*\]\)[^;]*?,[\w$]+=[\w$]+\?\.models\.find\()",
             ),
             patched: concat!(
                 r"return\{\.\.\.[\w$]+,models:[\w$]+\.map\([\w$]+\)\.map\([\w$]+=>[^{};]+",
@@ -533,8 +548,13 @@ mod imp {
         fn patch_unchecked(&self) -> Result<String> {
             let show = self.find(&ANCHORS[0]).context("显示条件锚点未唯一命中")?;
             let replacement = format!(
-                "{}let {}={}&&{};return{{showFastModeToggle:{},fastModeToggleDisabled:!1}}",
-                &show["sig"], &show["show"], &show["ipc"], &show["sup"], &show["show"]
+                "{}let {}{}={}&&{};return{{showFastModeToggle:{},fastModeToggleDisabled:!1}}",
+                &show["sig"],
+                show.name("pre").map_or("", |m| m.as_str()),
+                &show["show"],
+                &show["ipc"],
+                &show["sup"],
+                &show["show"]
             );
             let mut text = self.text.replace(&show[0], &replacement);
 
@@ -680,6 +700,11 @@ mod imp {
         } else {
             (RendererState::Mismatch, missing)
         }
+    }
+
+    /// 供 example 导出改写结果：锚点命中只说明找对了地方，拼出来的 JS 能不能解析要另行检查
+    pub fn patch_renderer_text(text: &str) -> Result<String> {
+        Renderer::new(text).patch()
     }
 
     /// 供 example 对真实 renderer 做端到端演练，不写文件。
@@ -1076,10 +1101,39 @@ mod imp {
             r#"return{showFastModeToggle:u,fastModeToggleDisabled:u&&l}}"#,
         );
 
-        const RENDERER_CASES: [(&str, &str); 3] = [
-            ("1.46388.4.0", OLD_RENDERER),
-            ("1.49585.0.0", NEW_RENDERER),
-            ("2.110.0.0", CURRENT_RENDERER),
+        /// 2.9939.2.0：显示条件前多了 remote 判定，模型支持与禁用原因都带上 remote 分支
+        const REMOTE_RENDERER: &str = concat!(
+            r#"function ql({sessionRef:e,sessionMeta:t,draftEnvType:n,transportFor:a,selectedFolder:o,modelId:s,"#,
+            r#"fastModeFor:c,capabilities:l,config:u,openingKey:d,offerRemoteFastMode:f=!0}){"#,
+            r#"let g=C?.setFastMode,b=l.fastMode!==!1,w=!!g,T=e?.type==="local",E=t?.environmentKind,"#,
+            r#"D=f&&(e?e.type==="remote"&&E!=="bridge":n==="anthropic_cloud"),"#,
+            r#"A=D&&t?.cliVersion!==void 0&&es(t.cliVersion,Kl)<0,"#,
+            r#"j=s?c(V(s))!==void 0:!1,M=(s?.toLowerCase().includes("opus-4-6")??!1)||ve(),"#,
+            r#"N=j&&(D||M),P=p(e=>c(V(e))!==void 0&&(e.toLowerCase().includes("opus-4-6")||ve()),[c]),"#,
+            r#"F=!D&&j&&!M,I=D||u?.fastModePerSessionOptIn?.value!==!1,"#,
+            r#"L=A||Yl(t?.fastModeDisabledReason),R=u?.fastMode?.value===!0,"#,
+            r#"z=u?.fastModePerSessionOptIn?.value===!0;"#,
+            r#"return{modelSupportsFastMode:N,modelSupportsFastModeFor:P,fastModeNeedsDesktopUpdate:F,fastModeBlocked:L}}"#,
+            r#"function tl({envType:e,sessionRef:t,isLocalSession:n,fastModeCapable:r,fastModeEnableHint:i,"#,
+            r#"fastModeIpcAvailable:a,remoteFastMode:o,remoteFastModeAwaitingReport:s,perSessionOptInAllowed:c,"#,
+            r#"fastModeNeedsDesktopUpdate:l,modelSupportsFastMode:u,fastModeBlocked:d}){"#,
+            r#"let f=o&&(t?t.type==="remote":e==="anthropic_cloud"||e==="byoc"||e==="pool"),"#,
+            r#"p=(r||i)&&(a||f)&&c&&!i&&(a&&(t?n:e==="local"||e==="ssh")||f)&&!s&&!l&&u;"#,
+            r#"return{showFastModeToggle:p,fastModeToggleDisabled:p&&d}}"#,
+        );
+
+        /// modelId 形参各版本不同名，随样本一起登记
+        struct Case {
+            label: &'static str,
+            source: &'static str,
+            model_id: &'static str,
+        }
+
+        const RENDERER_CASES: [Case; 4] = [
+            Case { label: "1.46388.4.0", source: OLD_RENDERER, model_id: "a" },
+            Case { label: "1.49585.0.0", source: NEW_RENDERER, model_id: "i" },
+            Case { label: "2.110.0.0", source: CURRENT_RENDERER, model_id: "i" },
+            Case { label: "2.9939.2.0", source: REMOTE_RENDERER, model_id: "s" },
         ];
 
         /// 与 fast mode 无关、形态却相近的真实片段：精简样本里没有这种噪声，
@@ -1149,7 +1203,7 @@ mod imp {
 
         #[test]
         fn patches_supported_desktop_versions() {
-            for (label, source) in RENDERER_CASES {
+            for Case { label, source, .. } in RENDERER_CASES {
                 assert_eq!(classify(source).0, RendererState::Pristine, "{label} 原始识别");
                 let patched = Renderer::new(source).patch().expect(label);
                 assert_eq!(classify(&patched).0, RendererState::Patched, "{label} patch 后识别");
@@ -1163,7 +1217,7 @@ mod imp {
 
         #[test]
         fn patched_markers_never_match_untouched_code() {
-            for (label, base) in RENDERER_CASES {
+            for Case { label, source: base, .. } in RENDERER_CASES {
                 let source = format!("{DECOY}{base}");
                 for anchor in Renderer::new(&source).anchors() {
                     // 原始文本里就命中，patch 后会变成两处，唯一性校验随之失败
@@ -1182,7 +1236,7 @@ mod imp {
 
         #[test]
         fn renderer_stays_recognisable_after_patching() {
-            for (label, source) in RENDERER_CASES {
+            for Case { label, source, .. } in RENDERER_CASES {
                 assert!(is_renderer(source), "{label} 原始应被认出");
                 let patched = Renderer::new(source).patch().expect(label);
                 // patch 抹掉 fastModeDisabledReason，识别不能依赖它，否则改完就报未找到
@@ -1193,24 +1247,20 @@ mod imp {
         #[test]
         fn model_id_comes_from_the_target_function() {
             // modelId 形参不同名，硬编码会在另一版生成引用错变量的代码
-            for (source, model_id, other) in [
-                (OLD_RENDERER, "a", "i"),
-                (NEW_RENDERER, "i", "a"),
-                (CURRENT_RENDERER, "i", "a"),
-            ] {
+            for Case { label, source, model_id } in RENDERER_CASES {
                 let patched = Renderer::new(source).patch().unwrap();
-                let expected = format!(r#"!!({model_id}&&({model_id}.toLowerCase()"#);
-                assert!(patched.contains(&expected), "应引用 {model_id}");
-                assert!(
-                    !patched.contains(&format!(r#"!!({other}&&({other}.toLowerCase()"#)),
-                    "不该引用 {other}"
-                );
+                let references =
+                    |id: &str| patched.contains(&format!(r#"!!({id}&&({id}.toLowerCase()"#));
+                assert!(references(model_id), "{label} 应引用 {model_id}");
+                for other in RENDERER_CASES.iter().map(|c| c.model_id).filter(|id| *id != model_id) {
+                    assert!(!references(other), "{label} 不该引用 {other}");
+                }
             }
         }
 
         #[test]
         fn patch_is_idempotent() {
-            for (label, source) in RENDERER_CASES {
+            for Case { label, source, .. } in RENDERER_CASES {
                 let once = Renderer::new(source).patch().unwrap();
                 // 已改过的文本锚点不再命中，重复 patch 直接报错而非改坏
                 assert!(Renderer::new(&once).patch().is_err(), "{label}");
@@ -1230,11 +1280,62 @@ mod imp {
 
         #[test]
         fn ambiguous_match_is_refused() {
-            for (label, source) in RENDERER_CASES {
+            for Case { label, source, .. } in RENDERER_CASES {
                 let doubled = format!("{source}{source}");
                 assert_eq!(classify(&doubled).0, RendererState::Mismatch, "{label}");
                 assert!(Renderer::new(&doubled).patch().is_err(), "{label}");
             }
+        }
+
+        #[test]
+        fn display_rewrite_keeps_preceding_declarations() {
+            let patched = Renderer::new(REMOTE_RENDERER).patch().unwrap();
+            assert!(patched.contains(
+                r#"let f=o&&(t?t.type==="remote":e==="anthropic_cloud"||e==="byoc"||e==="pool"),p=a&&u;"#
+            ));
+            assert!(patched.contains("return{showFastModeToggle:p,fastModeToggleDisabled:!1}"));
+        }
+
+        #[test]
+        fn remote_shape_of_support_is_fully_replaced() {
+            let patched = Renderer::new(REMOTE_RENDERER).patch().unwrap();
+            assert!(patched.contains(",N=!!(s&&(s.toLowerCase().includes(\"opus-5\")"));
+            assert!(patched.contains(",F=!1,"));
+            assert!(!patched.contains("N=j&&(D||M)"));
+            assert!(!patched.contains("F=!D&&j&&!M"));
+        }
+
+        #[test]
+        fn mixed_support_shapes_are_rejected() {
+            // 模型支持用了 remote 形态而 desktop-update 用了本地形态：结构自相矛盾，不能当作可 patch
+            let mixed = REMOTE_RENDERER.replace("F=!D&&j&&!M,", "F=j&&!M,");
+            assert_eq!(
+                classify(&mixed),
+                (RendererState::Mismatch, vec!["模型支持判定".to_string()])
+            );
+            assert!(Renderer::new(&mixed).patch().is_err());
+        }
+
+        #[test]
+        fn prefixed_direct_reason_is_cleared() {
+            let patched = Renderer::new(REMOTE_RENDERER).patch().unwrap();
+            assert!(patched.contains(",L=!1,R=u?.fastMode?.value===!0,"));
+            assert!(!patched.contains("L=A||"));
+            assert!(patched.contains("fastModeBlocked:L}"));
+        }
+
+        #[test]
+        fn model_menu_tolerates_declarations_before_the_lookup() {
+            let menu = MODEL_MENU.replace(
+                "},[E,i]),A=k?.models.find(",
+                "},[E,i]),P=p(e=>{c(e,{defaultWritten:!u})},[c,u]),A=k?.models.find(",
+            );
+            let source = format!("{REMOTE_RENDERER}{menu}");
+            assert_eq!(classify(&source).0, RendererState::Pristine);
+            let patched = Renderer::new(&source).patch().unwrap();
+            assert_eq!(classify(&patched).0, RendererState::Patched);
+            assert!(patched.contains(r#"fast_mode:{type:"toggle",name:"Fast mode""#));
+            assert!(patched.contains("P=p(e=>{c(e,{defaultWritten:!u})},[c,u]),A=k?.models.find("));
         }
 
         #[test]
@@ -1248,8 +1349,8 @@ mod imp {
 
         #[test]
         fn identifiers_can_contain_dollars() {
-            let identifiers = rx(r"\b(?:[A-Za-z]|zc|df|Bc|xf|ul|dl)\b");
-            for (label, source) in RENDERER_CASES {
+            let identifiers = rx(r"\b(?:[A-Za-z]|zc|df|Bc|xf|ul|dl|ql|tl)\b");
+            for Case { label, source, model_id } in RENDERER_CASES {
                 let renamed = identifiers.replace_all(source, |caps: &regex::Captures<'_>| {
                     format!("${}$", &caps[0])
                 });
@@ -1257,7 +1358,7 @@ mod imp {
                 let patched = Renderer::new(&renamed).patch().unwrap();
                 assert_eq!(classify(&patched).0, RendererState::Patched, "{label}");
                 assert!(is_renderer(&patched), "{label}");
-                let model_id = if source == OLD_RENDERER { "$a$" } else { "$i$" };
+                let model_id = format!("${model_id}$");
                 assert!(
                     patched.contains(&format!("!!({model_id}&&({model_id}.toLowerCase()")),
                     "{label}"
