@@ -73,7 +73,7 @@ Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能�
 
 | 组件 | 做法 | 落点 |
 |---|---|---|
-| wrapper（两平台） | 顶替版本目录里的 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给挪开保留的官方本体（Windows 改名，macOS 连整个 bundle 一起挪）；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
+| wrapper（两平台） | 顶替 Desktop 实际启动的那份 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给挪开保留的官方本体（Windows 改名，macOS 连整个 bundle 一起挪）；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\<build>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/<build>/claude.app/Contents/MacOS/`<br>`<build>` 是清单 sha256 的前 12 位，Desktop 2.19675 起才有这一层，更早的版本 CLI 直接在 `<ver>` 下 |
 | renderer patch（仅 Windows） | 改写 minified renderer 的相关锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因，并为新版模型菜单补齐 `fast_mode` 配置。锚点以属性名与字符串字面量为骨架、变量名正则捕获后回填，Desktop 更新重命名 minify 符号不会失配。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
 
 wrapper 管"会话默认 fast"，开关管"实时切换"。
@@ -100,7 +100,7 @@ Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFAC
 
 验证以转录里的 `usage.speed` 为准（页面底部的验证卡统计的就是它），Desktop 状态栏的 Fast 标签有官方显示 bug。
 
-Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`，它会逐锚点列出改写前后的命中数；再给一个输出路径（如 `out.mjs`）就会把改写结果写出来，用 `node --check out.mjs` 确认拼出的 JS 仍能解析。「还原官方」一键撤销全部改动。
+Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。wrapper 与 renderer 各修各的，一边失败不耽误另一边；失败的版本组合不再自动重试，升级 Claude++ 后会重新试一次。Desktop 2.19675 把旧布局搬进构建子目录时只带走它自己的文件，藏起来的官方本体会落在外层：守护会把它接回 wrapper 身边，构建目录里已是新下的官方时则清掉这份残留。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`，它会逐锚点列出改写前后的命中数；再给一个输出路径（如 `out.mjs`）就会把改写结果写出来，用 `node --check out.mjs` 确认拼出的 JS 仍能解析。「还原官方」一键撤销全部改动。
 
 ### 构建
 
@@ -122,7 +122,7 @@ cd src-tauri && cargo test    # 单元测试（junction / 迁移字段 / 墓碑�
 - 会话转录 jsonl 在归一与迁移全程只读；Codex 迁移只新增 Claude 转录、不改 Codex 会话本体；墓碑清理的删除走系统回收站
 - 元数据写入采用临时文件 + 原子改名
 - 预览窗口全程只读，渲染前经 DOMPurify 消毒
-- Fast Mode：官方 CLI 原样保留在版本目录（Windows 改名，macOS 连 bundle 一起挪开），不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包。备份与还原要在包目录里增删 `.orig`，而 WindowsApps 下只有 TrustedInstaller 与 SYSTEM 可写，因此会对 `assets1` 这一层目录取得所有权（不递归、不影响 Desktop 更新，更新后目录重建即恢复默认）；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
+- Fast Mode：官方 CLI 原样保留在 Desktop 启动它的那层目录（Windows 改名，macOS 连 bundle 一起挪开），不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包。备份与还原要在包目录里增删 `.orig`，而 WindowsApps 下只有 TrustedInstaller 与 SYSTEM 可写，因此会对 `assets\v1` 这一层目录取得所有权（不递归、不影响 Desktop 更新，更新后目录重建即恢复默认）；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
 
 ### 免责
 
@@ -192,7 +192,7 @@ Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast
 
 | Component | How | Location |
 |---|---|---|
-| wrapper (both platforms) | Replaces the CLI inside the version directory, merges `fastMode:true` into `--settings` and forwards to the stashed official binary (renamed on Windows, moved bundle-and-all on macOS); Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/claude.app/Contents/MacOS/` |
+| wrapper (both platforms) | Replaces the CLI that Desktop actually launches, merges `fastMode:true` into `--settings` and forwards to the stashed official binary (renamed on Windows, moved bundle-and-all on macOS); Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\<build>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/<build>/claude.app/Contents/MacOS/`<br>`<build>` is the first 12 hex digits of the manifest sha256; the layer exists since Desktop 2.19675, earlier versions keep the CLI directly under `<ver>` |
 | renderer patch (Windows only) | Rewrites the relevant anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason, and supply the `fast_mode` configuration for the newer model menu. Anchors are keyed on property names and string literals, with variable names captured by regex and filled back in, so a Desktop update that renames minified symbols does not break them. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
 
 The wrapper makes sessions fast by default; the toggle switches at runtime.
@@ -219,7 +219,7 @@ That column decides toggle visibility on Windows. macOS has no toggle: the wrapp
 
 Trust `usage.speed` in the transcript (the verification card at the bottom of the tab counts exactly that); the Fast label in Desktop's status bar has a known display bug.
 
-A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
+A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. The wrapper and the renderer are repaired independently, so one failing never holds up the other; a failed version combination is not retried automatically, but upgrading Claude++ gives it one more try. When Desktop 2.19675 moves an old layout into a build subdirectory it takes only its own files, leaving the stashed official binary behind in the version directory: the daemon hands it back to the wrapper, or deletes the leftover when the build already holds a freshly downloaded official CLI. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
 
 ### Build
 
@@ -241,7 +241,7 @@ cd src-tauri && cargo test    # unit tests (junction / migration fields / tombst
 - Transcripts are strictly read-only during unify and migration; Codex import only adds Claude transcripts and never touches Codex threads; tombstone deletions go to the recycle bin
 - Metadata writes use temp-file + atomic rename
 - Preview windows are read-only; rendered content is DOMPurify-sanitized
-- Fast Mode stashes the official CLI inside its version directory untouched (renamed on Windows, moved bundle-and-all on macOS), never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself. Creating and removing `.orig` means adding and deleting entries inside the package directory, which under WindowsApps only TrustedInstaller and SYSTEM may do, so ownership of the `assets1` directory itself is taken (non-recursive, harmless to Desktop updates, which rebuild the directory with default ACLs); on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
+- Fast Mode stashes the official CLI untouched right next to where Desktop launches it (renamed on Windows, moved bundle-and-all on macOS), never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself. Creating and removing `.orig` means adding and deleting entries inside the package directory, which under WindowsApps only TrustedInstaller and SYSTEM may do, so ownership of the `assets\v1` directory itself is taken (non-recursive, harmless to Desktop updates, which rebuild the directory with default ACLs); on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all
 
 ### Disclaimer
 

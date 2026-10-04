@@ -1,4 +1,4 @@
-// 顶替版本目录的 claude.exe：转发全部参数给同目录 claude-real.exe，把 fastMode:true 合并进 --settings。
+// 顶替 Desktop 启动的那份 claude.exe：转发全部参数给同目录 claude-real.exe，把 fastMode:true 合并进 --settings。
 // Desktop 只比 .verified 不比 exe sha，且 access(exe,X_OK) 通过即可，故可直接顶替。
 // 目标 csc v4.0.30319（C# 5）：不用字符串插值、?.、表达式体成员。
 using System;

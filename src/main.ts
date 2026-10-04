@@ -1268,7 +1268,7 @@ function renderFastMode(): string {
       }</div>`
     : "";
   const failureNote = fm.settings.lastFailure
-    ? `<div class="banner banner-error">上次自动修复失败：${esc(fm.settings.lastFailure)}。同一版本不再自动重试，点「修复」手动执行</div>`
+    ? `<div class="banner banner-error">上次修复失败：${esc(fm.settings.lastFailure)}。同一版本不再自动重试，点「修复」手动执行</div>`
     : "";
   const wrapper = WRAPPER_META[fm.wrapper];
   const renderer = RENDERER_META[fm.renderer.state];
@@ -1284,6 +1284,11 @@ function renderFastMode(): string {
       ? "最近的 3p 会话里还没有 Opus 5 / 4.8 的回复"
       : `最近 ${fm.speed.sessions} 个 3p 会话中 Opus 5 / 4.8 的回复：<strong>fast ${fm.speed.fast}</strong> · standard ${fm.speed.standard}`;
   const settings = fm.settings;
+  // 后端只记确实生效的组件：mac 恒无 renderer，wrapper 失败时也不会冒出 CLI 版本
+  const patchedParts = [
+    settings.patchedDesktopVersion ? `Desktop <span class="mono">${esc(settings.patchedDesktopVersion)}</span>` : "",
+    settings.patchedCliVersion ? `CLI <span class="mono">${esc(settings.patchedCliVersion)}</span>` : "",
+  ].filter(Boolean);
   return `
     <div class="view">
       ${head}
@@ -1343,11 +1348,7 @@ function renderFastMode(): string {
           <div class="card-meta">
             <span>${settings.installed ? "守护只对已安装的机器生效；还原官方即停止" : "安装后生效"}</span>
             ${settings.lastRepair ? `<span>上次修复 ${esc(settings.lastRepair)}</span>` : ""}
-            ${
-              settings.patchedDesktopVersion
-                ? `<span>已 patch：Desktop <span class="mono">${esc(settings.patchedDesktopVersion)}</span> · CLI <span class="mono">${esc(settings.patchedCliVersion ?? "—")}</span></span>`
-                : ""
-            }
+            ${patchedParts.length ? `<span>已 patch：${patchedParts.join(" · ")}</span>` : ""}
           </div>
         </div>
       </section>

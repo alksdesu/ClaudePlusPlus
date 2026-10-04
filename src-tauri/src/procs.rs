@@ -270,6 +270,11 @@ mod tests {
             "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.219/claude.app/Contents/MacOS/claude",
             None
         ));
+        // Desktop 2.19675 起多一层构建子目录
+        assert!(is_desktop_exe_excluding(
+            "/Users/x/Library/Application Support/Claude-3p/claude-code/2.1.286/635c1867224a/claude.app/Contents/MacOS/claude",
+            None
+        ));
     }
 
     /// Claude++ 的 bundle 名同样含 claude，不按自身路径排掉就会把自己当成 Desktop
