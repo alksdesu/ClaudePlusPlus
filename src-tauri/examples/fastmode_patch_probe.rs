@@ -3,9 +3,18 @@
 #[cfg(windows)]
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args
-        .next()
-        .expect("usage: fastmode_patch_probe <renderer.js> [patched-output.mjs]");
+    let path = args.next().expect("usage: fastmode_patch_probe <renderer.js|assets-dir> [output]");
+    if std::path::Path::new(&path).is_dir() {
+        let output = args.next().map(std::path::PathBuf::from);
+        match claude_plus_plus_lib::fastmode::probe_renderer_dir(std::path::Path::new(&path), output.as_deref()) {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let text = std::fs::read_to_string(&path).expect("读取 renderer");
     println!("{}", claude_plus_plus_lib::fastmode::probe_patch(&text));
     if let Some(out) = args.next() {

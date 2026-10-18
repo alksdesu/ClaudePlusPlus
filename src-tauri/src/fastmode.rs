@@ -585,6 +585,7 @@ mod imp {
         pattern: &'static str,
         patched: &'static str,
         aliases: &'static [(&'static str, &'static str)],
+        alternate: Option<(&'static str, &'static [(&'static str, &'static str)])>,
     }
 
     /// minify 只重命名局部变量与函数，属性名和字符串字面量不动 —— 锚点拿它们当骨架，
@@ -600,11 +601,18 @@ mod imp {
             // let 里可能先声明别的中间量，只改被 return 的那一个
             pattern: concat!(
                 r"(?P<sig>fastModeIpcAvailable:(?P<ipc>[\w$]+),(?:[\w$]+:[\w$]+,)*?modelSupportsFastMode:(?P<sup>[\w$]+),",
-                r"(?:[\w$]+:[\w$]+,)*?[\w$]+:[\w$]+\}\)\{)let (?P<pre>[^;]*,)?(?P<show>[\w$]+)=[^=>;][^;]*;",
-                r"return\{showFastModeToggle:(?P<show2>[\w$]+),fastModeToggleDisabled:[^}]*\}",
+                r"(?:[\w$]+:[\w$]+,)*?[\w$]+:[\w$]+\}\)\{)(?P<declarations>let (?P<pre>[^;]*,)?(?P<show>[\w$]+)=[^=>;][^;]*;)",
+                r"return\{showFastModeToggle:(?P<show2>[\w$]+),fastModeToggleDisabled:(?P<disabled>[\w$]+&&[\w$]+)",
+                r"(?P<carrier>,fastModeCarrier:(?P<route>[\w$]+))?\}",
             ),
-            patched: r"return\{showFastModeToggle:[\w$]+,fastModeToggleDisabled:!1\}",
+            patched: concat!(
+                r"return\{showFastModeToggle:[\w$]+,fastModeToggleDisabled:!1\}",
+                r"|return\{showFastModeToggle:[\w$]+\?[^,;]+:[\w$]+,",
+                r"fastModeToggleDisabled:[\w$]+\?!1:[\w$]+&&[\w$]+,",
+                r#"fastModeCarrier:[\w$]+\?"local":[\w$]+\}"#,
+            ),
             aliases: &[("show", "show2")],
+            alternate: None,
         },
         Anchor {
             label: "模型支持判定",
@@ -619,7 +627,11 @@ mod imp {
                 r"(?P<needs>[\w$]+)=(?:(?P<has2>[\w$]+)&&!(?P<is46b>[\w$]+)",
                 r"|!(?P<remote2>[\w$]+)&&(?P<rhas2>[\w$]+)&&!(?P<ris46b>[\w$]+)),",
             ),
-            patched: r#",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
+            patched: concat!(
+                r#",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
+                r"|,[\w$]+=[\w$]+\([\w$]+=>[\w$]+\?[^;]+?:",
+                r#"!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
+            ),
             aliases: &[
                 ("arg", "arg2"),
                 ("arg", "arg3"),
@@ -629,6 +641,18 @@ mod imp {
                 ("remote", "remote2"),
                 ("ris46", "ris46b"),
             ],
+            alternate: Some((
+                CALLBACK_SUPPORT,
+                &[
+                    ("arg", "arg2"),
+                    ("arg", "arg3"),
+                    ("fnc", "fnc2"),
+                    ("lookup", "lookup2"),
+                    ("remote", "remote2"),
+                    ("remote", "remote3"),
+                    ("model", "model2"),
+                ],
+            )),
         },
         Anchor {
             label: "禁用原因",
@@ -643,8 +667,11 @@ mod imp {
             patched: concat!(
                 r"[\w$]+=null,[\w$]+=!1,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
                 r"|[\w$]+=!1,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
+                r"|[\w$]+=[\w$]+\?\((?:[\w$]+\|\|)?[\w$]+\([\w$]+\?\.fastModeDisabledReason\)\):!1,",
+                r"[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
             ),
             aliases: &[("msg", "msg2")],
+            alternate: None,
         },
         Anchor {
             label: "模型菜单",
@@ -661,8 +688,31 @@ mod imp {
                 r"\]\}\}:[\w$]+\)",
             ),
             aliases: &[],
+            alternate: None,
         },
     ];
+
+    const CALLBACK_SUPPORT: &str = concat!(
+        r",(?P<fnc>[\w$]+)=(?P<cb>[\w$]+)\((?P<arg>[\w$]+)=>(?P<body>(?P<lookup>[\w$]+)\([\w$]+\((?P<arg2>[\w$]+)\)\)!==void 0&&",
+        r#"\((?P<remote>[\w$]+)\|\|(?P<arg3>[\w$]+)\.toLowerCase\(\)\.includes\("opus-4-6"\)\|\|[\w$]+\(\)\)),"#,
+        r"(?P<deps>\[(?P<lookup2>[\w$]+),(?P<remote2>[\w$]+)\])\),",
+        r"(?P<sup>[\w$]+)=!!(?P<model>[\w$]+)&&(?P<fnc2>[\w$]+)\((?P<model2>[\w$]+)\),",
+        r"(?P<needs>[\w$]+)=!(?P<remote3>[\w$]+)&&[\w$]+&&![\w$]+,",
+    );
+
+    const MENU_DEFINITION: &str = r#""data-testid":"epitaxy-cds-model-selector""#;
+
+    impl Anchor {
+        fn matches<'a>(&self, text: &'a str) -> Vec<regex::Captures<'a>> {
+            let mut hits = Vec::new();
+            for (pattern, aliases) in std::iter::once((self.pattern, self.aliases)).chain(self.alternate) {
+                hits.extend(rx(pattern).captures_iter(text).filter(|c| {
+                    aliases.iter().all(|(a, b)| c.name(a).map(|m| m.as_str()) == c.name(b).map(|m| m.as_str()))
+                }));
+            }
+            hits
+        }
+    }
 
     fn supports_fast_js(id: &str) -> String {
         format!(
@@ -699,11 +749,16 @@ mod imp {
         }
 
         fn find(&self, anchor: &Anchor) -> Option<regex::Captures<'a>> {
-            unique_match(self.text, anchor.pattern, anchor.aliases)
+            let mut hits = anchor.matches(self.text);
+            (hits.len() == 1).then(|| hits.remove(0))
         }
 
         fn anchors(&self) -> impl Iterator<Item = &'static Anchor> + '_ {
-            ANCHORS.iter().filter(|a| a.required_marker.map(|m| self.text.contains(m)).unwrap_or(true))
+            let menu_only = is_model_menu(self.text) && !is_renderer(self.text);
+            ANCHORS.iter().filter(move |a| match a.required_marker {
+                Some(_) => is_model_menu(self.text),
+                None => !menu_only,
+            })
         }
 
         fn model_id_before(&self, offset: usize) -> Option<String> {
@@ -719,7 +774,8 @@ mod imp {
         }
 
         fn is_outdated(&self) -> bool {
-            self.text.contains(ANCHORS[3].required_marker.unwrap())
+            is_renderer(self.text)
+                && is_model_menu(self.text)
                 && ANCHORS[..3].iter().all(|a| unique_match(self.text, a.patched, &[]).is_some())
                 && self.find(&ANCHORS[3]).is_some()
         }
@@ -741,52 +797,8 @@ mod imp {
 
         /// 逐处改写：显示条件收敛为 IPC 可用且模型支持，模型支持改按 ID 判定，禁用原因清空
         fn patch_unchecked(&self) -> Result<String> {
-            let show = self.find(&ANCHORS[0]).context("显示条件锚点未唯一命中")?;
-            let replacement = format!(
-                "{}let {}{}={}&&{};return{{showFastModeToggle:{},fastModeToggleDisabled:!1}}",
-                &show["sig"],
-                show.name("pre").map_or("", |m| m.as_str()),
-                &show["show"],
-                &show["ipc"],
-                &show["sup"],
-                &show["show"]
-            );
-            let mut text = self.text.replace(&show[0], &replacement);
-
-            let support = {
-                let staged = Renderer::new(&text);
-                let caps = staged.find(&ANCHORS[1]).context("模型支持锚点未唯一命中")?;
-                let whole = caps[0].to_string();
-                let model_id = staged
-                    .model_id_before(caps.get(0).unwrap().start())
-                    .context("未能在目标函数签名里定位 modelId")?;
-                // Opus 4.6 客户端认它但服务端已不再给 fast，只放 5 与 4.8
-                let replacement = format!(
-                    ",{}={},{}={}({}=>{},[]),{}=!1,",
-                    &caps["sup"],
-                    supports_fast_js(&model_id),
-                    &caps["fnc"],
-                    &caps["cb"],
-                    &caps["arg"],
-                    supports_fast_js(&caps["arg"]),
-                    &caps["needs"]
-                );
-                (whole, replacement)
-            };
-            text = text.replace(&support.0, &support.1);
-
-            let reason = {
-                let staged = Renderer::new(&text);
-                let caps = staged.find(&ANCHORS[2]).context("禁用原因锚点未唯一命中")?;
-                let replacement = match caps.name("direct_flag") {
-                    Some(flag) => format!("{}=!1{}", flag.as_str(), &caps["tail"]),
-                    None => format!("{}=null,{}=!1", &caps["msg"], &caps["flag"]),
-                };
-                (caps[0].to_string(), replacement)
-            };
-            text = text.replace(&reason.0, &reason.1);
-
-            if self.text.contains(ANCHORS[3].required_marker.unwrap()) {
+            let mut text = if is_renderer(self.text) { self.patch_core()? } else { self.text.to_string() };
+            if is_model_menu(self.text) {
                 let staged = Renderer::new(&text);
                 let caps = staged.find(&ANCHORS[3]).context("模型菜单锚点未唯一命中")?;
                 let replacement = format!(
@@ -801,6 +813,119 @@ mod imp {
                 );
                 text = text.replace(&caps[0], &replacement);
             }
+            Ok(text)
+        }
+
+        fn patch_core(&self) -> Result<String> {
+            let show = self.find(&ANCHORS[0]).context("显示条件锚点未唯一命中")?;
+            let replacement = if let Some(route) = show.name("route") {
+                let signature = rx(concat!(
+                    r"function [\w$]+\(\{envType:(?P<env>[\w$]+),sessionRef:(?P<session>[\w$]+),",
+                    r"isLocalSession:(?P<local>[\w$]+),[^{}]*\}\)\{",
+                ));
+                let context = signature
+                    .captures_iter(&self.text[..show.get(0).unwrap().end()])
+                    .last()
+                    .context("未找到开关所在函数的会话参数")?;
+                if context.get(0).unwrap().end() != show.name("sig").unwrap().end()
+                    || self.text.contains("__cppLocalFast")
+                {
+                    bail!("开关上下文不唯一");
+                }
+                // carrier 决定新会话的设置路由，只为本地会话补齐，远端沿用原判定。
+                format!(
+                    concat!(
+                        "{}{}let __cppLocalFast={}&&({}?{}:{}===\"local\"||{}===\"ssh\");",
+                        "return{{showFastModeToggle:__cppLocalFast?{}&&{}:{},",
+                        "fastModeToggleDisabled:__cppLocalFast?!1:{},fastModeCarrier:__cppLocalFast?\"local\":{}}}",
+                    ),
+                    &show["sig"],
+                    &show["declarations"],
+                    &show["ipc"],
+                    &context["session"],
+                    &context["local"],
+                    &context["env"],
+                    &context["env"],
+                    &show["ipc"],
+                    &show["sup"],
+                    &show["show"],
+                    &show["disabled"],
+                    route.as_str(),
+                )
+            } else {
+                format!(
+                    "{}let {}{}={}&&{};return{{showFastModeToggle:{},fastModeToggleDisabled:!1}}",
+                    &show["sig"],
+                    show.name("pre").map_or("", |m| m.as_str()),
+                    &show["show"],
+                    &show["ipc"],
+                    &show["sup"],
+                    &show["show"]
+                )
+            };
+            let mut text = self.text.replace(&show[0], &replacement);
+
+            let (support, remote) = {
+                let staged = Renderer::new(&text);
+                let caps = staged.find(&ANCHORS[1]).context("模型支持锚点未唯一命中")?;
+                let whole = caps[0].to_string();
+                let model_id =
+                    staged.model_id_before(caps.get(0).unwrap().start()).context("未能在目标函数签名里定位 modelId")?;
+                // Opus 4.6 客户端认它但服务端已不再给 fast，只放 5 与 4.8
+                if let Some(model) = caps.name("model") {
+                    if model.as_str() != model_id {
+                        bail!("模型支持判定引用了其他 modelId");
+                    }
+                    let replacement = format!(
+                        ",{}={}({}=>{}?{}:{},{}),{}=!!{}&&{}({}),{}=!1,",
+                        &caps["fnc"],
+                        &caps["cb"],
+                        &caps["arg"],
+                        &caps["remote"],
+                        &caps["body"],
+                        supports_fast_js(&caps["arg"]),
+                        &caps["deps"],
+                        &caps["sup"],
+                        model_id,
+                        &caps["fnc"],
+                        model_id,
+                        &caps["needs"],
+                    );
+                    ((whole, replacement), Some(caps["remote"].to_string()))
+                } else {
+                    let replacement = format!(
+                        ",{}={},{}={}({}=>{},[]),{}=!1,",
+                        &caps["sup"],
+                        supports_fast_js(&model_id),
+                        &caps["fnc"],
+                        &caps["cb"],
+                        &caps["arg"],
+                        supports_fast_js(&caps["arg"]),
+                        &caps["needs"]
+                    );
+                    ((whole, replacement), None)
+                }
+            };
+            text = text.replace(&support.0, &support.1);
+
+            let reason = {
+                let staged = Renderer::new(&text);
+                let caps = staged.find(&ANCHORS[2]).context("禁用原因锚点未唯一命中")?;
+                let replacement = match caps.name("direct_flag") {
+                    Some(flag) => {
+                        if let Some(remote) = remote.as_deref() {
+                            let body = &text[flag.end() + 1..caps.name("tail").unwrap().start()];
+                            format!("{}={remote}?({body}):!1{}", flag.as_str(), &caps["tail"])
+                        } else {
+                            format!("{}=!1{}", flag.as_str(), &caps["tail"])
+                        }
+                    }
+                    None => format!("{}=null,{}=!1", &caps["msg"], &caps["flag"]),
+                };
+                (caps[0].to_string(), replacement)
+            };
+            text = text.replace(&reason.0, &reason.1);
+
             Ok(text)
         }
     }
@@ -882,18 +1007,59 @@ mod imp {
         text.contains("fastModeToggleDisabled") && text.contains("modelSupportsFastMode")
     }
 
-    fn renderer_file(v1: &Path) -> Option<PathBuf> {
-        for entry in fs::read_dir(v1).ok()?.flatten() {
+    fn is_model_menu(text: &str) -> bool {
+        text.contains(MENU_DEFINITION)
+    }
+
+    struct RendererAsset {
+        path: PathBuf,
+        text: String,
+    }
+
+    fn renderer_assets(v1: &Path) -> Result<Vec<RendererAsset>> {
+        let mut assets = Vec::new();
+        for entry in fs::read_dir(v1).context("读取 renderer 目录")? {
+            let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("js") {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else { continue };
-            if is_renderer(&text) {
-                return Some(path);
+            let text = fs::read_to_string(&path).with_context(|| format!("读取 {}", path.display()))?;
+            if is_renderer(&text) || is_model_menu(&text) {
+                assets.push(RendererAsset { path, text });
             }
         }
-        None
+        let core: Vec<_> = assets.iter().filter(|a| is_renderer(&a.text)).collect();
+        if core.len() != 1 {
+            bail!("主 renderer 应唯一，找到 {} 个", core.len());
+        }
+        let menus = assets.iter().filter(|a| is_model_menu(&a.text)).count();
+        if menus > 1 || (core[0].text.contains("fastModeCarrier:") && menus != 1) {
+            bail!("模型菜单 renderer 应唯一，找到 {menus} 个");
+        }
+        assets.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(assets)
+    }
+
+    fn classify_assets(assets: &[RendererAsset]) -> (RendererState, Vec<String>) {
+        let states: Vec<_> = assets.iter().map(|a| classify(&a.text)).collect();
+        let missing = assets
+            .iter()
+            .zip(&states)
+            .flat_map(|(asset, (_, labels))| {
+                labels.iter().map(move |label| format!("{}：{label}", dir_label(&asset.path)))
+            })
+            .collect::<Vec<_>>();
+        let state = if !missing.is_empty() || assets.is_empty() {
+            RendererState::Mismatch
+        } else if states.iter().all(|(s, _)| *s == RendererState::Patched) {
+            RendererState::Patched
+        } else if states.iter().all(|(s, _)| *s == RendererState::Pristine) {
+            RendererState::Pristine
+        } else {
+            RendererState::Outdated
+        };
+        (state, missing)
     }
 
     fn classify(text: &str) -> (RendererState, Vec<String>) {
@@ -926,7 +1092,7 @@ mod imp {
             out.push(format!(
                 "  [{}] pattern={} patched={}",
                 anchor.label,
-                rx(anchor.pattern).find_iter(text).count(),
+                anchor.matches(text).len(),
                 rx(anchor.patched).find_iter(text).count(),
             ));
         }
@@ -953,6 +1119,33 @@ mod imp {
         out.join("\n")
     }
 
+    pub fn probe_renderer_dir(v1: &Path, output: Option<&Path>) -> Result<String> {
+        let assets = renderer_assets(v1)?;
+        let mut out = vec![format!("bundle before={:?} files={}", classify_assets(&assets).0, assets.len())];
+        for asset in &assets {
+            out.push(format!("{}\n{}", dir_label(&asset.path), probe_patch(&asset.text)));
+        }
+        let plan = renderer_plan(&assets)?;
+        if let Some(output) = output {
+            fs::create_dir_all(output)?;
+            let output = fs::canonicalize(output)?;
+            let input = fs::canonicalize(v1)?;
+            if output.starts_with(&input) || input.starts_with(&output) {
+                bail!("探测输出目录不能包含或位于原始资源目录中");
+            }
+            for change in &plan {
+                let name = change.path.file_name().context("renderer 文件名缺失")?;
+                let dest = output.join(name).with_extension("mjs");
+                if dest.exists() && fs::canonicalize(&dest)? == fs::canonicalize(&change.path)? {
+                    bail!("探测输出不能覆盖原始 renderer");
+                }
+                fs::write(dest, &change.patched)?;
+            }
+        }
+        out.push("bundle after=Patched".to_string());
+        Ok(out.join("\n"))
+    }
+
     fn renderer_info(msix_root: Option<&Path>) -> RendererInfo {
         let not_found = RendererInfo {
             file: None,
@@ -960,17 +1153,26 @@ mod imp {
             missing_anchors: Vec::new(),
         };
         let Some(root) = msix_root else { return not_found };
-        let Some(path) = renderer_file(&renderer_dir(root)) else { return not_found };
-        let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
-        match fs::read_to_string(&path) {
-            Ok(text) => {
-                let (state, missing_anchors) = classify(&text);
+        renderer_info_in(&renderer_dir(root))
+    }
+
+    fn renderer_info_in(v1: &Path) -> RendererInfo {
+        match renderer_assets(v1) {
+            Ok(assets) => {
+                let file = Some(assets.iter().map(|a| dir_label(&a.path)).collect::<Vec<_>>().join(" · "));
+                let (state, missing_anchors) = classify_assets(&assets);
                 RendererInfo { file, state, missing_anchors }
             }
-            Err(_) => RendererInfo {
-                file,
-                state: RendererState::Unreadable,
-                missing_anchors: Vec::new(),
+            Err(error) => RendererInfo {
+                file: None,
+                state: if !v1.is_dir() {
+                    RendererState::NotFound
+                } else if error.downcast_ref::<std::io::Error>().is_some() {
+                    RendererState::Unreadable
+                } else {
+                    RendererState::Mismatch
+                },
+                missing_anchors: vec![format!("{error:#}")],
             },
         }
     }
@@ -1049,44 +1251,122 @@ mod imp {
         Ok(())
     }
 
-    /// 始终从 .orig 出发 patch，保证幂等；.orig 必须是官方原始，否则拒绝
-    fn patch_renderer(v1: &Path) -> Result<String> {
-        let live = renderer_file(v1).context("未找到 fast mode 所在的 renderer")?;
-        let orig = live.with_extension("js.orig");
-        if !orig.exists() {
-            grant_write(v1)?;
-            fs::copy(&live, &orig).context("备份 .orig")?;
-        }
-        grant_write(&live)?;
-        let source = fs::read_to_string(&orig).context("读取 .orig")?;
-        match classify(&source) {
-            (RendererState::Pristine, _) => {}
-            (RendererState::Mismatch, missing) => {
-                bail!("renderer 版本变化，锚点未命中: {}", missing.join("、"))
+    struct RendererChange {
+        path: PathBuf,
+        original: String,
+        patched: String,
+    }
+
+    fn renderer_plan(assets: &[RendererAsset]) -> Result<Vec<RendererChange>> {
+        assets
+            .iter()
+            .map(|asset| {
+                let backup = asset.path.with_extension("js.orig");
+                let source = if backup.exists() {
+                    fs::read_to_string(&backup).with_context(|| format!("读取 {}", backup.display()))?
+                } else {
+                    asset.text.clone()
+                };
+                if classify(&source).0 != RendererState::Pristine {
+                    bail!("{} 缺少可唯一匹配的原始代码：{:?}", dir_label(&asset.path), classify(&source));
+                }
+                let patched =
+                    Renderer::new(&source).patch().with_context(|| format!("改写 {}", dir_label(&asset.path)))?;
+                Ok(RendererChange { path: asset.path.clone(), original: asset.text.clone(), patched })
+            })
+            .collect()
+    }
+
+    fn write_renderer_changes(
+        changes: &[RendererChange],
+        mut write: impl FnMut(&Path, &str) -> Result<()>,
+    ) -> Result<()> {
+        for (index, change) in changes.iter().enumerate() {
+            if let Err(error) = write(&change.path, &change.patched) {
+                let mut failures = Vec::new();
+                // 失败的写入也可能已经截断文件，必须包含在回滚范围内。
+                for previous in changes[..=index].iter().rev() {
+                    if let Err(rollback) = fs::write(&previous.path, &previous.original) {
+                        failures.push(format!("{}：{rollback}", dir_label(&previous.path)));
+                    }
+                }
+                if !failures.is_empty() {
+                    bail!("写入失败：{error:#}；回滚失败：{}；原始备份仍保留", failures.join("；"));
+                }
+                return Err(error.context("renderer 写入失败，已回滚本次改动"));
             }
-            (state, _) => bail!("备份文件状态异常: {state:?}"),
         }
-        let patched = Renderer::new(&source).patch()?;
-        fs::write(&live, patched).context("写回 renderer")?;
-        Ok(format!("renderer 已 patch: {}", dir_label(&live)))
+        Ok(())
+    }
+
+    fn patch_renderer_in(v1: &Path, mut grant: impl FnMut(&Path) -> Result<()>) -> Result<String> {
+        let assets = renderer_assets(v1)?;
+        let plan = renderer_plan(&assets)?;
+        grant(v1)?;
+        for change in &plan {
+            grant(&change.path)?;
+            let backup = change.path.with_extension("js.orig");
+            if !backup.exists() {
+                use std::io::Write;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&backup)
+                    .with_context(|| format!("备份 {}", backup.display()))?;
+                file.write_all(change.original.as_bytes()).context("写入原始备份")?;
+                file.sync_all().context("保存原始备份")?;
+            }
+        }
+        write_renderer_changes(&plan, |path, text| {
+            fs::write(path, text).with_context(|| format!("写回 {}", path.display()))
+        })?;
+        Ok(format!("renderer 已 patch: {}", plan.iter().map(|c| dir_label(&c.path)).collect::<Vec<_>>().join("、")))
+    }
+
+    fn patch_renderer(v1: &Path) -> Result<String> {
+        patch_renderer_in(v1, grant_write)
+    }
+
+    fn restore_renderer_in(v1: &Path, mut grant: impl FnMut(&Path) -> Result<()>) -> Result<usize> {
+        let mut plan = Vec::new();
+        for entry in fs::read_dir(v1).context("读取 renderer 目录")? {
+            let backup = entry?.path();
+            if !backup.to_string_lossy().ends_with(".js.orig") {
+                continue;
+            }
+            let path = backup.with_extension("");
+            plan.push(RendererChange {
+                original: fs::read_to_string(&path).with_context(|| format!("读取 {}", path.display()))?,
+                patched: fs::read_to_string(&backup).with_context(|| format!("读取 {}", backup.display()))?,
+                path,
+            });
+        }
+        if plan.is_empty() {
+            return Ok(0);
+        }
+        grant(v1)?;
+        for change in &plan {
+            grant(&change.path)?;
+        }
+        write_renderer_changes(&plan, |path, text| {
+            fs::write(path, text).with_context(|| format!("还原 {}", path.display()))
+        })?;
+        for change in &plan {
+            fs::remove_file(change.path.with_extension("js.orig")).context("移除原始备份")?;
+        }
+        Ok(plan.len())
     }
 
     fn restore_renderer(v1: &Path) -> Result<usize> {
-        let mut restored = 0;
-        for entry in fs::read_dir(v1).context("读取 renderer 目录")?.flatten() {
-            let orig = entry.path();
-            if !orig.to_string_lossy().ends_with(".js.orig") {
-                continue;
-            }
-            let live = orig.with_extension("");
-            grant_write(&live)?;
-            fs::copy(&orig, &live).with_context(|| format!("还原 {}", live.display()))?;
-            // 删 .orig 同样是改目录条目
-            grant_write(v1)?;
-            fs::remove_file(&orig).with_context(|| format!("移除 {}", orig.display()))?;
-            restored += 1;
-        }
-        Ok(restored)
+        restore_renderer_in(v1, grant_write)
+    }
+
+    fn has_renderer_backups(root: &Path) -> bool {
+        fs::read_dir(renderer_dir(root))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.path().to_string_lossy().ends_with(".js.orig"))
     }
 
     fn elevated_result_path() -> PathBuf {
@@ -1192,9 +1472,13 @@ mod imp {
             bail!("Claude Desktop 正在运行，请先退出后再还原");
         }
         let wrapper = restore_all_cli().map(|n| format!("已还原 {n} 个版本目录的官方 CLI"));
-        let renderer = match status_light().renderer.state {
-            RendererState::Patched | RendererState::Outdated => run_with_elevation("restore"),
-            _ => Ok("renderer 无需还原".to_string()),
+        let status = status_light();
+        let renderer = if matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated)
+            || status.msix_path.as_deref().is_some_and(has_renderer_backups)
+        {
+            run_with_elevation("restore")
+        } else {
+            Ok("renderer 无需还原".to_string())
         };
         // 部分失败也停掉守护：否则它会把刚还原的那一半又装回去
         let mut settings = load_settings();
@@ -1329,6 +1613,136 @@ mod imp {
             r#"return{...E,models:s.map(a)}},[E,i]),A=k?.models.find(e=>e.id===i);"#,
             r#"return dr({contextModel:i,shapedCatalog:k,"data-testid":"epitaxy-cds-model-selector"})}"#,
         );
+
+        const SPLIT_CORE: &str = concat!(
+            r#"function Bs({sessionRef:e,sessionMeta:t,draftEnvType:n,transportFor:r,selectedFolder:a,modelId:o,fastModeFor:c,capabilities:l,config:u,openingKey:d,offerRemoteFastMode:f=!0}){"#,
+            r#"let T=f&&(e?e.type==="remote":n==="anthropic_cloud"),O=T&&t?.cliVersion!==void 0,"#,
+            r#"k=o?c(H(o))!==void 0:!1,A=(o?.toLowerCase().includes("opus-4-6")??!1)||He(),"#,
+            r#"j=x(e=>c(H(e))!==void 0&&(T||e.toLowerCase().includes("opus-4-6")||He()),[c,T]),te=!!o&&j(o),N=!T&&k&&!A,"#,
+            r#"P=T||u?.fastModePerSessionOptIn?.value!==!1,I=O||Hs(t?.fastModeDisabledReason),L=u?.fastMode?.value===!0,ne=u?.fastModePerSessionOptIn?.value===!0;"#,
+            r#"return{modelSupportsFastMode:te,modelSupportsFastModeFor:j,fastModeBlocked:I}}"#,
+            r#"function ps({envType:e,sessionRef:t,isLocalSession:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,remoteFastMode:o,remoteFastModeAwaitingReport:s,perSessionOptInAllowed:c,fastModeNeedsDesktopUpdate:l,modelSupportsFastMode:u,fastModeBlocked:d}){"#,
+            r#"let f=o&&(t?t.type==="remote":e==="anthropic_cloud"||e==="byoc"||e==="pool"),p=r&&!i&&c&&!s?f?"remote":a&&(t?n:e==="local"||e==="ssh")?"local":null:null,m=p!==null&&!l&&u;"#,
+            r#"return{showFastModeToggle:m,fastModeToggleDisabled:m&&d,fastModeCarrier:p}}"#,
+        );
+
+        fn split_assets(dir: &Path) {
+            fs::write(dir.join("core.js"), SPLIT_CORE).unwrap();
+            fs::write(dir.join("menu.js"), MODEL_MENU).unwrap();
+            fs::write(dir.join("noise.js"), DECOY).unwrap();
+            fs::write(dir.join("reference.js"), r#"e.querySelector('[data-testid="epitaxy-cds-model-selector"]')"#)
+                .unwrap();
+        }
+
+        #[test]
+        fn callback_support_keeps_remote_settings_and_carrier() {
+            for source in [
+                SPLIT_CORE.to_string(),
+                rx(r"\b(?:[A-Za-z]|te|ps|Bs)\b")
+                    .replace_all(SPLIT_CORE, |c: &regex::Captures<'_>| format!("${}$", &c[0]))
+                    .into_owned(),
+            ] {
+                assert_eq!(classify(&source).0, RendererState::Pristine);
+                for anchor in Renderer::new(&source).anchors() {
+                    assert!(unique_match(&source, anchor.patched, &[]).is_none(), "{}", anchor.label);
+                }
+                let patched = Renderer::new(&source).patch().unwrap();
+                assert_eq!(classify(&patched).0, RendererState::Patched);
+                assert!(patched.contains("fastModeCarrier:__cppLocalFast?\"local\":"));
+                assert!(patched.contains("fastModeDisabledReason"));
+                assert!(is_renderer(&patched));
+            }
+            let patched = Renderer::new(SPLIT_CORE).patch().unwrap();
+            assert!(patched.contains("j=x(e=>T?c(H(e))"));
+            assert!(patched.contains("te=!!o&&j(o),N=!1,"));
+            assert!(patched.contains("I=T?(O||Hs(t?.fastModeDisabledReason)):!1,"));
+            for (from, to) in [
+                ("te=!!o&&j(o)", "te=!!o&&wrong(o)"),
+                ("[c,T]", "[c,Z]"),
+                ("N=!T&&k&&!A", "N=!Z&&k&&!A"),
+                ("te=!!o&&j(o)", "te=!!a&&j(a)"),
+            ] {
+                assert!(Renderer::new(&SPLIT_CORE.replace(from, to)).patch().is_err());
+            }
+        }
+
+        #[test]
+        fn split_renderer_patch_restore_and_partial_state() {
+            let dir = tempfile::tempdir().unwrap();
+            split_assets(dir.path());
+            let state = renderer_info_in(dir.path());
+            assert_eq!(state.state, RendererState::Pristine);
+            assert!(state.file.unwrap().contains("menu.js"));
+            patch_renderer_in(dir.path(), |_| Ok(())).unwrap();
+            assert_eq!(renderer_info_in(dir.path()).state, RendererState::Patched);
+            assert_eq!(fs::read_to_string(dir.path().join("core.js.orig")).unwrap(), SPLIT_CORE);
+            assert_eq!(fs::read_to_string(dir.path().join("menu.js.orig")).unwrap(), MODEL_MENU);
+            fs::write(dir.path().join("menu.js"), MODEL_MENU).unwrap();
+            assert_eq!(renderer_info_in(dir.path()).state, RendererState::Outdated);
+            patch_renderer_in(dir.path(), |_| Ok(())).unwrap();
+            assert_eq!(renderer_info_in(dir.path()).state, RendererState::Patched);
+            assert_eq!(restore_renderer_in(dir.path(), |_| Ok(())).unwrap(), 2);
+            assert_eq!(renderer_info_in(dir.path()).state, RendererState::Pristine);
+            assert_eq!(fs::read_to_string(dir.path().join("core.js")).unwrap(), SPLIT_CORE);
+            assert_eq!(fs::read_to_string(dir.path().join("menu.js")).unwrap(), MODEL_MENU);
+            assert_eq!(fs::read_to_string(dir.path().join("noise.js")).unwrap(), DECOY);
+        }
+
+        #[test]
+        fn bundle_validation_finishes_before_any_write() {
+            for menu in [None, Some(MODEL_MENU.replace("models:s.map(a)", "models:s.flatMap(a)"))] {
+                let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join("core.js"), SPLIT_CORE).unwrap();
+                if let Some(menu) = menu {
+                    fs::write(dir.path().join("menu.js"), menu).unwrap();
+                }
+                let mut touched = false;
+                assert!(patch_renderer_in(dir.path(), |_| {
+                    touched = true;
+                    Ok(())
+                })
+                .is_err());
+                assert!(!touched);
+                assert_eq!(fs::read_to_string(dir.path().join("core.js")).unwrap(), SPLIT_CORE);
+                assert!(!dir.path().join("core.js.orig").exists());
+            }
+            let dir = tempfile::tempdir().unwrap();
+            split_assets(dir.path());
+            fs::write(dir.path().join("duplicate.js"), MODEL_MENU).unwrap();
+            assert!(renderer_assets(dir.path()).is_err());
+        }
+
+        #[test]
+        fn failed_second_write_rolls_back_both_files() {
+            let dir = tempfile::tempdir().unwrap();
+            split_assets(dir.path());
+            let plan = renderer_plan(&renderer_assets(dir.path()).unwrap()).unwrap();
+            let mut count = 0;
+            let result = write_renderer_changes(&plan, |path, text| {
+                count += 1;
+                if count == 2 {
+                    fs::write(path, "partial write")?;
+                    bail!("injected write failure");
+                }
+                fs::write(path, text)?;
+                Ok(())
+            });
+            assert!(result.is_err());
+            assert_eq!(fs::read_to_string(dir.path().join("core.js")).unwrap(), SPLIT_CORE);
+            assert_eq!(fs::read_to_string(dir.path().join("menu.js")).unwrap(), MODEL_MENU);
+        }
+
+        #[test]
+        fn combined_and_legacy_bundles_still_roundtrip() {
+            for source in [OLD_RENDERER.to_string(), format!("{CURRENT_RENDERER}{MODEL_MENU}")] {
+                let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join("combined.js"), &source).unwrap();
+                patch_renderer_in(dir.path(), |_| Ok(())).unwrap();
+                assert_eq!(renderer_info_in(dir.path()).state, RendererState::Patched);
+                assert_eq!(restore_renderer_in(dir.path(), |_| Ok(())).unwrap(), 1);
+                assert_eq!(fs::read_to_string(dir.path().join("combined.js")).unwrap(), source);
+            }
+        }
 
         #[test]
         fn model_menu_patch_is_required_for_the_cds_selector() {

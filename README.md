@@ -102,6 +102,8 @@ Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFAC
 
 Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。wrapper 与 renderer 各修各的，一边失败不耽误另一边；失败的版本组合不再自动重试，升级 Claude++ 后会重新试一次。Desktop 2.19675 把旧布局搬进构建子目录时只带走它自己的文件，藏起来的官方本体会落在外层：守护会把它接回 wrapper 身边，构建目录里已是新下的官方时则清掉这份残留。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`，它会逐锚点列出改写前后的命中数；再给一个输出路径（如 `out.mjs`）就会把改写结果写出来，用 `node --check out.mjs` 确认拼出的 JS 仍能解析。「还原官方」一键撤销全部改动。
 
+Desktop 2.42304 起，Fast Mode 主逻辑与模型菜单分布在两个 renderer 文件中。Windows 修复会先校验全部目标，再分别保存 `.orig` 并写入；写入失败时回滚本次改动。状态卡只有在所有目标均已打补丁时才显示成功，旧版单文件布局仍受支持。排查拆分布局时，将探测参数换成 `assets/v1` 目录，并将第二个参数设为独立输出目录；逐个对导出的 `.mjs` 执行 `node --check`。
+
 ### 构建
 
 ```bash
@@ -220,6 +222,8 @@ That column decides toggle visibility on Windows. macOS has no toggle: the wrapp
 Trust `usage.speed` in the transcript (the verification card at the bottom of the tab counts exactly that); the Fast label in Desktop's status bar has a known display bug.
 
 A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. The wrapper and the renderer are repaired independently, so one failing never holds up the other; a failed version combination is not retried automatically, but upgrading Claude++ gives it one more try. When Desktop 2.19675 moves an old layout into a build subdirectory it takes only its own files, leaving the stashed official binary behind in the version directory: the daemon hands it back to the wrapper, or deletes the leftover when the build already holds a freshly downloaded official CLI. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
+
+Starting with Desktop 2.42304, the Fast Mode logic and model menu live in separate renderer files. On Windows, repair validates every target before saving individual `.orig` backups and writing changes; a failed write rolls back the changes from that attempt. Status reports success only when all targets are patched, and older single-file layouts remain supported. To inspect a split layout, pass the `assets/v1` directory to the probe and a separate output directory as the second argument, then run `node --check` on each exported `.mjs` file.
 
 ### Build
 
