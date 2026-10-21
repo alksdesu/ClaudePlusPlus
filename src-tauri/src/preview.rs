@@ -6,8 +6,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
+use crate::codex::{self, CodexTranscript, Entry};
+
 const MAX_MESSAGES: usize = 300;
 const MAX_CHARS: usize = 4000;
+const TITLE_CHARS: usize = 60;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,9 +61,41 @@ fn is_noise_text(text: &str) -> bool {
         || trimmed.starts_with("<command-name>")
         || trimmed.starts_with("<local-command")
         || trimmed.starts_with("Caveat:")
-        || trimmed.starts_with("# Files mentioned by the user")
         || trimmed.starts_with("<user_instructions>")
         || trimmed.starts_with("<environment_context>")
+}
+
+/// Codex 的附件包装只留请求正文，文件名附在后面；Codex 迁过来的 Claude 转录里也有这种消息
+fn user_display_text(text: &str) -> Option<String> {
+    let Some(mentions) = codex::split_file_mentions(text) else {
+        return (!is_noise_text(text)).then(|| text.to_string());
+    };
+    let attachments = (!mentions.files.is_empty()).then(|| format!("附件：{}", mentions.files.join("、")));
+    let shown: Vec<&str> = [Some(mentions.request), attachments.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect();
+    (!shown.is_empty()).then(|| shown.join("\n\n"))
+}
+
+fn visible_text(role: &str, text: &str) -> Option<String> {
+    if role == "user" {
+        user_display_text(text)
+    } else {
+        (!is_noise_text(text)).then(|| text.to_string())
+    }
+}
+
+/// 只取首行：附件说明和多行正文不进窗口标题
+fn title_of(text: &str) -> String {
+    text.trim()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(TITLE_CHARS)
+        .collect()
 }
 
 /// 相邻工具调用聚合为一条 role=tool 的摘要行（Desktop 的 "Ran N commands" 风格）
@@ -127,19 +162,13 @@ pub fn preview_claude_jsonl(path: &Path) -> Result<SessionPreview> {
         let mut text_parts = Vec::new();
         let mut own_tools: Vec<String> = Vec::new();
         match message.get("content") {
-            Some(serde_json::Value::String(s)) => {
-                if !is_noise_text(s) {
-                    text_parts.push(s.clone());
-                }
-            }
+            Some(serde_json::Value::String(s)) => text_parts.extend(visible_text(role, s)),
             Some(serde_json::Value::Array(blocks)) => {
                 for block in blocks {
                     match block.get("type").and_then(|v| v.as_str()) {
                         Some("text") => {
                             if let Some(t) = block.get("text").and_then(|v| v.as_str()) {
-                                if !is_noise_text(t) {
-                                    text_parts.push(t.to_string());
-                                }
+                                text_parts.extend(visible_text(role, t));
                             }
                         }
                         Some("tool_use") => {
@@ -163,7 +192,7 @@ pub fn preview_claude_jsonl(path: &Path) -> Result<SessionPreview> {
             // 正文结束上一段工具循环；本条自带的工具发生在正文之后
             tools.flush(&mut messages);
             if title.is_none() && role == "user" {
-                title = Some(body.chars().take(60).collect());
+                title = Some(title_of(&body));
             }
             messages.push(PreviewMessage {
                 role: role.to_string(),
@@ -179,59 +208,35 @@ pub fn preview_claude_jsonl(path: &Path) -> Result<SessionPreview> {
     Ok(finish(title, cwd, messages))
 }
 
-/// Codex rollout：user/agent 消息为主干，function/custom tool 调用聚合成摘要行
-pub fn preview_codex_rollout(path: &Path) -> Result<SessionPreview> {
-    let text = fs::read_to_string(path).with_context(|| format!("读取 {}", path.display()))?;
-    let mut cwd = None;
-    let mut title = None;
+/// Codex 对话：用户与助手正文为主干，工具条目聚合成摘要行；Codex 里起过名就用它当标题
+pub fn preview_codex(transcript: CodexTranscript) -> SessionPreview {
+    let mut title = transcript.name;
     let mut messages = Vec::new();
     let mut tools = ToolRun::new();
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+    for entry in transcript.entries {
+        let (role, text, timestamp) = match entry {
+            Entry::Tool { name } => {
+                tools.push(&name);
+                continue;
+            }
+            Entry::User { text, timestamp } => ("user", text, timestamp),
+            Entry::Assistant { text, timestamp } => ("assistant", text, timestamp),
+        };
+        let Some(text) = visible_text(role, &text) else {
             continue;
         };
-        let Some(payload) = value.get("payload") else { continue };
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("session_meta") => {
-                if cwd.is_none() {
-                    cwd = payload.get("cwd").and_then(|v| v.as_str()).map(String::from);
-                }
-            }
-            Some("event_msg") => {
-                let role = match payload.get("type").and_then(|v| v.as_str()) {
-                    Some("user_message") => "user",
-                    Some("agent_message") => "assistant",
-                    _ => continue,
-                };
-                let Some(message) = payload.get("message").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if message.trim().is_empty() || is_noise_text(message) {
-                    continue;
-                }
-                tools.flush(&mut messages);
-                if title.is_none() && role == "user" {
-                    title = Some(message.trim().chars().take(60).collect());
-                }
-                messages.push(PreviewMessage {
-                    role: role.into(),
-                    text: clip(message),
-                    timestamp: value.get("timestamp").and_then(|v| v.as_str()).map(String::from),
-                });
-            }
-            Some("response_item") => {
-                if matches!(
-                    payload.get("type").and_then(|v| v.as_str()),
-                    Some("function_call" | "custom_tool_call")
-                ) {
-                    tools.push(payload.get("name").and_then(|v| v.as_str()).unwrap_or("?"));
-                }
-            }
-            _ => {}
+        tools.flush(&mut messages);
+        if title.is_none() && role == "user" {
+            title = Some(title_of(&text));
         }
+        messages.push(PreviewMessage {
+            role: role.into(),
+            text: clip(&text),
+            timestamp,
+        });
     }
     tools.flush(&mut messages);
-    Ok(finish(title, cwd, messages))
+    finish(title, transcript.cwd, messages)
 }
 
 #[cfg(test)]
@@ -266,22 +271,58 @@ mod tests {
     }
 
     #[test]
-    fn codex_preview_aggregates_tool_calls() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rollout-x.jsonl");
-        let lines = [
-            r#"{"timestamp":"2026-08-01T10:00:00Z","type":"session_meta","payload":{"cwd":"F:\\P"}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"跑一下测试"}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:02Z","type":"response_item","payload":{"type":"function_call","name":"shell"}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch"}}"#,
-            r#"{"timestamp":"2026-08-01T10:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"测试全过"}}"#,
-        ];
-        fs::write(&path, lines.join("\n")).unwrap();
-        let preview = preview_codex_rollout(&path).unwrap();
+    fn codex_preview_folds_tools_and_unwraps_attachments() {
+        let at = |iso: &str| Some(iso.to_string());
+        let transcript = CodexTranscript {
+            name: None,
+            cwd: Some("F:\\P".into()),
+            entries: vec![
+                Entry::User { text: "跑一下测试".into(), timestamp: at("2026-08-01T10:00:01Z") },
+                Entry::Tool { name: "shell".into() },
+                Entry::Tool { name: "apply_patch".into() },
+                Entry::Assistant { text: "测试全过".into(), timestamp: at("2026-08-01T10:00:04Z") },
+                Entry::User {
+                    text: "# Files mentioned by the user:\n\n## a.png: C:\\x\\a.png\n\n## My request for Codex:\n看看这张图\n".into(),
+                    timestamp: None,
+                },
+                Entry::User { text: "<environment_context>\n</environment_context>".into(), timestamp: None },
+            ],
+        };
+        let preview = preview_codex(transcript);
         let roles: Vec<&str> = preview.messages.iter().map(|m| m.role.as_str()).collect();
-        assert_eq!(roles, ["user", "tool", "assistant"]);
+        assert_eq!(roles, ["user", "tool", "assistant", "user"]);
         assert_eq!(preview.messages[1].text, "shell · apply_patch");
+        assert_eq!(preview.messages[3].text, "看看这张图\n\n附件：a.png");
+        assert_eq!(preview.messages[0].timestamp.as_deref(), Some("2026-08-01T10:00:01Z"));
+        assert_eq!(preview.title.as_deref(), Some("跑一下测试"));
         assert_eq!(preview.cwd.as_deref(), Some("F:\\P"));
+    }
+
+    #[test]
+    fn codex_preview_prefers_the_codex_name_as_title() {
+        let transcript = CodexTranscript {
+            name: Some("Locate blog project".into()),
+            cwd: None,
+            entries: vec![Entry::User { text: "第一句".into(), timestamp: None }],
+        };
+        assert_eq!(preview_codex(transcript).title.as_deref(), Some("Locate blog project"));
+    }
+
+    #[test]
+    fn claude_preview_keeps_the_request_inside_file_mentions() {
+        // Codex 迁过来的转录保留着附件包装，整条丢掉会连请求一起丢
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let line = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "# Files mentioned by the user:\n\n## a.png: C:\\x\\a.png\n\n## My request: 看图\n"}
+        })
+        .to_string();
+        fs::write(&path, line).unwrap();
+        let preview = preview_claude_jsonl(&path).unwrap();
+        assert_eq!(preview.messages.len(), 1);
+        assert_eq!(preview.messages[0].text, "看图\n\n附件：a.png");
+        assert_eq!(preview.title.as_deref(), Some("看图"));
     }
 
     #[test]

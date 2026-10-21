@@ -74,7 +74,7 @@ pub struct DiscoveryReport {
     pub cli_sessions: Vec<CliSession>,
 }
 
-fn is_uuid_dir(name: &str) -> bool {
+pub(crate) fn is_uuid(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.len() != 36 {
         return false;
@@ -170,7 +170,7 @@ pub fn list_combos(root: &UserDataRoot) -> Vec<PoolCombo> {
         for account in accounts.flatten() {
             let account_name = account.file_name().to_string_lossy().into_owned();
             // skills-plugin lives at the account level but is not an account
-            if !is_uuid_dir(&account_name) {
+            if !is_uuid(&account_name) {
                 continue;
             }
             let Ok(orgs) = fs::read_dir(account.path()) else {
@@ -178,7 +178,7 @@ pub fn list_combos(root: &UserDataRoot) -> Vec<PoolCombo> {
             };
             for org in orgs.flatten() {
                 let org_name = org.file_name().to_string_lossy().into_owned();
-                if !is_uuid_dir(&org_name) {
+                if !is_uuid(&org_name) {
                     continue;
                 }
                 let path = org.path();
@@ -483,7 +483,7 @@ pub fn scan_cli_sessions(registered: &RegisteredIndex) -> Vec<CliSession> {
             let Some(stem) = name.strip_suffix(".jsonl") else {
                 continue;
             };
-            if !is_uuid_dir(stem) {
+            if !is_uuid(stem) {
                 continue;
             }
             let path = file.path();
@@ -552,12 +552,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uuid_dir_validation() {
-        assert!(is_uuid_dir("82a69c9c-4852-476f-971f-40e5860d964b"));
-        assert!(is_uuid_dir("00000000-0000-4000-8000-000000000001"));
-        assert!(!is_uuid_dir("skills-plugin"));
-        assert!(!is_uuid_dir("82a69c9c-4852-476f-971f-40e5860d964"));
-        assert!(!is_uuid_dir("82a69c9c_4852_476f_971f_40e5860d964b"));
+    fn uuid_validation() {
+        assert!(is_uuid("82a69c9c-4852-476f-971f-40e5860d964b"));
+        assert!(is_uuid("00000000-0000-4000-8000-000000000001"));
+        assert!(!is_uuid("skills-plugin"));
+        assert!(!is_uuid("82a69c9c-4852-476f-971f-40e5860d964"));
+        assert!(!is_uuid("82a69c9c_4852_476f_971f_40e5860d964b"));
     }
 
     #[test]

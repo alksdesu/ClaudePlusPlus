@@ -300,20 +300,11 @@ fn migrate_codex_sessions(thread_ids: Vec<String>) -> Result<Vec<CodexMigrateRep
     if procs::codex_running() {
         return Err("Codex 正在运行，请先退出后再迁移".into());
     }
-    let codex_home = codex::codex_home().ok_or("找不到 ~/.codex")?;
+    let store = codex::CodexStore::open().ok_or("找不到 ~/.codex")?;
     let projects = cli_projects_dir()?;
-    let sessions = codex::list_codex_sessions();
     let mut results = Vec::new();
     for id in thread_ids {
-        let Some(session) = sessions.iter().find(|s| s.thread_id == id) else {
-            results.push(CodexMigrateReport {
-                thread_id: id,
-                outcome: None,
-                error: Some("Codex 会话不存在".into()),
-            });
-            continue;
-        };
-        match codex::migrate_session(&codex_home, &projects, &session.rollout_path) {
+        match store.migrate(&projects, &id) {
             Ok(outcome) => results.push(CodexMigrateReport {
                 thread_id: id,
                 outcome: Some(outcome),
@@ -377,11 +368,9 @@ fn load_preview(kind: String, id: String) -> Result<preview::SessionPreview, Str
             preview::preview_claude_jsonl(&path).map_err(|e| format!("{e:#}"))
         }
         "codex" => {
-            let session = codex::list_codex_sessions()
-                .into_iter()
-                .find(|s| s.thread_id == id)
-                .ok_or("找不到该 Codex 会话")?;
-            preview::preview_codex_rollout(&session.rollout_path).map_err(|e| format!("{e:#}"))
+            let store = codex::CodexStore::open().ok_or("找不到 ~/.codex")?;
+            let transcript = store.transcript(&id).map_err(|e| format!("{e:#}"))?;
+            Ok(preview::preview_codex(transcript))
         }
         _ => Err("未知预览类型".into()),
     }

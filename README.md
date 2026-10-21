@@ -31,7 +31,7 @@ Claude++ 针对这两层分别下手。
 | **存储归一** | 把所有 `账号/组织` 组合合并进会话数最多的主池，原目录改名 `.bak-<时间戳>` 后建目录链接指回主池（Windows 用 NTFS junction，macOS 用 symlink）。任何渠道、任何账号、官方版或第三方 userData，枚举到的都是同一池。不修改应用本体，Desktop 升级不失效，随时可还原 |
 | **会话迁移** | CLI→Desktop：为 jsonl 生成一份 Desktop 元数据（转录零拷贝，两边同源）。Desktop→CLI：按 Desktop 自己的墓碑约定移除元数据，转录保留，`claude -r` 照常续聊。两方向互为逆操作 |
 | **分支归组** | rewind/resume 会把历史整段复制进新 jsonl，compact 续接则从写入母文件的 `compact_boundary` 行开始复制——按这两条血缘把同一逻辑会话的所有分支文件折叠为一组，默认只显示、只注册最新分支；同组任一分支已注册即拦截重复注册（UI/批次/存储三层） |
-| **Codex 迁移** | 扫描 `~/.codex` 的 rollout 会话并与 Claude 侧对账：已迁移 / Claude 导入镜像 / 孤儿镜像 / Codex 独有。独有会话一键转为 Claude 转录（幂等：threadId 即 sessionId），并回写 Codex 导入台账防止它把产物再同步回去 |
+| **Codex 迁移** | 扫描 `~/.codex` 的 rollout 会话并与 Claude 侧对账：已迁移 / Claude 导入镜像 / 孤儿镜像 / Codex 独有。新版分页存储沿 `history_base` 把多页拼回一个对话（每页分叉点之后是编辑重发或回退前的废弃分支，不计入），`.jsonl.zst` 压缩页透明解压；名称取自 Codex 状态库里的对话名，子代理线程不单独列出。独有会话一键转为 Claude 转录（幂等：threadId 即 sessionId），并回写 Codex 导入台账防止它把产物再同步回去 |
 | **会话预览** | 单击任意会话行弹出独立预览窗口：Markdown 渲染（DOMPurify 消毒）、工具调用聚合为摘要行、大会话只加载末尾 300 条。全程只读 |
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
 | **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 renderer 被 asar 完整性校验与签名封印锁死，只做 wrapper——没有 UI 开关，但每个会话默认就是 fast。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
@@ -50,7 +50,8 @@ Claude++ 针对这两层分别下手。
 └── ant-did                            # base64(设备 UUID)，gateway 模式的 accountId 来源
 
 ~/.claude/projects/<cwd编码>/<uuid>.jsonl   # 会话转录，CLI 与 Desktop 共用
-~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl   # Codex 会话（Codex 迁移页的数据源）
+~/.codex/sessions/<年>/<月>/<日>/rollout-*.jsonl[.zst]   # Codex 会话；分页格式一个对话多页：rollout-<时间>-<对话>_<页>
+~/.codex/state_<N>.sqlite                   # Codex 状态库，只读取 threads.name 作对话名称
 <配置目录>/com.claudeplusplus.manager/fastmode.json   # Fast Mode 守护设置与已生效的版本组合
                                             # Windows: %APPDATA%；macOS: ~/Library/Application Support
 ```
@@ -121,7 +122,7 @@ cd src-tauri && cargo test    # 单元测试（junction / 迁移字段 / 墓碑�
 
 - 写操作前检测对应 userData 的 Desktop 进程，运行中拒绝执行；Codex 迁移同理检测 Codex 进程
 - 归一前原目录完整保留为 `.bak-<时间戳>`，一键还原
-- 会话转录 jsonl 在归一与迁移全程只读；Codex 迁移只新增 Claude 转录、不改 Codex 会话本体；墓碑清理的删除走系统回收站
+- 会话转录 jsonl 在归一与迁移全程只读；Codex 迁移只新增 Claude 转录、不改 Codex 会话本体，Codex 状态库以只读方式打开；墓碑清理的删除走系统回收站
 - 元数据写入采用临时文件 + 原子改名
 - 预览窗口全程只读，渲染前经 DOMPurify 消毒
 - Fast Mode：官方 CLI 原样保留在 Desktop 启动它的那层目录（Windows 改名，macOS 连 bundle 一起挪开），不下载不替换二进制内容；Windows 的 renderer 改动前备份 `.orig`、还原即删，提权子进程不接受任何路径参数、自行定位 MSIX 包。备份与还原要在包目录里增删 `.orig`，而 WindowsApps 下只有 TrustedInstaller 与 SYSTEM 可写，因此会对 `assets\v1` 这一层目录取得所有权（不递归、不影响 Desktop 更新，更新后目录重建即恢复默认）；macOS 不触碰 `/Applications/Claude.app`，只动用户目录下的 CLI，全程无需提权
@@ -152,7 +153,7 @@ Claude++ addresses both layers.
 | **Pool unification** | Merges every `account/org` combo into the largest pool, renames originals to `.bak-<timestamp>`, and drops directory links pointing back (NTFS junctions on Windows, symlinks on macOS). Every channel, account, official or third-party userData enumerates the same pool. No app binaries touched — survives Desktop updates, fully reversible |
 | **Session migration** | CLI→Desktop: generates Desktop metadata pointing at the existing jsonl (zero-copy, both sides share one transcript). Desktop→CLI: removes metadata following Desktop's own tombstone convention; the transcript stays and `claude -r` keeps working. The two directions are exact inverses |
 | **Branch grouping** | rewind/resume copies the full history prefix into a new jsonl, and compact continuations start at a `compact_boundary` line also written into the mother file — both lineages fold every branch of one logical session into a single group. Only the latest branch is shown and registered by default; registering a branch whose sibling is already registered is refused at UI, batch and store level |
-| **Codex import** | Scans `~/.codex` rollouts and classifies every thread against Claude: migrated / mirror imported from Claude / orphan mirror / Codex-only. Codex-only threads convert to Claude transcripts in one click (idempotent: threadId doubles as sessionId), and the conversion is recorded in Codex's import ledger so it never syncs the output back as a duplicate |
+| **Codex import** | Scans `~/.codex` rollouts and classifies every thread against Claude: migrated / mirror imported from Claude / orphan mirror / Codex-only. Paginated rollouts are stitched back into one thread along `history_base` (whatever follows a page's fork point is a branch abandoned by an edit or rewind and is left out), `.jsonl.zst` pages are decompressed transparently, names come from Codex's state database, and sub-agent threads are not listed on their own. Codex-only threads convert to Claude transcripts in one click (idempotent: threadId doubles as sessionId), and the conversion is recorded in Codex's import ledger so it never syncs the output back as a duplicate |
 | **Session preview** | Click any session row to open a read-only preview window: markdown rendering (DOMPurify-sanitized), tool calls aggregated into summary lines, only the last 300 messages of huge sessions loaded |
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
 | **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the renderer is locked down by asar integrity validation and a sealed signature, so only the wrapper is deployed — no UI toggle, but every session defaults to fast. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
@@ -171,7 +172,8 @@ Claude++ addresses both layers.
 └── ant-did                            # base64(device UUID), accountId source in gateway mode
 
 ~/.claude/projects/<encoded-cwd>/<uuid>.jsonl   # transcripts, shared by CLI and Desktop
-~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl   # Codex threads (source of the Codex tab)
+~/.codex/sessions/<y>/<m>/<d>/rollout-*.jsonl[.zst]   # Codex threads; paginated threads span pages: rollout-<time>-<thread>_<page>
+~/.codex/state_<N>.sqlite                   # Codex state database, read only for threads.name
 <config dir>/com.claudeplusplus.manager/fastmode.json   # Fast Mode daemon settings and active-version ledger
                                             # Windows: %APPDATA%; macOS: ~/Library/Application Support
 ```
@@ -242,7 +244,7 @@ cd src-tauri && cargo test    # unit tests (junction / migration fields / tombst
 
 - Every write operation checks for a running Desktop bound to the target userData and refuses while it lives; Codex import likewise refuses while Codex runs
 - Unification keeps originals intact as `.bak-<timestamp>`; one-click restore
-- Transcripts are strictly read-only during unify and migration; Codex import only adds Claude transcripts and never touches Codex threads; tombstone deletions go to the recycle bin
+- Transcripts are strictly read-only during unify and migration; Codex import only adds Claude transcripts, never touches Codex threads, and opens Codex's state database read-only; tombstone deletions go to the recycle bin
 - Metadata writes use temp-file + atomic rename
 - Preview windows are read-only; rendered content is DOMPurify-sanitized
 - Fast Mode stashes the official CLI untouched right next to where Desktop launches it (renamed on Windows, moved bundle-and-all on macOS), never downloading or altering binary content; on Windows the renderer is backed up as `.orig` before patching and removed on restore, and the elevated helper takes no path arguments and locates the MSIX package itself. Creating and removing `.orig` means adding and deleting entries inside the package directory, which under WindowsApps only TrustedInstaller and SYSTEM may do, so ownership of the `assets\v1` directory itself is taken (non-recursive, harmless to Desktop updates, which rebuild the directory with default ACLs); on macOS `/Applications/Claude.app` is never touched — only the CLI under the user's own directory, with no elevation at all

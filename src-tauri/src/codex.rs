@@ -1,8 +1,11 @@
-//! Codex 会话发现与向 Claude 的迁移：rollout 事件流 → Claude CLI 转录。
+//! Codex 会话发现与向 Claude 的迁移：rollout 条目 → Claude CLI 转录。
 //! 迁移产物以 threadId 命名，与导入记录互为防循环闭环。
 
+mod names;
+mod rollout;
+
+use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,9 +13,28 @@ use serde::Serialize;
 use sha2::Digest;
 use uuid::Uuid;
 
+pub use rollout::Entry;
+use rollout::{CodexThread, RolloutIndex};
+
 const CLAUDE_VERSION: &str = "2.1.219";
 const MODEL: &str = "claude-fable-5";
-const HEAD_PROBE_BYTES: usize = 256 * 1024;
+// 标题兜底只读最早一页的开头：首条用户输入之前只有 session_meta 和注入的上下文
+const TITLE_PROBE_BYTES: u64 = 1024 * 1024;
+const TITLE_CHARS: usize = 80;
+const EPOCH_ISO: &str = "1970-01-01T00:00:00.000Z";
+const FILE_MENTIONS_HEADER: &str = "# Files mentioned by the user";
+const REQUEST_HEADING: &str = "My request";
+// 不是用户亲手输入的包装消息：Claude 转录镜像过来的命令回显、通知、续接摘要
+const TITLE_NOISE_PREFIXES: &[&str] = &[
+    "<user_instructions>",
+    "<environment_context>",
+    "<command-name>",
+    "<local-command",
+    "<task-notification",
+    "<teammate-message",
+    "Caveat:",
+    "This session is being continued from a previous conversation",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,35 +63,161 @@ pub struct CodexSession {
     pub claude_path: Option<PathBuf>,
 }
 
+/// 预览与迁移共用的一份对话内容
+pub struct CodexTranscript {
+    pub name: Option<String>,
+    pub cwd: Option<String>,
+    pub entries: Vec<Entry>,
+}
+
 pub fn codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".codex"))
 }
 
-fn thread_id_of(rollout: &Path) -> Option<String> {
-    let stem = rollout.file_stem()?.to_string_lossy();
-    (stem.len() >= 36).then(|| stem[stem.len() - 36..].to_string())
+/// 扫一遍 Codex 的 rollout 存储，列表、预览、迁移共用
+pub struct CodexStore {
+    home: PathBuf,
+    index: RolloutIndex,
 }
 
-fn list_rollouts(codex: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut stack = vec![codex.join("sessions")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "jsonl") {
-                files.push(path);
-            }
+impl CodexStore {
+    pub fn open() -> Option<Self> {
+        codex_home().map(|home| Self::open_at(&home))
+    }
+
+    pub fn open_at(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            index: RolloutIndex::scan(&home.join("sessions")),
         }
     }
-    files
+
+    /// 子代理线程是代理派生的工作线程，Codex 里也只挂在父对话下面
+    pub fn sessions(&self, projects: &Path) -> Vec<CodexSession> {
+        let names = names::thread_names(&self.home);
+        let imports = import_sources(&self.home);
+        let mut sessions: Vec<CodexSession> = self
+            .index
+            .threads()
+            .into_iter()
+            .filter(|thread| !thread.subagent())
+            .map(|thread| {
+                let origin = self.index.origin(&thread);
+                let claude_path = claude_transcript_for(thread.thread_id, projects);
+                CodexSession {
+                    thread_id: thread.thread_id.to_string(),
+                    rollout_path: thread.head.path.clone(),
+                    cwd: origin.cwd.clone().or_else(|| thread.head.cwd.clone()),
+                    originator: origin.originator.clone().or_else(|| thread.head.originator.clone()),
+                    title: names
+                        .get(thread.thread_id)
+                        .cloned()
+                        .or_else(|| self.index.first_user_text(&thread, TITLE_PROBE_BYTES, title_text)),
+                    size_bytes: thread.size_bytes(),
+                    last_activity_ms: thread.last_activity_ms(),
+                    status: status_of(thread.thread_id, claude_path.is_some(), &imports),
+                    claude_path,
+                }
+            })
+            .collect();
+        sessions.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
+        sessions
+    }
+
+    pub fn transcript(&self, thread_id: &str) -> Result<CodexTranscript> {
+        let thread = self.index.thread(thread_id).context("找不到该 Codex 会话")?;
+        self.transcript_of(&thread)
+    }
+
+    /// 先在索引里认出这个对话，路径一律用索引里校验过的 ID 拼
+    pub fn migrate(&self, projects: &Path, thread_id: &str) -> Result<MigrateOutcome> {
+        let thread = self.index.thread(thread_id).context("找不到该 Codex 会话")?;
+        let thread_id = thread.thread_id;
+        if let Some(existing) = claude_transcript_for(thread_id, projects) {
+            return Ok(MigrateOutcome::AlreadyMigrated {
+                claude_path: existing,
+            });
+        }
+        let transcript = self.transcript_of(&thread)?;
+        let turns: Vec<Turn> = transcript.entries.into_iter().filter_map(Turn::from_entry).collect();
+        if turns.is_empty() {
+            return Ok(MigrateOutcome::Skipped {
+                reason: "会话没有可迁移的对话内容".into(),
+            });
+        }
+        let cwd = transcript
+            .cwd
+            .or_else(|| dirs::home_dir().map(|h| h.display().to_string()))
+            .context("无法确定会话工作目录")?;
+
+        let project_dir = projects.join(encode_project_dir(&cwd));
+        fs::create_dir_all(&project_dir)?;
+        let dest = project_dir.join(format!("{thread_id}.jsonl"));
+
+        let mut lines = Vec::with_capacity(turns.len());
+        let mut parent: Option<String> = None;
+        for (index, turn) in turns.iter().enumerate() {
+            let line = claude_line(thread_id, &cwd, parent.as_deref(), index, turn);
+            parent = Some(det_uuid(thread_id, index));
+            lines.push(serde_json::to_string(&line)?);
+        }
+        let content = format!("{}\n", lines.join("\n"));
+
+        let tmp = project_dir.join(format!("{thread_id}.jsonl.tmp"));
+        fs::write(&tmp, &content)?;
+        fs::rename(&tmp, &dest)?;
+
+        let last_secs = turns
+            .last()
+            .and_then(|t| iso_to_secs(&t.timestamp))
+            .unwrap_or(0.0);
+        if last_secs > 0.0 {
+            let ft = filetime::FileTime::from_unix_time(last_secs as i64, 0);
+            let _ = filetime::set_file_mtime(&dest, ft);
+        }
+        register_import_record(&self.home, thread_id, &dest, &content, last_secs)?;
+        Ok(MigrateOutcome::Migrated {
+            claude_path: dest,
+            turns: turns.len(),
+        })
+    }
+
+    fn transcript_of(&self, thread: &CodexThread<'_>) -> Result<CodexTranscript> {
+        let origin = self.index.origin(thread);
+        Ok(CodexTranscript {
+            name: names::thread_names(&self.home).remove(thread.thread_id),
+            cwd: origin.cwd.clone().or_else(|| thread.head.cwd.clone()),
+            entries: self.index.read_entries(thread)?,
+        })
+    }
+}
+
+pub fn list_codex_sessions() -> Vec<CodexSession> {
+    match (CodexStore::open(), crate::discovery::cli_projects_dir()) {
+        (Some(store), Some(projects)) => store.sessions(&projects),
+        _ => Vec::new(),
+    }
+}
+
+fn status_of(thread_id: &str, migrated: bool, imports: &HashMap<String, String>) -> CodexStatus {
+    if migrated {
+        return CodexStatus::Migrated;
+    }
+    match imports.get(thread_id) {
+        // 迁移产物记录（source stem == threadId）不算 Claude→Codex 导入；
+        // 产物已被删除时回到 NativeOnly，允许重新迁移
+        Some(source) if Path::new(source).file_stem().is_some_and(|s| s.to_string_lossy() == thread_id) => {
+            CodexStatus::NativeOnly
+        }
+        Some(source) if Path::new(source).is_file() => CodexStatus::Mirror,
+        Some(_) => CodexStatus::OrphanMirror,
+        None => CodexStatus::NativeOnly,
+    }
 }
 
 /// 导入记录：imported_thread_id → source_path。
 /// 迁移产物记录的 source stem == threadId，与真正的 Claude→Codex 导入互斥。
-fn import_sources(codex: &Path) -> std::collections::HashMap<String, String> {
+fn import_sources(codex: &Path) -> HashMap<String, String> {
     let path = codex.join("external_agent_session_imports.json");
     let Ok(text) = fs::read_to_string(&path) else {
         return Default::default();
@@ -77,7 +225,7 @@ fn import_sources(codex: &Path) -> std::collections::HashMap<String, String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return Default::default();
     };
-    let mut map = std::collections::HashMap::new();
+    let mut map = HashMap::new();
     for record in value.get("records").and_then(|v| v.as_array()).into_iter().flatten() {
         let (Some(tid), Some(src)) = (
             record.get("imported_thread_id").and_then(|v| v.as_str()),
@@ -90,90 +238,50 @@ fn import_sources(codex: &Path) -> std::collections::HashMap<String, String> {
     map
 }
 
-/// session_index.jsonl 里用户命名过的 thread 标题
-fn index_titles(codex: &Path) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    let Ok(text) = fs::read_to_string(codex.join("session_index.jsonl")) else {
-        return map;
-    };
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+/// Codex 带附件时把消息包成 `# Files mentioned by the user:`、每个文件一段 `## <文件名>: <路径>`、
+/// 最后 `## My request…:` 接正文，正文可能和这个标题同一行
+pub(crate) struct FileMentions<'a> {
+    pub files: Vec<&'a str>,
+    pub request: &'a str,
+}
+
+pub(crate) fn split_file_mentions(text: &str) -> Option<FileMentions<'_>> {
+    let body = text.trim_start();
+    if !body.starts_with(FILE_MENTIONS_HEADER) {
+        return None;
+    }
+    let mut files = Vec::new();
+    let mut offset = 0;
+    for line in body.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let Some(heading) = line.trim_end().strip_prefix("## ") else {
             continue;
         };
-        if let (Some(id), Some(name)) = (
-            value.get("id").and_then(|v| v.as_str()),
-            value.get("thread_name").and_then(|v| v.as_str()),
-        ) {
-            map.insert(id.to_string(), name.to_string());
+        if heading.starts_with(REQUEST_HEADING) {
+            let after_colon = line.find(':').map_or(line.len(), |colon| colon + 1);
+            return Some(FileMentions {
+                files,
+                request: body[start + after_colon..].trim(),
+            });
         }
+        let name = heading.split_once(": ").map_or(heading, |(name, _)| name);
+        files.push(name.trim_end_matches(':'));
     }
-    map
+    Some(FileMentions { files, request: "" })
 }
 
-fn is_noise_user_text(text: &str) -> bool {
-    let trimmed = text.trim_start();
-    trimmed.is_empty()
-        || trimmed.starts_with("# Files mentioned by the user")
-        || trimmed.starts_with("<user_instructions>")
-        || trimmed.starts_with("<environment_context>")
-        || trimmed.starts_with("<command-name>")
-        || trimmed.starts_with("<local-command")
-        || trimmed.starts_with("Caveat:")
-        || trimmed.starts_with("This session is being continued from a previous conversation")
-}
-
-#[derive(Debug, Default)]
-struct RolloutHead {
-    cwd: Option<String>,
-    originator: Option<String>,
-    first_user_text: Option<String>,
-}
-
-fn probe_rollout_head(path: &Path) -> RolloutHead {
-    let mut head = RolloutHead::default();
-    let Ok(mut file) = fs::File::open(path) else {
-        return head;
-    };
-    let mut buf = vec![0u8; HEAD_PROBE_BYTES];
-    let Ok(read) = file.read(&mut buf) else {
-        return head;
-    };
-    buf.truncate(read);
-    let text = String::from_utf8_lossy(&buf);
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
-        };
-        let payload = value.get("payload");
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("session_meta") => {
-                if let Some(p) = payload {
-                    head.cwd = p.get("cwd").and_then(|v| v.as_str()).map(String::from);
-                    head.originator = p.get("originator").and_then(|v| v.as_str()).map(String::from);
-                }
-            }
-            Some("event_msg") if head.first_user_text.is_none() => {
-                let Some(p) = payload else { continue };
-                if p.get("type").and_then(|v| v.as_str()) == Some("user_message") {
-                    if let Some(message) = p.get("message").and_then(|v| v.as_str()) {
-                        if !is_noise_user_text(message) {
-                            let trimmed = message.trim();
-                            let mut clipped: String = trimmed.chars().take(80).collect();
-                            if trimmed.chars().count() > 80 {
-                                clipped.push('…');
-                            }
-                            head.first_user_text = Some(clipped);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-        if head.cwd.is_some() && head.first_user_text.is_some() {
-            break;
-        }
+/// 列表标题：附件包装只取请求正文，跳过不是用户亲手输入的包装消息
+fn title_text(raw: &str) -> Option<String> {
+    let text = split_file_mentions(raw).map_or(raw, |mentions| mentions.request).trim();
+    if text.is_empty() || TITLE_NOISE_PREFIXES.iter().any(|prefix| text.starts_with(prefix)) {
+        return None;
     }
-    head
+    let mut title: String = text.chars().take(TITLE_CHARS).collect();
+    if text.chars().count() > TITLE_CHARS {
+        title.push('…');
+    }
+    Some(title)
 }
 
 fn claude_transcript_for(thread_id: &str, projects: &Path) -> Option<PathBuf> {
@@ -185,67 +293,6 @@ fn claude_transcript_for(thread_id: &str, projects: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-pub fn list_codex_sessions() -> Vec<CodexSession> {
-    let Some(codex) = codex_home() else {
-        return Vec::new();
-    };
-    let Some(projects) = crate::discovery::cli_projects_dir() else {
-        return Vec::new();
-    };
-    let imports = import_sources(&codex);
-    let titles = index_titles(&codex);
-
-    let mut sessions = Vec::new();
-    for rollout in list_rollouts(&codex) {
-        let Some(thread_id) = thread_id_of(&rollout) else {
-            continue;
-        };
-        let meta = fs::metadata(&rollout).ok();
-        let size_bytes = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let last_activity_ms = meta
-            .and_then(|m| m.modified().ok())
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let claude_path = claude_transcript_for(&thread_id, &projects);
-        let status = if claude_path.is_some() {
-            CodexStatus::Migrated
-        } else {
-            match imports.get(&thread_id) {
-                // 迁移产物记录（source stem == threadId）不算 Claude→Codex 导入；
-                // 产物已被删除时回到 NativeOnly，允许重新迁移
-                Some(source) if Path::new(source).file_stem().is_some_and(|s| s.to_string_lossy() == thread_id.as_str()) => {
-                    CodexStatus::NativeOnly
-                }
-                Some(source) => {
-                    if Path::new(source).is_file() {
-                        CodexStatus::Mirror
-                    } else {
-                        CodexStatus::OrphanMirror
-                    }
-                }
-                None => CodexStatus::NativeOnly,
-            }
-        };
-
-        let head = probe_rollout_head(&rollout);
-        sessions.push(CodexSession {
-            title: titles.get(&thread_id).cloned().or(head.first_user_text),
-            thread_id,
-            rollout_path: rollout,
-            cwd: head.cwd,
-            originator: head.originator,
-            size_bytes,
-            last_activity_ms,
-            status,
-            claude_path,
-        });
-    }
-    sessions.sort_by(|a, b| b.last_activity_ms.cmp(&a.last_activity_ms));
-    sessions
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -283,52 +330,20 @@ struct Turn {
     text: String,
 }
 
-fn extract_turns(rollout: &Path) -> Result<(Option<String>, Vec<Turn>)> {
-    let text = fs::read_to_string(rollout).with_context(|| format!("读取 {}", rollout.display()))?;
-    let mut cwd = None;
-    let mut turns = Vec::new();
-    for line in text.lines() {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-            continue;
+impl Turn {
+    /// Claude 转录里没有对应的工具调用记录可写，只迁对话正文
+    fn from_entry(entry: Entry) -> Option<Self> {
+        let (role, text, timestamp) = match entry {
+            Entry::User { text, timestamp } => ("user", text, timestamp),
+            Entry::Assistant { text, timestamp } => ("assistant", text, timestamp),
+            Entry::Tool { .. } => return None,
         };
-        let payload = value.get("payload");
-        let timestamp = value
-            .get("timestamp")
-            .and_then(|v| v.as_str())
-            .unwrap_or("1970-01-01T00:00:00.000Z")
-            .to_string();
-        match value.get("type").and_then(|v| v.as_str()) {
-            Some("session_meta") => {
-                if cwd.is_none() {
-                    cwd = payload
-                        .and_then(|p| p.get("cwd"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                }
-            }
-            Some("event_msg") => {
-                let Some(p) = payload else { continue };
-                let role = match p.get("type").and_then(|v| v.as_str()) {
-                    Some("user_message") => "user",
-                    Some("agent_message") => "assistant",
-                    _ => continue,
-                };
-                let Some(message) = p.get("message").and_then(|v| v.as_str()) else {
-                    continue;
-                };
-                if message.trim().is_empty() {
-                    continue;
-                }
-                turns.push(Turn {
-                    role,
-                    timestamp,
-                    text: message.to_string(),
-                });
-            }
-            _ => {}
-        }
+        Some(Self {
+            role,
+            text,
+            timestamp: timestamp.unwrap_or_else(|| EPOCH_ISO.to_string()),
+        })
     }
-    Ok((cwd, turns))
 }
 
 fn claude_line(thread_id: &str, cwd: &str, parent: Option<&str>, index: usize, turn: &Turn) -> serde_json::Value {
@@ -403,57 +418,11 @@ fn register_import_record(codex: &Path, thread_id: &str, dest: &Path, content: &
     Ok(())
 }
 
-pub fn migrate_session(codex: &Path, projects: &Path, rollout: &Path) -> Result<MigrateOutcome> {
-    let thread_id = thread_id_of(rollout).context("rollout 文件名缺少 thread id")?;
-    if let Some(existing) = claude_transcript_for(&thread_id, projects) {
-        return Ok(MigrateOutcome::AlreadyMigrated {
-            claude_path: existing,
-        });
-    }
-    let (cwd, turns) = extract_turns(rollout)?;
-    if turns.is_empty() {
-        return Ok(MigrateOutcome::Skipped {
-            reason: "会话没有可迁移的对话内容".into(),
-        });
-    }
-    let cwd = cwd.or_else(|| dirs::home_dir().map(|h| h.display().to_string()))
-        .context("无法确定会话工作目录")?;
-
-    let project_dir = projects.join(encode_project_dir(&cwd));
-    fs::create_dir_all(&project_dir)?;
-    let dest = project_dir.join(format!("{thread_id}.jsonl"));
-
-    let mut lines = Vec::with_capacity(turns.len());
-    let mut parent: Option<String> = None;
-    for (index, turn) in turns.iter().enumerate() {
-        let line = claude_line(&thread_id, &cwd, parent.as_deref(), index, turn);
-        parent = Some(det_uuid(&thread_id, index));
-        lines.push(serde_json::to_string(&line)?);
-    }
-    let content = format!("{}\n", lines.join("\n"));
-
-    let tmp = project_dir.join(format!("{thread_id}.jsonl.tmp"));
-    fs::write(&tmp, &content)?;
-    fs::rename(&tmp, &dest)?;
-
-    let last_secs = turns
-        .last()
-        .and_then(|t| iso_to_secs(&t.timestamp))
-        .unwrap_or(0.0);
-    if last_secs > 0.0 {
-        let ft = filetime::FileTime::from_unix_time(last_secs as i64, 0);
-        let _ = filetime::set_file_mtime(&dest, ft);
-    }
-    register_import_record(codex, &thread_id, &dest, &content, last_secs)?;
-    Ok(MigrateOutcome::Migrated {
-        claude_path: dest,
-        turns: turns.len(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
+    use super::rollout::fixtures::*;
     use super::*;
+    use serde_json::json;
 
     fn rollout_lines(tid: &str, cwd: &str) -> String {
         [
@@ -481,24 +450,64 @@ mod tests {
         (codex, projects, rollout)
     }
 
+    /// 分页对话：压缩的首页在分叉点之后还有一段废弃分支，续页接着分叉点往下写
+    fn setup_paginated(dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let codex = dir.join(".codex");
+        let sessions = codex.join("sessions");
+        let projects = dir.join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        let base = vec![
+            meta(THREAD, json!({"thread_source": "user"})),
+            user("2026-10-21T09:00:01.000Z", "第一问"),
+            agent("2026-10-21T09:00:02.000Z", "第一答"),
+            user("2026-10-21T09:00:03.000Z", "编辑前的提问"),
+        ];
+        let first = write_page(&sessions, THREAD, None, &base, true);
+        let head = write_page(
+            &sessions,
+            THREAD,
+            Some(PAGE_2),
+            &[
+                meta(THREAD, history_base(THREAD, offset_after(&base, 3))),
+                user("2026-10-21T09:01:00.000Z", "编辑后的提问"),
+            ],
+            false,
+        );
+        write_page(
+            &sessions,
+            SUBAGENT,
+            None,
+            &[meta(SUBAGENT, json!({"thread_source": "subagent"})), user("t", "子代理任务")],
+            false,
+        );
+        (codex, projects, first, head)
+    }
+
     #[test]
-    fn head_probe_skips_attachment_noise() {
+    fn legacy_rollout_lists_with_title_cwd_and_originator() {
         let dir = tempfile::tempdir().unwrap();
         let tid = "019dd272-52ff-76b3-9814-4e3c1c534dd0";
-        let (_, _, rollout) = setup(dir.path(), tid);
-        let head = probe_rollout_head(&rollout);
-        assert_eq!(head.cwd.as_deref(), Some("E:\\Proj\\demo"));
-        assert_eq!(head.originator.as_deref(), Some("Codex Desktop"));
-        assert_eq!(head.first_user_text.as_deref(), Some("帮我看看这个项目"));
+        let (codex, projects, rollout) = setup(dir.path(), tid);
+        let sessions = CodexStore::open_at(&codex).sessions(&projects);
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.thread_id, tid);
+        assert_eq!(session.rollout_path, rollout);
+        assert_eq!(session.cwd.as_deref(), Some("E:\\Proj\\demo"));
+        assert_eq!(session.originator.as_deref(), Some("Codex Desktop"));
+        // 没有请求正文的附件包装被跳过
+        assert_eq!(session.title.as_deref(), Some("帮我看看这个项目"));
+        assert_eq!(session.status, CodexStatus::NativeOnly);
     }
 
     #[test]
     fn migrate_writes_claude_transcript_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let tid = "019dd272-52ff-76b3-9814-4e3c1c534dd0";
-        let (codex, projects, rollout) = setup(dir.path(), tid);
+        let (codex, projects, _) = setup(dir.path(), tid);
+        let store = CodexStore::open_at(&codex);
 
-        let outcome = migrate_session(&codex, &projects, &rollout).unwrap();
+        let outcome = store.migrate(&projects, tid).unwrap();
         let MigrateOutcome::Migrated { claude_path, turns } = outcome else {
             panic!("expected Migrated");
         };
@@ -529,17 +538,133 @@ mod tests {
         assert_eq!(recs[0]["imported_thread_id"], tid);
 
         // 再迁移 → AlreadyMigrated，不追加记录
-        let again = migrate_session(&codex, &projects, &rollout).unwrap();
+        let again = store.migrate(&projects, tid).unwrap();
         assert!(matches!(again, MigrateOutcome::AlreadyMigrated { .. }));
 
         // 状态判定：产物存在 → Migrated；删除产物后 → NativeOnly（可重迁）
-        let sources = import_sources(&codex);
-        assert!(sources.contains_key(tid));
+        assert_eq!(store.sessions(&projects)[0].status, CodexStatus::Migrated);
         fs::remove_file(&claude_path).unwrap();
-        let source = &sources[tid];
-        assert!(Path::new(source)
-            .file_stem()
-            .is_some_and(|s| s.to_string_lossy() == tid));
+        assert_eq!(store.sessions(&projects)[0].status, CodexStatus::NativeOnly);
+    }
+
+    #[test]
+    fn paginated_thread_lists_once_with_the_codex_name_and_hides_subagents() {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, projects, first, head) = setup_paginated(dir.path());
+        fs::write(
+            codex.join("session_index.jsonl"),
+            json!({"id": THREAD, "thread_name": "Locate blog project"}).to_string(),
+        )
+        .unwrap();
+
+        let sessions = CodexStore::open_at(&codex).sessions(&projects);
+        assert_eq!(sessions.len(), 1);
+        let session = &sessions[0];
+        assert_eq!(session.thread_id, THREAD);
+        assert_eq!(session.title.as_deref(), Some("Locate blog project"));
+        assert_eq!(session.rollout_path, head);
+        assert_eq!(
+            session.size_bytes,
+            fs::metadata(&first).unwrap().len() + fs::metadata(&head).unwrap().len()
+        );
+        assert_eq!(session.status, CodexStatus::NativeOnly);
+    }
+
+    #[test]
+    fn migrating_a_paginated_thread_follows_the_page_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, projects, _, _) = setup_paginated(dir.path());
+
+        let outcome = CodexStore::open_at(&codex).migrate(&projects, THREAD).unwrap();
+        let MigrateOutcome::Migrated { claude_path, turns } = outcome else {
+            panic!("expected Migrated");
+        };
+        assert_eq!(turns, 3);
+        assert!(claude_path.ends_with(format!("E--Proj-demo/{THREAD}.jsonl")));
+        let lines: Vec<serde_json::Value> = fs::read_to_string(&claude_path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let bodies: Vec<String> = lines
+            .iter()
+            .map(|line| {
+                line["message"]["content"]
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| line["message"]["content"][0]["text"].as_str().unwrap().to_string())
+            })
+            .collect();
+        assert_eq!(bodies, ["第一问", "第一答", "编辑后的提问"]);
+        assert_eq!(lines[2]["timestamp"], "2026-10-21T09:01:00.000Z");
+        assert_eq!(lines[2]["sessionId"], THREAD);
+    }
+
+    #[test]
+    fn unknown_or_malformed_threads_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let (codex, projects, _, _) = setup_paginated(dir.path());
+        let store = CodexStore::open_at(&codex);
+        assert!(store.migrate(&projects, "../../etc/passwd").is_err());
+        assert!(store.migrate(&projects, PAGE_2).is_err());
+        assert!(store.transcript("01a00000-0000-7000-8000-000000000000").is_err());
+        assert!(fs::read_dir(&projects).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn title_falls_back_to_the_request_inside_file_mentions() {
+        let dir = tempfile::tempdir().unwrap();
+        let codex = dir.path().join(".codex");
+        let projects = dir.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        write_page(
+            &codex.join("sessions"),
+            THREAD,
+            None,
+            &[
+                meta(THREAD, json!({})),
+                user("t", "# Files mentioned by the user:\n\n## a.png: C:\\x\\a.png\n\n## My request for Codex:\n帮我看图\n"),
+            ],
+            false,
+        );
+        let sessions = CodexStore::open_at(&codex).sessions(&projects);
+        assert_eq!(sessions[0].title.as_deref(), Some("帮我看图"));
+    }
+
+    #[test]
+    fn split_file_mentions_handles_both_heading_styles() {
+        let next_line = split_file_mentions(
+            "# Files mentioned by the user:\n\n## a.png: C:\\x\\a.png\n\n## My request for Codex:\n帮我看图\n第二行\n",
+        )
+        .unwrap();
+        assert_eq!(next_line.files, ["a.png"]);
+        assert_eq!(next_line.request, "帮我看图\n第二行");
+
+        let same_line = split_file_mentions(
+            "# Files mentioned by the user:\n\n## b.json: /tmp/b.json\n## c.py:\n\n## My request: 内联请求\n",
+        )
+        .unwrap();
+        assert_eq!(same_line.files, ["b.json", "c.py"]);
+        assert_eq!(same_line.request, "内联请求");
+
+        let without_request = split_file_mentions("# Files mentioned by the user\n附件注入").unwrap();
+        assert!(without_request.files.is_empty());
+        assert!(without_request.request.is_empty());
+        assert!(split_file_mentions("普通消息").is_none());
+    }
+
+    #[test]
+    fn title_skips_wrapped_messages_and_clips_long_text() {
+        assert_eq!(title_text("<task-notification>done</task-notification>"), None);
+        assert_eq!(
+            title_text("This session is being continued from a previous conversation that ran out of context."),
+            None
+        );
+        assert_eq!(title_text("  帮我看看  ").as_deref(), Some("帮我看看"));
+        let long = "字".repeat(TITLE_CHARS + 5);
+        let clipped = title_text(&long).unwrap();
+        assert_eq!(clipped.chars().count(), TITLE_CHARS + 1);
+        assert!(clipped.ends_with('…'));
     }
 
     #[test]
