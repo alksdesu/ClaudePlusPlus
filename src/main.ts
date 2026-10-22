@@ -129,6 +129,20 @@ interface FastModeReport {
   renderer: string;
 }
 
+interface ComputerUseStatus {
+  supported: boolean;
+  requiresSigning?: boolean;
+  appPath: string;
+  desktopVersion: string | null;
+  state: string;
+  message: string;
+  identities: { fingerprint: string; name: string }[];
+  backupPath: string | null;
+  running: boolean;
+  canInstall: boolean;
+  canRestore: boolean;
+}
+
 interface WatchStatus {
   running: boolean;
   paused: boolean;
@@ -189,7 +203,7 @@ interface PurgeOutcome {
 }
 
 interface AppState {
-  tab: "unify" | "migrate" | "codex" | "fastmode";
+  tab: "unify" | "migrate" | "codex" | "fastmode" | "computer-use";
   report: DiscoveryReport | null;
   plans: UnifyPlan[];
   desktopSessions: DesktopSession[];
@@ -208,6 +222,12 @@ interface AppState {
   selectedCodex: Set<string>;
   codexFilter: CodexFilter;
   fastmode: FastModeStatus | null;
+  computerUse: ComputerUseStatus | null;
+  computerUseError: string | null;
+  computerUseScanning: boolean;
+  signingIdentity: string;
+  computerUseConfirm: "install" | "restore" | null;
+  computerUseResult: string | null;
 }
 
 const state: AppState = {
@@ -230,6 +250,12 @@ const state: AppState = {
   selectedCodex: new Set(),
   codexFilter: "all",
   fastmode: null,
+  computerUse: null,
+  computerUseError: null,
+  computerUseScanning: false,
+  signingIdentity: "",
+  computerUseConfirm: null,
+  computerUseResult: null,
 };
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
@@ -313,6 +339,28 @@ async function refresh() {
     state.fastmode = await invoke<FastModeStatus>("fastmode_status");
   } catch {
     state.fastmode = null;
+  }
+  if (state.tab === "computer-use") await refreshComputerUse();
+  render();
+}
+
+async function refreshComputerUse() {
+  if (state.computerUseScanning) return;
+  state.computerUseScanning = true;
+  state.computerUseError = null;
+  render();
+  try {
+    state.computerUse = await invoke<ComputerUseStatus>("computer_use_status");
+    state.computerUseError = null;
+    if (!state.computerUse.identities.some((i) => i.fingerprint === state.signingIdentity)) {
+      state.signingIdentity = state.computerUse.identities.length === 1
+        ? state.computerUse.identities[0].fingerprint : "";
+    }
+  } catch (error) {
+    state.computerUse = null;
+    state.computerUseError = String(error);
+  } finally {
+    state.computerUseScanning = false;
   }
   render();
 }
@@ -1029,12 +1077,16 @@ function updateMigrateSelection() {
   }
 }
 
+let renderedTab: AppState["tab"] | null = null;
+
 function render() {
   if (!state.report) {
     app.innerHTML = '<div class="loading">正在扫描会话存储…</div>';
     return;
   }
   const scrollTops = new Map<string, number>();
+  const mainScrollTop = renderedTab === state.tab ? app.querySelector("main")?.scrollTop ?? 0 : 0;
+  const tabsScrollLeft = app.querySelector(".tabs")?.scrollLeft ?? 0;
   for (const column of app.querySelectorAll<HTMLElement>(".column-scroll")) {
     scrollTops.set(column.id, column.scrollTop);
   }
@@ -1046,6 +1098,7 @@ function render() {
         <button class="tab ${state.tab === "migrate" ? "active" : ""}" data-tab="migrate">会话迁移</button>
         <button class="tab ${state.tab === "codex" ? "active" : ""}" data-tab="codex">Codex 会话迁移</button>
         <button class="tab ${state.tab === "fastmode" ? "active" : ""}" data-tab="fastmode">Fast Mode</button>
+        <button class="tab ${state.tab === "computer-use" ? "active" : ""}" data-tab="computer-use">Computer Use</button>
       </nav>
       ${watchChip()}
       ${windowControls()}
@@ -1057,13 +1110,21 @@ function render() {
           ? renderMigrate()
           : state.tab === "codex"
             ? renderCodex()
-            : renderFastMode()
+            : state.tab === "fastmode"
+              ? renderFastMode()
+              : renderComputerUse()
     }</main>
   `;
   for (const [id, top] of scrollTops) {
     const column = document.getElementById(id);
     if (column) column.scrollTop = top;
   }
+  const main = app.querySelector("main");
+  if (main) main.scrollTop = mainScrollTop;
+  const tabs = app.querySelector(".tabs");
+  if (tabs) tabs.scrollLeft = tabsScrollLeft;
+  app.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  renderedTab = state.tab;
 }
 
 async function doUnify() {
@@ -1224,7 +1285,7 @@ const RENDERER_META: Record<RendererState, { label: string; cls: string }> = {
 
 function renderFastMode(): string {
   const fm = state.fastmode;
-  // macOS 只有 wrapper 半边：renderer patch 会被 Gatekeeper 拒，后端固定回报 unsupported
+  // Fast Mode 的 macOS 实现只部署 wrapper，整包重签由独立功能管理。
   const rendererOff = fm?.renderer.state === "unsupported";
   const head = `
       <div class="page-head">
@@ -1306,7 +1367,7 @@ function renderFastMode(): string {
             <span>版本 <span class="mono">${esc(fm.desktopVersion ?? "—")}</span></span>
             ${
               rendererOff
-                ? `<span>Claude.app 的资源受 Gatekeeper 完整性校验保护：改 ion-dist 里的 renderer 会让系统判定「已损坏」、拒绝启动并把 app 移进废纸篓，且改回原文件也解不开（判定被缓存住）。所以 macOS 只上 wrapper</span>
+                ? `<span>当前 Fast Mode 不修改 macOS renderer：签名资源的修改需要同步更新完整性记录并重签整包。Computer Use 页的重签流程只用于该功能，不改变这里的 wrapper 方案</span>
                    <span>影响：不会多出 UI 实时开关，改用 wrapper 让每个会话默认就是 fast；要临时关掉就点「还原官方」</span>`
                 : `${fm.renderer.file ? `<span>文件 <span class="mono">${esc(fm.renderer.file)}</span></span>` : ""}
                    ${fm.msixPath ? `<span class="mono">${esc(fm.msixPath)}</span>` : ""}
@@ -1393,17 +1454,123 @@ async function doFastModeAuto(auto: boolean) {
   render();
 }
 
+function computerUseRequiresSigning(cu: ComputerUseStatus | null): boolean {
+  return cu?.requiresSigning ?? true;
+}
+
+function computerUseIdentityReady(cu: ComputerUseStatus | null, identity: string): boolean {
+  return !computerUseRequiresSigning(cu) || !!cu?.identities.some((item) => item.fingerprint === identity);
+}
+
+function renderComputerUse(): string {
+  const cu = state.computerUse;
+  const requiresSigning = computerUseRequiresSigning(cu);
+  const labels: Record<string, string> = {
+    available: "可安装", installed: "已安装", upgradeAvailable: "可升级", notFound: "未找到", unsupported: "未适配",
+    unmanaged: "非托管补丁", changed: "应用已变化", recovery: "待恢复",
+  };
+  const identityReady = computerUseIdentityReady(cu, state.signingIdentity);
+  const installDisabled = state.busy || state.computerUseScanning || !cu?.canInstall || !identityReady;
+  const restoreDisabled = state.busy || state.computerUseScanning || !cu?.canRestore;
+  const confirmation = state.computerUseConfirm;
+  const header = `<div class="page-head">
+    <div><div class="eyebrow">Computer Use</div><h1>使用 Desktop 原生电脑操作</h1>
+      <p class="lead">开放 API key 模式的原生功能入口与后台模式，沿用官方开关、授权卡片和会话 UI；不替换为另一套 MCP 服务。</p></div>
+    <div class="head-actions"><button class="btn btn-secondary" data-action="refresh" ${state.busy || state.computerUseScanning ? "disabled" : ""}>重新扫描</button></div>
+  </div>`;
+  if (!cu) {
+    return `<div class="view">${header}<div class="banner ${state.computerUseError ? "banner-error" : ""}" role="status">${esc(state.computerUseError ?? "正在检测 Desktop 与安装记录…")}</div></div>`;
+  }
+  if (!cu.supported) return `<div class="view">${header}<div class="banner">${esc(cu.message)}</div></div>`;
+  return `<div class="view computer-use-view">${header}
+    ${state.computerUseScanning ? `<div class="banner" role="status">${requiresSigning ? "正在核对应用签名与安装记录…" : "正在核对应用与安装记录…"}</div>` : ""}
+    ${cu.running ? '<div class="banner banner-error">目标 Claude Desktop 正在运行。请先退出，再安装或还原；不会自动结束你的会话。</div>' : ""}
+    ${state.busy ? `<div class="banner" role="status">正在执行，请勿关闭 Claude++ 或启动 Desktop。${requiresSigning ? "整包备份和重签需要一些时间；若出现钥匙串提示，请自行决定是否授权签名。" : "正在备份并校验应用，请稍候。"}</div>` : ""}
+    ${state.computerUseResult ? `<div class="banner" role="status">${esc(state.computerUseResult)}</div>` : ""}
+    <section class="card">
+      <div class="card-title"><span>Claude Desktop</span><span class="pill ${cu.state === "installed" ? "pill-registered" : "pill-pending"}">${esc(labels[cu.state] ?? cu.state)}</span></div>
+      <div class="card-meta computer-use-details">
+        <span>版本：${esc(cu.desktopVersion ?? "—")} · 安装前核对版本与入口内容</span>
+        <span class="mono">${esc(cu.appPath)}</span><span>${esc(cu.message)}</span>
+        ${cu.backupPath ? `<span>原包备份：<span class="mono">${esc(cu.backupPath)}</span></span>` : ""}
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-title">安装与还原</div>
+      <div class="computer-use-details">
+        ${requiresSigning ? `<label for="cu-signing-identity">代码签名身份</label>
+        <select id="cu-signing-identity" class="identity-select" ${state.busy || state.computerUseScanning || !cu.identities.length ? "disabled" : ""}>
+          <option value="">${cu.identities.length ? "请选择本机签名身份" : "未找到有效签名身份"}</option>
+          ${cu.identities.map((i) => `<option value="${esc(i.fingerprint)}" ${state.signingIdentity === i.fingerprint ? "selected" : ""}>${esc(i.name)}</option>`).join("")}
+        </select>
+        <p>需要本机钥匙串中的有效代码签名证书及私钥；已验证开发签名可行，不支持 ad-hoc 签名。Claude++ 不导出私钥。</p>
+        <p>安装会重签整个应用，可能需要重新登录或重新授予系统权限。</p>` : ""}
+        <p>先保存原包，再在副本处理并校验，最后替换；会话和 API 配置不作修改。</p>
+        <div class="computer-use-actions">
+          <button class="btn btn-primary" data-action="cu-install" ${installDisabled ? "disabled" : ""}>${cu.state === "upgradeAvailable" ? "升级原生入口与后台模式" : "安装原生入口"}</button>
+          <button class="btn btn-secondary" data-action="cu-restore" ${restoreDisabled ? "disabled" : ""}>还原官方</button>
+        </div>
+      </div>
+    </section>
+    ${confirmation ? `<section class="card computer-use-confirm" role="region" aria-label="确认 Computer Use 操作">
+      <div class="card-title">${confirmation === "install" ? requiresSigning ? "确认备份并重签 Claude Desktop？" : "确认备份并修改 Claude Desktop？" : "确认还原完整官方应用？"}</div>
+      <div class="computer-use-details"><p>${confirmation === "install"
+        ? `目标：${esc(cu.appPath)}。${requiresSigning ? `签名身份：${esc(cu.identities.find((i) => i.fingerprint === state.signingIdentity)?.name ?? "未选择")}。` : ""}${cu.state === "upgradeAvailable" ? "升级会先还原已验证的官方备份，再安装新版；中途失败可还原后重试。" : ""}安装不等于授予电脑控制权限，原生开关仍由你自行打开。`
+        : "仅还原本次安装记录对应的应用；保留会话、配置和用户授权设置。如果 Desktop 已被更新或修改，将拒绝覆盖。"}</p>
+        <div class="computer-use-actions"><button class="btn btn-primary" data-action="cu-confirm" ${(confirmation === "install" ? installDisabled : restoreDisabled) ? "disabled" : ""}>${confirmation === "install" ? "确认安装" : "确认还原"}</button>
+          <button class="btn btn-secondary" data-action="cu-cancel" ${state.busy ? "disabled" : ""}>取消</button></div>
+      </div></section>` : ""}
+    <section class="card"><div class="card-title">安装后</div><div class="computer-use-details">
+      <p>打开 Claude → 设置 → Computer use，自行启用并按官方提示授权。安装不会自动授予屏幕录制、辅助功能或其他应用的控制权限。</p>
+      <p>Background 在已允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。</p>
+      <p>HIPAA、会话授权与禁止控制的应用检查保持原样。Desktop 更新后请重新扫描；未知版本不自动打补丁${requiresSigning ? "，也不会在后台重签" : ""}。</p>
+    </div></section>
+  </div>`;
+}
+
+async function doComputerUse() {
+  const action = state.computerUseConfirm;
+  if (!action || state.busy || state.computerUseScanning) return;
+  if (action === "install" ? !state.computerUse?.canInstall || !computerUseIdentityReady(state.computerUse, state.signingIdentity) : !state.computerUse?.canRestore) return;
+  state.busy = true;
+  state.computerUseConfirm = null;
+  state.computerUseResult = null;
+  render();
+  try {
+    state.computerUseResult = await invoke<string>(action === "install" ? "computer_use_install" : "computer_use_restore",
+      action === "install" ? { identity: computerUseRequiresSigning(state.computerUse) ? state.signingIdentity : "" } : undefined);
+  } catch (error) {
+    state.computerUseResult = `操作未完成：${String(error)}。原包备份不会删除；请重新扫描查看是否需要还原。`;
+  } finally {
+    state.busy = false;
+    await refresh();
+  }
+}
+
 function initMain() {
+app.addEventListener("change", (event) => {
+  const target = event.target as HTMLSelectElement;
+  if (target.id === "cu-signing-identity") {
+    state.signingIdentity = target.value;
+    state.computerUseConfirm = null;
+    render();
+    document.getElementById("cu-signing-identity")?.focus();
+  }
+});
 app.addEventListener("click", (event) => {
   const target = event.target as HTMLElement;
   const tab = target.closest<HTMLElement>("[data-tab]");
   if (tab) {
+    if (state.busy) return;
+    state.computerUseConfirm = null;
     state.tab = tab.dataset.tab as AppState["tab"];
     render();
+    if (state.tab === "computer-use") void refreshComputerUse();
     return;
   }
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action) {
+    if (state.busy && !["win-min", "win-max"].includes(action)) return;
     if (action === "win-min") void tauriWindow()?.minimize();
     if (action === "win-max") void tauriWindow()?.toggleMaximize();
     if (action === "win-close") void tauriWindow()?.close();
@@ -1431,6 +1598,16 @@ app.addEventListener("click", (event) => {
     if (action === "fastmode-install") void doFastMode("install");
     if (action === "fastmode-uninstall") void doFastMode("uninstall");
     if (action === "fastmode-auto") void doFastModeAuto((target as HTMLInputElement).checked);
+    if (action === "cu-install" || action === "cu-restore") {
+      state.computerUseConfirm = action === "cu-install" ? "install" : "restore";
+      render();
+      app.querySelector<HTMLButtonElement>('[data-action="cu-confirm"]')?.focus();
+    }
+    if (action === "cu-cancel") {
+      state.computerUseConfirm = null;
+      render();
+    }
+    if (action === "cu-confirm") void doComputerUse();
     if (action === "purge-markers") void doPurge(false);
     if (action === "purge-all") void doPurge(true);
     if (action === "cli-select-all") {

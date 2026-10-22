@@ -2098,9 +2098,8 @@ mod imp {
     use crate::procs;
 
     const DESKTOP_APP: &str = "/Applications/Claude.app";
-    const RENDERER_NOTE: &str = "macOS 不 patch renderer：app.asar 的 SHA256 封在 Info.plist 的 \
-         ElectronAsarIntegrity 键里，Info.plist 又被主程序签名 seal，主程序还开着 hardened runtime，\
-         这三层改任意一层都会在 exec 时被内核杀掉";
+    const RENDERER_NOTE: &str = "macOS Fast Mode 当前只部署 CLI wrapper，不修改 Desktop UI；\
+         修改签名资源需要更新完整性记录并重签整包，Computer Use 页提供独立的安装与还原流程";
     const WRAPPER_NAME: &str = "claude";
     const REAL_NAME: &str = "claude-real";
     const CLI_BUNDLE: &str = "claude.app";

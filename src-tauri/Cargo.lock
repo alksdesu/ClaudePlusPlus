@@ -325,7 +325,7 @@ dependencies = [
 
 [[package]]
 name = "claude-plus-plus"
-version = "0.4.13"
+version = "0.4.14"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -335,6 +335,7 @@ dependencies = [
  "junction",
  "memchr",
  "notify",
+ "plist",
  "regex",
  "rusqlite",
  "ruzstd",

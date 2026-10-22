@@ -34,7 +34,7 @@ Claude++ 针对这两层分别下手。
 | **Codex 迁移** | 扫描 `~/.codex` 的 rollout 会话并与 Claude 侧对账：已迁移 / Claude 导入镜像 / 孤儿镜像 / Codex 独有。新版分页存储沿 `history_base` 把多页拼回一个对话（每页分叉点之后是编辑重发或回退前的废弃分支，不计入），`.jsonl.zst` 压缩页透明解压；名称取自 Codex 状态库里的对话名，子代理线程不单独列出。独有会话一键转为 Claude 转录（幂等：threadId 即 sessionId），并回写 Codex 导入台账防止它把产物再同步回去 |
 | **会话预览** | 单击任意会话行弹出独立预览窗口：Markdown 渲染（DOMPurify 消毒）、工具调用聚合为摘要行、大会话只加载末尾 300 条。全程只读 |
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
-| **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 renderer 被 asar 完整性校验与签名封印锁死，只做 wrapper——没有 UI 开关，但每个会话默认就是 fast。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
+| **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 当前只做 wrapper，不重签 renderer——没有 UI 开关，但每个会话默认就是 fast。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
 
@@ -85,7 +85,7 @@ Windows 写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动�
 
 macOS 只做 wrapper，全程用户态无需提权。
 
-renderer 那半边做不了，锁有三层：`app.asar` 的 SHA256 封在 `Info.plist` 的 `ElectronAsarIntegrity` 键里，`EnableEmbeddedAsarIntegrityValidation` 与 `OnlyLoadAppFromAsar` 两个 fuse 都开着，改 asar 必被拦；想同步改 `Info.plist` 里那个哈希，它又被主程序签名 seal 住；主程序还开着 hardened runtime，签名一失配 exec 就被内核杀。`RunAsNode`、`EnableNodeOptionsEnvironmentVariable`、`EnableNodeCliInspectArguments` 三个 fuse 也都是关的，运行时注入同样无路。只剩整包重签一条路，但 `com.apple.security.virtualization` 是 Apple 特批的 entitlement，adhoc 签不出来——带着它 AMFI 拒绝加载，去掉它 cowork 沙箱会话全废。另外实测：改过资源的 `Claude.app` 会被 Gatekeeper 判「已损坏」、拒绝启动并移进废纸篓，改回原文件也解不开——判定被 `com.apple.provenance` 与 LaunchServices 缓存住，要换 inode 重建 app 才能恢复。
+macOS 的签名资源不能直接改写：ASAR 条目哈希、`Info.plist` 中的 ASAR 文件头哈希和整包签名必须同步更新。有效开发签名可以启动修改后的应用。Fast Mode 当前仍只部署 wrapper，不修改 macOS UI；Computer Use 使用下文独立的整包重签流程。不会关闭 Electron fuses、hardened runtime 或库校验。
 
 CLI 那半边不走 Gatekeeper 的应用启动路径（Desktop 用 `posix_spawn` 直接执行），但内核的签名校验绕不过：官方 CLI 同样开着 hardened runtime，它的签名配对 `Contents/Info.plist`，一旦被拎出 bundle 或改个名，就不再算那个 bundle 的主程序，签名当场失配、exec 即 SIGKILL（Desktop 会把这个信号一律翻译成「被端点安全拦截」，跟真的 EDR 无关）。所以藏官方本体的办法是连**整个 bundle 一起挪**到 `claude-real.app`——签名只认 `Contents/MacOS/<主程序>` 这层相对结构，bundle 目录叫什么它不在意。腾出来的 `claude.app` 只留一个壳：`MacOS/claude` 软链到 Claude++ 自身，`MacOS/claude-real` 软链回本体。
 
@@ -104,6 +104,22 @@ Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFAC
 Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。wrapper 与 renderer 各修各的，一边失败不耽误另一边；失败的版本组合不再自动重试，升级 Claude++ 后会重新试一次。Desktop 2.19675 把旧布局搬进构建子目录时只带走它自己的文件，藏起来的官方本体会落在外层：守护会把它接回 wrapper 身边，构建目录里已是新下的官方时则清掉这份残留。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`，它会逐锚点列出改写前后的命中数；再给一个输出路径（如 `out.mjs`）就会把改写结果写出来，用 `node --check out.mjs` 确认拼出的 JS 仍能解析。「还原官方」一键撤销全部改动。
 
 Desktop 2.42304 起，Fast Mode 主逻辑与模型菜单分布在两个 renderer 文件中。Windows 修复会先校验全部目标，再分别保存 `.orig` 并写入；写入失败时回滚本次改动。状态卡只有在所有目标均已打补丁时才显示成功，旧版单文件布局仍受支持。排查拆分布局时，将探测参数换成 `assets/v1` 目录，并将第二个参数设为独立输出目录；逐个对导出的 `.mjs` 执行 `node --check`。
+
+### 原生 Computer Use（macOS）
+
+「Computer Use」页提供检测、签名身份选择、安装和还原。在主进程 JS 文件中按配置函数内容定位唯一入口，不依赖带哈希的 chunk 文件名；再核对入口哈希与补丁输出哈希。未知版本、重复命中或内容变化均拒绝安装，不把相似代码当作已兼容。
+
+安装为 API key 模式补上原生 Computer Use 功能配置与后台模式入口，不修改 CLI 二进制，不另建 MCP 服务。安装后仍需在 Claude 设置中自行启用并授权。Background 在允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。HIPAA、会话授权、禁止控制的应用等检查保持原样。
+
+旧版托管补丁显示「可升级」：先验证备份并还原官方包，再安装新版；中途失败可还原后重试。
+
+- 需要本机钥匙串中有效的代码签名证书及私钥；已验证 Apple Development 签名，**不支持 ad-hoc**，不内置或导出证书私钥。
+- 先退出目标 Desktop。Claude++ 保存完整官方备份，在临时副本更新 ASAR 条目与文件头哈希，逐个保留非身份类 entitlements 并重签嵌套组件，验证整包签名后才替换。
+- 重签会改变应用身份，可能需要重新登录或重新授予系统权限；不保证原钥匙串访问或所有 Cowork 场景保持兼容。会话、API key、用户配置和系统授权数据库不作修改。
+- 安装记录、原包备份和命令日志保存在 `<配置目录>/com.claudeplusplus.manager/computer-use/`。失败可用「还原官方」结束未完成事务；还原会比对整包哈希，不覆盖被外部更新或修改的应用，备份保留。
+- 不在后台重签，不关闭自动更新。Desktop 更新后重新扫描；适配新版本前不会自动修改，也不会用旧备份覆盖新版本。
+
+开发验收可运行 `cargo run --example computer_use_probe -- status COPY/Claude.app STORE`；`install` 另接签名身份 SHA-1，`restore` 恢复备份。探针拒绝系统应用路径，使用独立副本与独立记录目录。运行时不依赖 Python、Node.js 或开发工具链。
 
 ### 构建
 
@@ -156,7 +172,7 @@ Claude++ addresses both layers.
 | **Codex import** | Scans `~/.codex` rollouts and classifies every thread against Claude: migrated / mirror imported from Claude / orphan mirror / Codex-only. Paginated rollouts are stitched back into one thread along `history_base` (whatever follows a page's fork point is a branch abandoned by an edit or rewind and is left out), `.jsonl.zst` pages are decompressed transparently, names come from Codex's state database, and sub-agent threads are not listed on their own. Codex-only threads convert to Claude transcripts in one click (idempotent: threadId doubles as sessionId), and the conversion is recorded in Codex's import ledger so it never syncs the output back as a duplicate |
 | **Session preview** | Click any session row to open a read-only preview window: markdown rendering (DOMPurify-sanitized), tool calls aggregated into summary lines, only the last 300 messages of huge sessions loaded |
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
-| **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the renderer is locked down by asar integrity validation and a sealed signature, so only the wrapper is deployed — no UI toggle, but every session defaults to fast. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
+| **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS only the wrapper is deployed, without re-signing the renderer — no UI toggle, but every session defaults to fast. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
 
@@ -207,7 +223,7 @@ On Windows, writing under WindowsApps needs administrator rights: Claude++ relau
 
 On macOS only the wrapper is deployed, entirely in user space.
 
-The renderer half is impossible there, and the lock has three layers: `app.asar`'s SHA256 is sealed into the `ElectronAsarIntegrity` key of `Info.plist`, with both the `EnableEmbeddedAsarIntegrityValidation` and `OnlyLoadAppFromAsar` fuses on, so any asar edit is caught; patching that hash in `Info.plist` fails because the plist itself is sealed by the main executable's signature; and the main executable runs under hardened runtime, so the moment its signature mismatches the kernel kills it at exec. The `RunAsNode`, `EnableNodeOptionsEnvironmentVariable` and `EnableNodeCliInspectArguments` fuses are all off too, so runtime injection is out as well. That leaves re-signing the whole app, but `com.apple.security.virtualization` is an Apple-granted entitlement that ad-hoc signing cannot produce — keep it and AMFI refuses to load the app, drop it and cowork sandbox sessions die. Also observed in testing: once its resources change, `Claude.app` is declared "damaged" by Gatekeeper, refused launch and moved to the Trash — restoring the original file does not help either, because the verdict is cached through `com.apple.provenance` and LaunchServices (only rebuilding the app under a fresh inode recovered it).
+Signed macOS resources cannot be edited in isolation: the ASAR entry hashes, the ASAR header hash in `Info.plist`, and the bundle signature must be updated together. A valid development identity can sign the modified application. Fast Mode still deploys only the wrapper on macOS; Computer Use uses the separate bundle-signing workflow below. Electron fuses, hardened runtime, and library validation stay enabled.
 
 The CLI half does not go through Gatekeeper's app-launch path (Desktop `posix_spawn`s it directly), but there is no getting around the kernel's signature check: the official CLI also runs under hardened runtime, and its signature is paired with `Contents/Info.plist`. Lift it out of the bundle or rename it and it stops counting as that bundle's main executable, the signature mismatches immediately and exec ends in SIGKILL (which Desktop then reports as "blocked by endpoint security", unrelated to any real EDR). So the official binary is stashed by moving **the entire bundle** to `claude-real.app` — the signature only cares about the `Contents/MacOS/<main executable>` structure, not what the bundle directory is called. The vacated `claude.app` keeps just a shell: `MacOS/claude` symlinked to Claude++ itself, `MacOS/claude-real` symlinked back to the real binary.
 
@@ -226,6 +242,22 @@ Trust `usage.speed` in the transcript (the verification card at the bottom of th
 A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. The wrapper and the renderer are repaired independently, so one failing never holds up the other; a failed version combination is not retried automatically, but upgrading Claude++ gives it one more try. When Desktop 2.19675 moves an old layout into a build subdirectory it takes only its own files, leaving the stashed official binary behind in the version directory: the daemon hands it back to the wrapper, or deletes the leftover when the build already holds a freshly downloaded official CLI. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
 
 Starting with Desktop 2.42304, the Fast Mode logic and model menu live in separate renderer files. On Windows, repair validates every target before saving individual `.orig` backups and writing changes; a failed write rolls back the changes from that attempt. Status reports success only when all targets are patched, and older single-file layouts remain supported. To inspect a split layout, pass the `assets/v1` directory to the probe and a separate output directory as the second argument, then run `node --check` on each exported `.mjs` file.
+
+### Native Computer Use (macOS)
+
+The Computer Use tab provides status detection, signing-identity selection, installation, and restoration. The configuration function is located by content across main-process JavaScript files, without depending on a content-hashed chunk filename. Both the original entry hash and patched output hash must match the compatibility record. Unknown versions, ambiguous matches, and changed content are rejected rather than assumed compatible.
+
+Installation supplies the native Computer Use configuration and background-mode entry point for API-key deployments. The CLI binary is unchanged and no separate MCP server is introduced. Enable Computer use in Claude settings and complete the consent flow. Background works inside allowed apps and asks before taking over the screen; Full control takes over the screen, mouse, and keyboard by default. HIPAA, session authorization, and denied-app checks remain intact.
+
+Older managed patches show an upgrade action: verify the backup, restore the official bundle, then install the new patch. An interrupted upgrade can be restored and retried.
+
+- A valid local code-signing certificate and private key are required. Apple Development signing has been verified; **ad-hoc signing is not supported**. No signing private key is bundled or exported.
+- Quit the target Desktop first. Claude++ backs up the entire original bundle, patches a temporary copy, updates ASAR entry and header integrity, preserves non-identity entitlements per component, and re-signs nested code. Replacement happens only after strict signature verification.
+- Re-signing changes application identity. Login or system permissions may need renewal; existing Keychain access and all Cowork scenarios are not guaranteed. Conversations, API keys, user configuration, and the system permissions database are not edited.
+- Records, original bundles, and command logs live under `<config dir>/com.claudeplusplus.manager/computer-use/`. Restore official can finish an interrupted transaction. Restoration verifies full-bundle hashes and refuses to overwrite an externally updated or modified app; backups are retained.
+- No background re-signing or disabling of automatic updates. Rescan after a Desktop update. Unsupported versions are not modified, and old backups do not overwrite newer versions.
+
+For development validation, run `cargo run --example computer_use_probe -- status COPY/Claude.app STORE`; `install` additionally takes a signing-identity SHA-1, and `restore` restores the backup. The probe rejects system application paths and uses a separate app copy and state directory. The installed feature needs no Python, Node.js, or development toolchain.
 
 ### Build
 

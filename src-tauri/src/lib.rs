@@ -1,4 +1,5 @@
 pub mod codex;
+pub mod computer_use;
 pub mod discovery;
 pub mod fastmode;
 pub mod link;
@@ -407,6 +408,21 @@ fn fastmode_set_auto(auto: bool) -> Result<FastModeSettings, String> {
     fastmode::set_auto(auto).map_err(|e| format!("{e:#}"))
 }
 
+#[tauri::command(async)]
+fn computer_use_status() -> Result<computer_use::Status, String> {
+    computer_use::status().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
+fn computer_use_install(identity: String) -> Result<String, String> {
+    computer_use::install(&identity).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
+fn computer_use_restore() -> Result<String, String> {
+    computer_use::restore().map_err(|e| format!("{e:#}"))
+}
+
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -451,6 +467,9 @@ pub fn run() {
             fastmode_install,
             fastmode_uninstall,
             fastmode_set_auto,
+            computer_use_status,
+            computer_use_install,
+            computer_use_restore,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();

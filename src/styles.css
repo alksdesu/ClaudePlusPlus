@@ -57,6 +57,8 @@ label:has(input:focus-visible) {
 
 .brand {
   display: flex;
+  flex-shrink: 0;
+  white-space: nowrap;
   align-items: center;
   gap: var(--sp-8);
   font-family: var(--font-serif);
@@ -83,9 +85,13 @@ label:has(input:focus-visible) {
 .tabs {
   display: flex;
   gap: var(--sp-4);
+  min-width: 0;
+  overflow-x: auto;
+  flex-shrink: 1;
 }
 
 .tab {
+  flex-shrink: 0;
   padding: var(--sp-6) var(--sp-12);
   border-radius: var(--br-8);
   color: var(--theme-foreground-tertiary);
@@ -104,6 +110,8 @@ label:has(input:focus-visible) {
 
 .watch-chip {
   display: flex;
+  flex-shrink: 0;
+  white-space: nowrap;
   align-items: center;
   gap: var(--sp-8);
   margin-left: auto;
@@ -337,6 +345,42 @@ main {
   color: var(--theme-foreground-tertiary);
   font-size: var(--font-size-detail-xs);
   font-feature-settings: "pnum" on, "lnum" on;
+}
+
+.computer-use-details {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sp-12);
+  margin-top: var(--sp-12);
+  color: var(--theme-foreground-secondary);
+  overflow-wrap: anywhere;
+}
+
+.computer-use-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-12);
+}
+
+.identity-select {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  color: var(--theme-foreground-primary);
+  background: var(--theme-background-overlay);
+  border: var(--border-width) solid var(--theme-border-primary);
+  border-radius: var(--br-8);
+  padding: var(--sp-8) var(--sp-12);
+}
+
+.identity-select:focus-visible {
+  outline: var(--border-width) solid var(--color-focus);
+  outline-offset: var(--sp-4);
+}
+
+.computer-use-view .page-head {
+  flex-wrap: wrap;
 }
 
 .mono {
