@@ -7,7 +7,7 @@
 
 Share sessions across Claude Desktop and Claude Code CLI on the same machine, import Codex conversations, and enable Fast Mode and native Computer Use for API-key deployments.
 
-![Tauri](https://img.shields.io/badge/Tauri-2-blue) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-informational) ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
+![Tauri](https://img.shields.io/badge/built%20with-Tauri-blue) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-informational) ![License](https://img.shields.io/badge/license-AGPL--3.0-green)
 
 ---
 
@@ -78,12 +78,12 @@ Desktop 用 API key 登录时进入 `deploymentMode:"3p"`，官方把 fast 能�
 
 | 组件 | 做法 | 落点 |
 |---|---|---|
-| wrapper（两平台） | 顶替 Desktop 实际启动的那份 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给挪开保留的官方本体（Windows 改名，macOS 连整个 bundle 一起挪）；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\<build>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/<build>/claude.app/Contents/MacOS/`<br>`<build>` 是清单 sha256 的前 12 位，Desktop 2.19675 起才有这一层，更早的版本 CLI 直接在 `<ver>` 下 |
+| wrapper（两平台） | 顶替 Desktop 实际启动的那份 CLI，把 `fastMode:true` 合并进 `--settings` 后转发给挪开保留的官方本体（Windows 改名，macOS 连整个 bundle 一起挪）；Desktop 只校验 `.verified` 不比二进制本体 | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\<build>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/<build>/claude.app/Contents/MacOS/`<br>`<build>` 是清单 sha256 的前 12 位；同时识别 CLI 直接位于 `<ver>` 下的目录布局 |
 | renderer patch（仅 Windows） | 改写 minified renderer 的相关锚点：按 IPC 可用 + 模型支持显示开关、按模型 ID 判定支持、清掉禁用原因，并为新版模型菜单补齐 `fast_mode` 配置。锚点以属性名与字符串字面量为骨架、变量名正则捕获后回填，Desktop 更新重命名 minify 符号不会失配。改前备份 `.orig`，始终从备份出发 patch，幂等 | MSIX 包内 `resources\ion-dist\assets\v1\` |
 
 wrapper 管"会话默认 fast"，开关管"实时切换"。
 
-Desktop 2.110 已将独立 Fast 按钮移入模型菜单底部，选择支持的模型后可看到「Enable fast mode」。已安装旧版补丁时，退出 Desktop 后在 Claude++ 的「Fast Mode」页点击「修复」，再重新打开 Desktop。补丁仍兼容旧版 Desktop 的独立开关。
+Fast 开关可位于模型菜单底部，选择支持的模型后可看到「Enable fast mode」；独立按钮布局也受支持。需要修复时，退出 Desktop，在 Claude++ 的「Fast Mode」页点击「修复」，再重新打开 Desktop。
 
 Windows 写 WindowsApps 需要管理员：Claude++ 以固定参数重新启动自身完成 renderer 改动（弹一次 UAC），提权进程不接受任何路径参数。
 
@@ -95,23 +95,17 @@ CLI 那半边不走 Gatekeeper 的应用启动路径（Desktop 用 `posix_spawn`
 
 Desktop 每次启动会读 CLI 的**前 8 字节**验 Mach-O 魔数（`0xFEEDFACF` 加 cputype，或 `0xCAFEBABE` 的 universal），不合格就判缓存失效、重下整个 bundle。所以顶替物不能是脚本，得是**软链到 Claude++ 自身**——它本身就是合格的 Mach-O，检查顺着软链读到它。Claude++ 发现自己以 `claude` 之名被调起就走 wrapper 分支：把 `fastMode` 并进 `--settings` 后 `exec` 官方本体，同一 PID，不需要 Windows 那套 Job Object。软链断掉（Claude++ 被移走或删掉）时 Desktop 会自动重下官方 CLI，失效模式是"回到原样"。
 
-| 模型 | fast |
-|---|---|
-| Opus 5 / Opus 4.8 | 真 fast |
-| Opus 4.6 | 服务端已不再提供，开关不显示 |
-| 其他 | 不支持，开关隐藏 |
-
-模型这一列在 Windows 决定开关显不显示；macOS 没有开关，wrapper 对所有会话一律注入，不支持 fast 的模型由服务端照常回 `standard`。
+Windows 按模型支持情况显示 Fast 开关，不支持的模型隐藏开关；macOS 没有开关，wrapper 对所有会话一律注入，不支持 fast 的模型由服务端照常回 `standard`。实际是否启用 fast 以服务端返回结果为准。
 
 验证以转录里的 `usage.speed` 为准（页面底部的验证卡统计的就是它），Desktop 状态栏的 Fast 标签有官方显示 bug。
 
-Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。wrapper 与 renderer 各修各的，一边失败不耽误另一边；失败的版本组合不再自动重试，升级 Claude++ 后会重新试一次。Desktop 2.19675 把旧布局搬进构建子目录时只带走它自己的文件，藏起来的官方本体会落在外层：守护会把它接回 wrapper 身边，构建目录里已是新下的官方时则清掉这份残留。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（Opus 会话默认 fast，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`，它会逐锚点列出改写前后的命中数；再给一个输出路径（如 `out.mjs`）就会把改写结果写出来，用 `node --check out.mjs` 确认拼出的 JS 仍能解析。「还原官方」一键撤销全部改动。
+Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守护线程监控 CLI 目录并定期核对 Desktop 版本，失效即自动补上；Desktop 运行中则等它退出后执行。wrapper 与 renderer 各修各的，一边失败不耽误另一边；失败的版本组合不再自动重试，升级 Claude++ 后会重新试一次。CLI 迁入构建子目录后，守护会把外层保留的官方本体接回 wrapper 身边；构建目录里已有新下载的官方本体时，则清掉外层残留。更新只重命名 minify 符号时锚点自动适应，无需改代码。只有 renderer 的代码结构真变了，页面才会列出未命中的锚点：此时 wrapper 仍生效（支持 fast 的会话仍默认开启，只是没有开关），需按同样语义重新适配 `src-tauri/src/fastmode.rs` 里的 `ANCHORS`；想先验证某份 renderer 能不能 patch，跑 `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`，它会逐锚点列出改写前后的命中数；再给一个输出路径（如 `out.mjs`）就会把改写结果写出来，用 `node --check out.mjs` 确认拼出的 JS 仍能解析。「还原官方」一键撤销全部改动。
 
-Desktop 2.42304 起，Fast Mode 主逻辑与模型菜单分布在两个 renderer 文件中。Windows 修复会先校验全部目标，再分别保存 `.orig` 并写入；写入失败时回滚本次改动。状态卡只有在所有目标均已打补丁时才显示成功，旧版单文件布局仍受支持。排查拆分布局时，将探测参数换成 `assets/v1` 目录，并将第二个参数设为独立输出目录；逐个对导出的 `.mjs` 执行 `node --check`。
+Fast Mode 支持单文件和主逻辑、模型菜单分布在多个 renderer 文件中的布局。Windows 修复会先校验全部目标，再分别保存 `.orig` 并写入；写入失败时回滚本次改动。状态卡只有在所有目标均已打补丁时才显示成功。排查拆分布局时，将探测参数换成 `assets/v1` 目录，并将第二个参数设为独立输出目录；逐个对导出的 `.mjs` 执行 `node --check`。
 
 ### 原生 Computer Use（Windows）
 
-支持 Windows x64 的 Claude Desktop 3.1623.4 MSIX 包。安装前核对原生模块、官方 exe 签名、主进程入口内容和 ASAR 完整性基准；安装沿用 Desktop 自身的开关、授权和原生执行器，不自动授予电脑控制权限。
+面向 Windows x64 的 Claude Desktop MSIX 包，能否安装以页面检测结果为准。安装前核对原生模块、官方 exe 签名、主进程入口内容和 ASAR 完整性基准；安装沿用 Desktop 自身的开关、授权和原生执行器，不自动授予电脑控制权限。
 
 完全退出 Desktop 后，在「Computer Use」页重新扫描，确认检测到目标版本，再点击「安装原生入口」并确认管理员操作。安装完成后重启 Desktop，在设置中启用 Computer use，按原生授权流程使用。「还原官方」同样要求先退出 Desktop。
 
@@ -125,9 +119,9 @@ Computer Use 不使用 Fast Mode 的自动修复守护。Desktop 更新后需重
 
 ### 原生 Computer Use（macOS）
 
-当前适配 Claude Desktop 3.1623.1 与 3.1623.4。「Computer Use」页提供检测、签名身份选择、安装和还原。在主进程 JS 文件中按配置函数内容定位唯一入口，不依赖带哈希的 chunk 文件名；再核对入口哈希与补丁输出哈希。未知版本、重复命中或内容变化均拒绝安装，不把相似代码当作已兼容。
+「Computer Use」页提供检测、签名身份选择、安装和还原，能否安装以页面检测结果为准。在主进程 JS 文件中按配置函数内容定位唯一入口，不依赖带哈希的 chunk 文件名；再核对入口哈希与补丁输出哈希。未知版本、重复命中或内容变化均拒绝安装，不把相似代码当作已兼容。
 
-安装为 API key 模式补上原生 Computer Use 功能配置，3.1623.4 同时提供后台模式入口，不修改 CLI 二进制，不另建 MCP 服务。安装后仍需在 Claude 设置中自行启用并授权。Background 在允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。HIPAA、会话授权、禁止控制的应用等检查保持原样。
+安装为 API key 模式补上原生 Computer Use 功能配置，并在兼容的应用中提供后台模式入口，不修改 CLI 二进制，不另建 MCP 服务。安装后仍需在 Claude 设置中自行启用并授权。Background 在允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。HIPAA、会话授权、禁止控制的应用等检查保持原样。
 
 旧版托管补丁显示「可升级」：先验证备份并还原官方包，再安装新版；中途失败可还原后重试。
 
@@ -146,7 +140,7 @@ npm install
 npx tauri build   # Windows 产物: bundle/nsis 安装包 + claude-plus-plus.exe；macOS 产物: bundle/macos/Claude++.app + bundle/dmg
 ```
 
-依赖：Node.js 18+、Rust stable、Tauri 2。
+依赖：Node.js、Rust stable、Tauri。具体依赖以仓库清单与锁文件为准。
 
 ```bash
 cd src-tauri && cargo test    # 单元测试（junction / 迁移字段 / 墓碑流转 / 幂等）
@@ -235,12 +229,12 @@ Signing in with an API key puts Desktop in `deploymentMode:"3p"`, where the fast
 
 | Component | How | Location |
 |---|---|---|
-| wrapper (both platforms) | Replaces the CLI that Desktop actually launches, merges `fastMode:true` into `--settings` and forwards to the stashed official binary (renamed on Windows, moved bundle-and-all on macOS); Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\<build>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/<build>/claude.app/Contents/MacOS/`<br>`<build>` is the first 12 hex digits of the manifest sha256; the layer exists since Desktop 2.19675, earlier versions keep the CLI directly under `<ver>` |
+| wrapper (both platforms) | Replaces the CLI that Desktop actually launches, merges `fastMode:true` into `--settings` and forwards to the stashed official binary (renamed on Windows, moved bundle-and-all on macOS); Desktop only checks `.verified`, never the binary itself | Win `%LOCALAPPDATA%\Claude-3p\claude-code\<ver>\<build>\`<br>mac `~/Library/Application Support/Claude-3p/claude-code/<ver>/<build>/claude.app/Contents/MacOS/`<br>`<build>` is the first 12 hex digits of the manifest sha256; layouts with the CLI directly under `<ver>` are also detected |
 | renderer patch (Windows only) | Rewrites the relevant anchors in the minified renderer: show the toggle when IPC is available and the model supports fast, decide support by model id, drop the disabled reason, and supply the `fast_mode` configuration for the newer model menu. Anchors are keyed on property names and string literals, with variable names captured by regex and filled back in, so a Desktop update that renames minified symbols does not break them. Backs up `.orig` first and always patches from that backup, so it is idempotent | `resources\ion-dist\assets\v1\` inside the MSIX package |
 
 The wrapper makes sessions fast by default; the toggle switches at runtime.
 
-Desktop 2.110 moved the standalone Fast button to the bottom of the model menu, where "Enable fast mode" appears after selecting a supported model. To upgrade an existing patch, quit Desktop, click "Repair" on Claude++'s Fast Mode tab, then reopen Desktop. The patch remains compatible with the standalone toggle in older Desktop versions.
+The Fast toggle can appear as "Enable fast mode" at the bottom of the model menu after selecting a supported model; standalone-button layouts are also supported. To repair the patch, quit Desktop, click "Repair" on Claude++'s Fast Mode tab, then reopen Desktop.
 
 On Windows, writing under WindowsApps needs administrator rights: Claude++ relaunches itself with a fixed flag to apply the renderer change (one UAC prompt), and the elevated helper accepts no path arguments.
 
@@ -252,23 +246,17 @@ The CLI half does not go through Gatekeeper's app-launch path (Desktop `posix_sp
 
 On every start Desktop reads the CLI's **first 8 bytes** and checks the Mach-O magic (`0xFEEDFACF` plus cputype, or a `0xCAFEBABE` universal binary); anything else invalidates the cache and re-downloads the whole bundle. So the stand-in cannot be a script — it is a **symlink to Claude++ itself**, which is a valid Mach-O the check follows the link to. When Claude++ finds it was invoked under the name `claude` it takes the wrapper branch: merge `fastMode` into `--settings`, then `exec` the official binary — same PID, so none of the Job Object machinery Windows needs. If the symlink breaks (Claude++ moved or deleted) Desktop simply re-downloads the official CLI, so the failure mode is "back to stock".
 
-| Model | fast |
-|---|---|
-| Opus 5 / Opus 4.8 | real fast |
-| Opus 4.6 | no longer served fast by the backend; toggle hidden |
-| others | unsupported; toggle hidden |
-
-That column decides toggle visibility on Windows. macOS has no toggle: the wrapper injects unconditionally and the backend simply answers `standard` for models without fast.
+Windows shows the Fast toggle for supported models and hides it for unsupported models. macOS has no toggle: the wrapper injects unconditionally and the backend answers `standard` for models without fast. Actual fast-mode use is determined by the server response.
 
 Trust `usage.speed` in the transcript (the verification card at the bottom of the tab counts exactly that); the Fast label in Desktop's status bar has a known display bug.
 
-A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. The wrapper and the renderer are repaired independently, so one failing never holds up the other; a failed version combination is not retried automatically, but upgrading Claude++ gives it one more try. When Desktop 2.19675 moves an old layout into a build subdirectory it takes only its own files, leaving the stashed official binary behind in the version directory: the daemon hands it back to the wrapper, or deletes the leftover when the build already holds a freshly downloaded official CLI. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
+A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. The wrapper and the renderer are repaired independently, so one failing never holds up the other; a failed version combination is not retried automatically, but upgrading Claude++ gives it one more try. After the CLI moves into a build subdirectory, the daemon brings the stashed official binary back beside the wrapper, or removes the leftover when the build already holds a freshly downloaded official CLI. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (supported sessions still default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
 
-Starting with Desktop 2.42304, the Fast Mode logic and model menu live in separate renderer files. On Windows, repair validates every target before saving individual `.orig` backups and writing changes; a failed write rolls back the changes from that attempt. Status reports success only when all targets are patched, and older single-file layouts remain supported. To inspect a split layout, pass the `assets/v1` directory to the probe and a separate output directory as the second argument, then run `node --check` on each exported `.mjs` file.
+Fast Mode supports both a single renderer file and layouts with the main logic and model menu spread across multiple files. On Windows, repair validates every target before saving individual `.orig` backups and writing changes; a failed write rolls back the changes from that attempt. Status reports success only when all targets are patched. To inspect a split layout, pass the `assets/v1` directory to the probe and a separate output directory as the second argument, then run `node --check` on each exported `.mjs` file.
 
 ### Native Computer Use (Windows)
 
-Supports the Claude Desktop 3.1623.4 MSIX package on Windows x64. Before installation, Claude++ verifies the native module, official executable signature, main-process content, and ASAR integrity baseline. Installation uses Desktop's existing switches, consent flow, and native executor; computer-control permission is never granted automatically.
+Targets the Claude Desktop MSIX package on Windows x64; the tab's detection result determines whether installation is available. Before installation, Claude++ verifies the native module, official executable signature, main-process content, and ASAR integrity baseline. Installation uses Desktop's existing switches, consent flow, and native executor; computer-control permission is never granted automatically.
 
 Quit Desktop entirely, rescan on the Computer Use tab, and confirm the detected version. Select Install native entry and approve the administrator prompt. Reopen Desktop, enable Computer use in settings, and complete its native consent flow. Restore official also requires Desktop to be closed.
 
@@ -282,9 +270,9 @@ For development validation, run `cargo run --example computer_use_probe -- statu
 
 ### Native Computer Use (macOS)
 
-Currently supports Claude Desktop 3.1623.1 and 3.1623.4. The Computer Use tab provides status detection, signing-identity selection, installation, and restoration. The configuration function is located by content across main-process JavaScript files, without depending on a content-hashed chunk filename. Both the original entry hash and patched output hash must match the compatibility record. Unknown versions, ambiguous matches, and changed content are rejected rather than assumed compatible.
+The Computer Use tab provides status detection, signing-identity selection, installation, and restoration; its detection result determines whether installation is available. The configuration function is located by content across main-process JavaScript files, without depending on a content-hashed chunk filename. Both the original entry hash and patched output hash must match the compatibility record. Unknown versions, ambiguous matches, and changed content are rejected rather than assumed compatible.
 
-Installation supplies the native Computer Use configuration for API-key deployments, with the background-mode entry point also available on 3.1623.4. The CLI binary is unchanged and no separate MCP server is introduced. Enable Computer use in Claude settings and complete the consent flow. Background works inside allowed apps and asks before taking over the screen; Full control takes over the screen, mouse, and keyboard by default. HIPAA, session authorization, and denied-app checks remain intact.
+Installation supplies the native Computer Use configuration for API-key deployments, including the background-mode entry point in compatible apps. The CLI binary is unchanged and no separate MCP server is introduced. Enable Computer use in Claude settings and complete the consent flow. Background works inside allowed apps and asks before taking over the screen; Full control takes over the screen, mouse, and keyboard by default. HIPAA, session authorization, and denied-app checks remain intact.
 
 Older managed patches show an upgrade action: verify the backup, restore the official bundle, then install the new patch. An interrupted upgrade can be restored and retried.
 
@@ -303,7 +291,7 @@ npm install
 npx tauri build   # Windows: bundle/nsis installer + claude-plus-plus.exe; macOS: bundle/macos/Claude++.app + bundle/dmg
 ```
 
-Requires Node.js 18+, Rust stable, Tauri 2.
+Requires Node.js, Rust stable, and Tauri. Dependency details are maintained in the repository manifests and lockfiles.
 
 ```bash
 cd src-tauri && cargo test    # unit tests (junction / migration fields / tombstone flow / idempotency)
