@@ -105,6 +105,16 @@ Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守�
 
 Desktop 2.42304 起，Fast Mode 主逻辑与模型菜单分布在两个 renderer 文件中。Windows 修复会先校验全部目标，再分别保存 `.orig` 并写入；写入失败时回滚本次改动。状态卡只有在所有目标均已打补丁时才显示成功，旧版单文件布局仍受支持。排查拆分布局时，将探测参数换成 `assets/v1` 目录，并将第二个参数设为独立输出目录；逐个对导出的 `.mjs` 执行 `node --check`。
 
+### 原生 Computer Use（Windows）
+
+支持 Windows x64 的 Claude Desktop 3.1623.4。扫描会核对原生模块、官方 exe 签名、主进程入口内容和 ASAR 完整性基准；安装沿用 Desktop 自身的开关、授权和原生执行器，不自动授予电脑控制权限。
+
+安装与还原需要一次 UAC 确认。Claude++ 先备份 `claude.exe` 与 `resources/app.asar`，在副本里修改功能配置、重算 ASAR 条目和头部哈希，再同步 exe 的 `INTEGRITY / ELECTRONASAR` 资源。ASAR 校验 fuse 保持开启。修改后的 exe 不再具有有效的官方 Authenticode 签名；「还原官方」会恢复原始文件和签名。
+
+记录与备份存于 `<配置目录>/com.claudeplusplus.manager/computer-use/windows/`。两个文件的替换有操作锁和恢复记录；中途失败可以还原，发现 Desktop 被外部更新或修改则拒绝覆盖。Fast Mode 的 renderer 文件、会话、API 配置与授权设置不在本次修改范围内。
+
+探测当前安装使用 `cargo run --example computer_use_probe -- status`。副本验收使用 `status|install|restore COPY/app STORE`，Windows 不需要签名身份参数；探针拒绝直接修改系统安装目录。
+
 ### 原生 Computer Use（macOS）
 
 「Computer Use」页提供检测、签名身份选择、安装和还原。在主进程 JS 文件中按配置函数内容定位唯一入口，不依赖带哈希的 chunk 文件名；再核对入口哈希与补丁输出哈希。未知版本、重复命中或内容变化均拒绝安装，不把相似代码当作已兼容。
@@ -242,6 +252,16 @@ Trust `usage.speed` in the transcript (the verification card at the bottom of th
 A Desktop update replaces the CLI version directory (and on Windows the renderer too). The daemon watches the CLI directory and periodically checks the Desktop version, repairing as soon as something is missing, or waiting for Desktop to exit first. The wrapper and the renderer are repaired independently, so one failing never holds up the other; a failed version combination is not retried automatically, but upgrading Claude++ gives it one more try. When Desktop 2.19675 moves an old layout into a build subdirectory it takes only its own files, leaving the stashed official binary behind in the version directory: the daemon hands it back to the wrapper, or deletes the leftover when the build already holds a freshly downloaded official CLI. When an update merely renames minified symbols the anchors adapt on their own. Only a real structural change to the renderer makes the tab list unmatched anchors: the wrapper still works (Opus sessions default to fast, just without the toggle) and `ANCHORS` in `src-tauri/src/fastmode.rs` needs re-adapting with the same semantics; to check a given renderer first, run `cd src-tauri && cargo run --example fastmode_patch_probe -- "<renderer>.js"`, which lists per-anchor hit counts before and after the rewrite; pass an output path such as `out.mjs` as a second argument to write the rewritten bundle and confirm it still parses with `node --check out.mjs`. "Restore official" undoes everything in one click.
 
 Starting with Desktop 2.42304, the Fast Mode logic and model menu live in separate renderer files. On Windows, repair validates every target before saving individual `.orig` backups and writing changes; a failed write rolls back the changes from that attempt. Status reports success only when all targets are patched, and older single-file layouts remain supported. To inspect a split layout, pass the `assets/v1` directory to the probe and a separate output directory as the second argument, then run `node --check` on each exported `.mjs` file.
+
+### Native Computer Use (Windows)
+
+Supports Claude Desktop 3.1623.4 on Windows x64. Detection verifies the native module, official executable signature, main-process content, and ASAR integrity baseline. Installation uses Desktop's existing switches, consent flow, and native executor; computer-control permission is never granted automatically.
+
+Installation and restoration request UAC elevation. Claude++ backs up `claude.exe` and `resources/app.asar`, patches temporary copies, recalculates ASAR entry and header integrity, and updates the executable's `INTEGRITY / ELECTRONASAR` resource. The ASAR validation fuses remain enabled. The modified executable no longer has a valid official Authenticode signature; Restore official restores the original files and signature.
+
+Records and backups live in `<config dir>/com.claudeplusplus.manager/computer-use/windows/`. File replacement uses an operation lock and recovery journal. Interrupted operations can be restored; externally updated or modified Desktop files are never overwritten. Fast Mode renderer files, conversations, API configuration, and consent settings are outside this change.
+
+Inspect the installed app with `cargo run --example computer_use_probe -- status`. Test independent copies with `status|install|restore COPY/app STORE`; Windows needs no signing-identity argument. The probe refuses system installation directories.
 
 ### Native Computer Use (macOS)
 

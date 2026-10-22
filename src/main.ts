@@ -1475,7 +1475,7 @@ function renderComputerUse(): string {
   const confirmation = state.computerUseConfirm;
   const header = `<div class="page-head">
     <div><div class="eyebrow">Computer Use</div><h1>使用 Desktop 原生电脑操作</h1>
-      <p class="lead">开放 API key 模式的原生功能入口与后台模式，沿用官方开关、授权卡片和会话 UI；不替换为另一套 MCP 服务。</p></div>
+      <p class="lead">开放 API key 模式的原生电脑操作入口，沿用官方开关、授权卡片和会话 UI；不替换为另一套 MCP 服务。</p></div>
     <div class="head-actions"><button class="btn btn-secondary" data-action="refresh" ${state.busy || state.computerUseScanning ? "disabled" : ""}>重新扫描</button></div>
   </div>`;
   if (!cu) {
@@ -1505,7 +1505,7 @@ function renderComputerUse(): string {
         </select>
         <p>需要本机钥匙串中的有效代码签名证书及私钥；已验证开发签名可行，不支持 ad-hoc 签名。Claude++ 不导出私钥。</p>
         <p>安装会重签整个应用，可能需要重新登录或重新授予系统权限。</p>` : ""}
-        <p>先保存原包，再在副本处理并校验，最后替换；会话和 API 配置不作修改。</p>
+        <p>${requiresSigning ? "先保存原包，再在副本处理并校验，最后替换" : "备份此次涉及的 exe 与 ASAR，在副本校验后替换；需要管理员确认。exe 修改后原官方签名失效，还原时恢复原始文件和签名"}；会话和 API 配置不作修改。</p>
         <div class="computer-use-actions">
           <button class="btn btn-primary" data-action="cu-install" ${installDisabled ? "disabled" : ""}>${cu.state === "upgradeAvailable" ? "升级原生入口与后台模式" : "安装原生入口"}</button>
           <button class="btn btn-secondary" data-action="cu-restore" ${restoreDisabled ? "disabled" : ""}>还原官方</button>
@@ -1513,7 +1513,7 @@ function renderComputerUse(): string {
       </div>
     </section>
     ${confirmation ? `<section class="card computer-use-confirm" role="region" aria-label="确认 Computer Use 操作">
-      <div class="card-title">${confirmation === "install" ? requiresSigning ? "确认备份并重签 Claude Desktop？" : "确认备份并修改 Claude Desktop？" : "确认还原完整官方应用？"}</div>
+      <div class="card-title">${confirmation === "install" ? requiresSigning ? "确认备份并重签 Claude Desktop？" : "确认备份并修改 Claude Desktop？" : requiresSigning ? "确认还原完整官方应用？" : "确认还原此次修改的官方文件？"}</div>
       <div class="computer-use-details"><p>${confirmation === "install"
         ? `目标：${esc(cu.appPath)}。${requiresSigning ? `签名身份：${esc(cu.identities.find((i) => i.fingerprint === state.signingIdentity)?.name ?? "未选择")}。` : ""}${cu.state === "upgradeAvailable" ? "升级会先还原已验证的官方备份，再安装新版；中途失败可还原后重试。" : ""}安装不等于授予电脑控制权限，原生开关仍由你自行打开。`
         : "仅还原本次安装记录对应的应用；保留会话、配置和用户授权设置。如果 Desktop 已被更新或修改，将拒绝覆盖。"}</p>

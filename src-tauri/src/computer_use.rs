@@ -1,11 +1,16 @@
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(any(test, windows, target_os = "macos"))]
 mod asar;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(test, windows))]
+mod pe;
 #[cfg(any(test, target_os = "macos"))]
 mod renderer;
+#[cfg(windows)]
+mod windows;
 
-use anyhow::{bail, Result};
+#[cfg(any(test, not(windows)))]
+use anyhow::Result;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -33,8 +38,12 @@ pub struct Status {
 
 #[cfg(target_os = "macos")]
 pub use macos::{install, install_copy, restore, restore_copy, status, status_copy};
+#[cfg(windows)]
+pub use windows::{
+    elevated_entry, install, install_copy, restore, restore_copy, status, status_copy,
+};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn status() -> Result<Status> {
     Ok(Status {
         supported: false,
@@ -42,7 +51,7 @@ pub fn status() -> Result<Status> {
         app_path: String::new(),
         desktop_version: None,
         state: "unsupported".into(),
-        message: "原生 Computer Use 集成目前仅支持 macOS".into(),
+        message: "原生 Computer Use 集成目前仅支持 Windows 和 macOS".into(),
         identities: Vec::new(),
         backup_path: None,
         running: false,
@@ -51,14 +60,14 @@ pub fn status() -> Result<Status> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn install(_identity: &str) -> Result<String> {
-    bail!("原生 Computer Use 集成目前仅支持 macOS")
+    anyhow::bail!("原生 Computer Use 集成目前仅支持 Windows 和 macOS")
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn restore() -> Result<String> {
-    bail!("原生 Computer Use 集成目前仅支持 macOS")
+    anyhow::bail!("原生 Computer Use 集成目前仅支持 Windows 和 macOS")
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -82,7 +91,7 @@ fn parse_identities(text: &str) -> Vec<SigningIdentity> {
 #[cfg(any(test, target_os = "macos"))]
 fn validate_identity(identity: &str, identities: &[SigningIdentity]) -> Result<()> {
     if !identities.iter().any(|i| i.fingerprint == identity) {
-        bail!("请选择钥匙串中有效的代码签名身份；不支持 ad-hoc 签名")
+        anyhow::bail!("请选择钥匙串中有效的代码签名身份；不支持 ad-hoc 签名")
     }
     Ok(())
 }

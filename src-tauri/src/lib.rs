@@ -432,6 +432,10 @@ fn show_main_window(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
+    #[cfg(windows)]
+    if let Some(code) = computer_use::elevated_entry() {
+        std::process::exit(code);
+    }
     // macOS：被 Desktop 顺着软链当 bundled CLI 起起来，合并 fastMode 后转发，绝不初始化 GUI
     if let Some(argv0) = fastmode::wrapper_argv0() {
         std::process::exit(fastmode::run_wrapper(&argv0));

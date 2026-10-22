@@ -6,6 +6,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, target_os = "macos"))]
 struct Build {
     version: &'static str,
     original_hash: &'static str,
@@ -13,6 +14,7 @@ struct Build {
     legacy_hash: Option<&'static str>,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 const BUILDS: &[Build] = &[
     Build {
         version: "3.1623.1",
@@ -27,21 +29,39 @@ const BUILDS: &[Build] = &[
         legacy_hash: Some("4e50ee6e3bb171c26b8bd4cbe77d9bd1dda4be5c8880faaef5ce65dc344701ba"),
     },
 ];
+#[cfg(any(test, target_os = "macos"))]
 const BEFORE: &str = "function Fen(e){return e.selfHostedSessions?e.builtinBrowserEnabled?Pen:Nen:e.builtinBrowserEnabled?Aen:Den}";
+#[cfg(any(test, target_os = "macos"))]
 const AFTER: &str = "function Fen(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?Pen:Nen:e.builtinBrowserEnabled?Aen:Den;return{...t,1291166712:Ten({enabled:!0})}}";
+#[cfg(any(test, target_os = "macos"))]
 const BACKGROUND_AFTER: &str = "function Fen(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?Pen:Nen:e.builtinBrowserEnabled?Aen:Den;return{...t,1291166712:Ten({enabled:!0,appScopedEnabled:!0}),1346958739:Ten({major:27,minor:9999})}}";
+#[cfg(any(test, target_os = "macos"))]
 const MODE_BEFORE: &str = "function YU(e={}){let t=e.requireFreshGrowthBook??!0;if(process.platform!==\"darwin\")return!1;let n=_O();return n.major<15||S_r(n,x_r())||t&&!GU()?!1:wb(WU,\"appScopedEnabled\",!1,O())}";
+#[cfg(any(test, target_os = "macos"))]
 const MODE_AFTER: &str = "function YU(e={}){let t=e.requireFreshGrowthBook??!0;if(process.platform!==\"darwin\"&&process.platform!==\"win32\")return!1;if(process.platform===\"darwin\"){let n=_O();if(n.major<15||S_r(n,x_r()))return!1}return t&&!GU()?!1:wb(WU,\"appScopedEnabled\",!1,O())}";
 const MAX_HEADER: u64 = 32 * 1024 * 1024;
 const MAX_ENTRY: u64 = 64 * 1024 * 1024;
 
+#[cfg(any(test, windows))]
+const WINDOWS_VERSION: &str = "3.1623.4";
+#[cfg(any(test, windows))]
+const WINDOWS_ORIGINAL: &str = "468cf72f123798b84e748c7cbb572f81ee9eafb8bc3023d4cc343101aecec001";
+#[cfg(any(test, windows))]
+const WINDOWS_PATCHED: &str = "7c7093571059ef464fd5f295c0559d007edf59860da54a5f945e2c5bbbfb946e";
+#[cfg(any(test, windows))]
+const WINDOWS_BEFORE: &str = "function Atn(e){return e.selfHostedSessions?e.builtinBrowserEnabled?ktn:Otn:e.builtinBrowserEnabled?Ttn:Stn}";
+#[cfg(any(test, windows))]
+const WINDOWS_AFTER: &str = "function Atn(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?ktn:Otn:e.builtinBrowserEnabled?Ttn:Stn;return{...t,1291166712:btn({enabled:!0}),40173473:btn(!0)}}";
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum PatchState {
     Pristine,
+    #[cfg(any(test, target_os = "macos"))]
     Legacy,
     Patched,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn build(version: &str) -> Result<&'static Build> {
     BUILDS
         .iter()
@@ -49,10 +69,12 @@ fn build(version: &str) -> Result<&'static Build> {
         .context("当前 Desktop 尚未适配；请更新 Claude++ 后重新扫描，不会猜测锚点")
 }
 
+#[cfg(target_os = "macos")]
 pub fn check_version(version: &str) -> Result<()> {
     build(version).map(|_| ())
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn classify_hash(hash: &str, build: &Build) -> Result<PatchState> {
     if hash == build.original_hash {
         Ok(PatchState::Pristine)
@@ -158,7 +180,12 @@ impl Archive {
         Ok(source)
     }
 
+    #[cfg(any(test, target_os = "macos"))]
     fn locate(&mut self) -> Result<(String, Vec<u8>)> {
+        self.locate_anchors(&[BEFORE, AFTER, BACKGROUND_AFTER])
+    }
+
+    fn locate_anchors(&mut self, anchors: &[&str]) -> Result<(String, Vec<u8>)> {
         let names: Vec<String> = self
             .header
             .pointer("/files/.vite/files/build/files")
@@ -171,7 +198,6 @@ impl Archive {
         let mut found = None;
         for name in names {
             let source = self.source(&[".vite", "build", &name])?;
-            let anchors = [BEFORE, AFTER, BACKGROUND_AFTER];
             if !anchors
                 .iter()
                 .any(|anchor| memchr::memmem::find(&source, anchor.as_bytes()).is_some())
@@ -217,6 +243,7 @@ fn verify_integrity(value: &Value, source: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub fn inspect(path: &Path, version: &str) -> Result<(PatchState, String)> {
     let build = build(version)?;
     let mut archive = Archive::open(path)?;
@@ -225,6 +252,7 @@ pub fn inspect(path: &Path, version: &str) -> Result<(PatchState, String)> {
     Ok((state, hash(&archive.raw_header)))
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn patch_source(source: &str, background: bool) -> Result<String> {
     ensure!(
         source.matches(BEFORE).count() == 1
@@ -245,6 +273,7 @@ fn patch_source(source: &str, background: bool) -> Result<String> {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub fn patch(path: &Path, version: &str) -> Result<String> {
     let build = build(version)?;
     let mut archive = Archive::open(path)?;
@@ -256,7 +285,11 @@ pub fn patch(path: &Path, version: &str) -> Result<String> {
     let modified =
         patch_source(std::str::from_utf8(&source)?, build.legacy_hash.is_some())?.into_bytes();
     ensure!(hash(&modified) == build.patched_hash, "补丁输出哈希不匹配");
-    let entry = entry_mut(&mut archive.header, &[".vite", "build", &name])?;
+    replace_entry(path, archive, &name, &modified)
+}
+
+fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8]) -> Result<String> {
+    let entry = entry_mut(&mut archive.header, &[".vite", "build", name])?;
     let block_size = entry["integrity"]["blockSize"]
         .as_u64()
         .context("缺少 ASAR blockSize")?;
@@ -291,6 +324,39 @@ pub fn patch(path: &Path, version: &str) -> Result<String> {
     }
     result?;
     Ok(hash(&header))
+}
+
+#[cfg(any(test, windows))]
+pub fn inspect_windows(path: &Path, version: &str) -> Result<(PatchState, String)> {
+    ensure!(
+        version == WINDOWS_VERSION,
+        "Windows Desktop {version} 尚未适配"
+    );
+    let mut archive = Archive::open(path)?;
+    let (_, source) = archive.locate_anchors(&[WINDOWS_BEFORE, WINDOWS_AFTER])?;
+    let state = match hash(&source).as_str() {
+        WINDOWS_ORIGINAL => PatchState::Pristine,
+        WINDOWS_PATCHED => PatchState::Patched,
+        _ => bail!("Windows 主进程入口内容与 {version} 的适配记录不符"),
+    };
+    Ok((state, hash(&archive.raw_header)))
+}
+
+#[cfg(any(test, windows))]
+pub fn patch_windows(path: &Path, version: &str) -> Result<String> {
+    ensure!(
+        inspect_windows(path, version)?.0 == PatchState::Pristine,
+        "需要已验证的官方 Windows 入口"
+    );
+    let mut archive = Archive::open(path)?;
+    let (name, source) = archive.locate_anchors(&[WINDOWS_BEFORE])?;
+    let source = std::str::from_utf8(&source)?;
+    let modified = source.replacen(WINDOWS_BEFORE, WINDOWS_AFTER, 1);
+    ensure!(
+        hash(modified.as_bytes()) == WINDOWS_PATCHED,
+        "Windows 补丁输出哈希不匹配"
+    );
+    replace_entry(path, archive, &name, modified.as_bytes())
 }
 
 #[cfg(test)]
@@ -504,5 +570,18 @@ mod tests {
         assert!(patch(&path, "3.1623.4").is_err());
         assert!(patch(&path, "3.1623.5").is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn windows_recipe_only_changes_local_feature_values() {
+        assert!(!WINDOWS_AFTER.contains("appScopedEnabled"));
+        assert!(!WINDOWS_AFTER.contains("chicagoEnabled"));
+        assert!(WINDOWS_AFTER.contains("40173473:btn(!0)"));
+        let (_dir, path) = fixture(&[("index.chunk-win.js", WINDOWS_BEFORE)]);
+        let original = fs::read(&path).unwrap();
+        assert!(inspect_windows(&path, WINDOWS_VERSION).is_err());
+        assert!(patch_windows(&path, WINDOWS_VERSION).is_err());
+        assert!(patch_windows(&path, "3.1623.5").is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 }
