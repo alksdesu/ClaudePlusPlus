@@ -78,6 +78,7 @@ fn build(version: &str) -> Result<&'static Build> {
 
 #[cfg(target_os = "macos")]
 pub fn check_version(version: &str) -> Result<()> {
+    if super::macos_recipe::get(version).is_some() { return Ok(()); }
     build(version).map(|_| ())
 }
 
@@ -273,6 +274,12 @@ fn verify_integrity(value: &Value, source: &[u8]) -> Result<()> {
 
 #[cfg(any(test, target_os = "macos"))]
 pub fn inspect(path: &Path, version: &str) -> Result<(PatchState, String)> {
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        let mut archive = Archive::open(path)?;
+        let (_, source) = archive.locate_anchors(&[&recipe.main.anchor])?;
+        let mask = recipe.main.mask(std::str::from_utf8(&source)?)?;
+        return Ok((if mask == 0 { PatchState::Pristine } else { PatchState::Patched }, hash(&archive.raw_header)));
+    }
     let build = build(version)?;
     let mut archive = Archive::open(path)?;
     let (_, source) = archive.locate()?;
@@ -303,6 +310,9 @@ fn patch_source(source: &str, background: bool) -> Result<String> {
 
 #[cfg(any(test, target_os = "macos"))]
 pub fn patch(path: &Path, version: &str) -> Result<String> {
+    if super::macos_recipe::get(version).is_some() {
+        return patch_features(path, version, super::native::Selection { computer_use: true, ..Default::default() });
+    }
     let build = build(version)?;
     let mut archive = Archive::open(path)?;
     let (name, source) = archive.locate()?;
@@ -402,7 +412,10 @@ fn profile_mask(hash: &str) -> Option<u8> {
 }
 
 #[cfg(any(test, target_os = "macos"))]
-pub(super) fn fast_controls_current(path: &Path) -> Result<bool> {
+pub(super) fn fast_controls_current(path: &Path, version: &str) -> Result<bool> {
+    if super::macos_recipe::get(version).is_some() {
+        return Ok(active_selection(path, version)?.fast_mode_status);
+    }
     let mut archive = Archive::open(path)?;
     let (_, bytes) = archive.locate()?;
     let digest = hash(&bytes);
@@ -412,6 +425,15 @@ pub(super) fn fast_controls_current(path: &Path) -> Result<bool> {
 
 #[cfg(any(test, target_os = "macos"))]
 pub fn active_selection(path: &Path, version: &str) -> Result<super::native::Selection> {
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        let mut archive = Archive::open(path)?;
+        let (_, source) = archive.locate_anchors(&[&recipe.main.anchor])?;
+        let mask = recipe.main.mask(std::str::from_utf8(&source)?)?;
+        let anchor = recipe.prewarm.anchor.as_deref().context("缺少预热适配入口")?;
+        let (_, prewarm) = archive.locate_anchors(&[anchor])?;
+        recipe.prewarm.verify(std::str::from_utf8(&prewarm)?, mask & 4 != 0)?;
+        return Ok(super::native::Selection { computer_use: mask & 1 != 0, simulators: mask & 2 != 0, prewarm: mask & 4 != 0, fast_mode_status: mask & 8 != 0, chinese: false });
+    }
     let mut archive = Archive::open(path)?;
     let (_, bytes) = archive.locate()?;
     let digest = hash(&bytes);
@@ -491,6 +513,21 @@ pub fn patch_features(
     selection: super::native::Selection,
 ) -> Result<String> {
     super::native::check_selection(version, selection)?;
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        ensure!(active_selection(path, version)?.is_empty(), "必须从官方基线组合原生补丁");
+        let mut archive = Archive::open(path)?;
+        let (name, source) = archive.locate_anchors(&[&recipe.main.anchor])?;
+        let modified = recipe.main.patch(std::str::from_utf8(&source)?, selection.mask())?;
+        if selection.mask() != 0 { replace_entry(path, archive, &name, modified.as_bytes())?; }
+        if selection.prewarm {
+            let mut archive = Archive::open(path)?;
+            let anchor = recipe.prewarm.anchor.as_deref().context("缺少预热适配入口")?;
+            let (name, source) = archive.locate_anchors(&[anchor])?;
+            let modified = recipe.prewarm.patch(std::str::from_utf8(&source)?)?;
+            replace_entry(path, archive, &name, modified.as_bytes())?;
+        }
+        return Ok(hash(&Archive::open(path)?.raw_header));
+    }
     if version != "3.1623.4" {
         return if selection.computer_use {
             patch(path, version)
@@ -773,6 +810,31 @@ mod tests {
         assert!(patch(&path, "3.1623.4").is_err());
         assert!(patch(&path, "3.1623.5").is_err());
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    #[ignore = "需要官方 Desktop 副本"]
+    fn verified_macos_combinations_match_all_profiles() {
+        let app = std::env::var_os("CLAUDEPP_OFFICIAL_FIXTURE").expect("缺少官方测试副本路径");
+        let original = std::path::PathBuf::from(app).join("Contents/Resources/app.asar");
+        let version = "3.6556.2";
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.asar");
+        for mask in 0..16u8 {
+            fs::copy(&original, &path).unwrap();
+            let selected = super::super::native::Selection { computer_use: mask & 1 != 0, simulators: mask & 2 != 0, prewarm: mask & 4 != 0, fast_mode_status: mask & 8 != 0, chinese: false };
+            let header = patch_features(&path, version, selected).unwrap();
+            assert_eq!(active_selection(&path, version).unwrap(), selected);
+            assert_eq!(inspect(&path, version).unwrap().1, header);
+            if mask != 0 { assert!(patch_features(&path, version, selected).is_err()); }
+        }
+        let mut archive = Archive::open(&path).unwrap();
+        let recipe = super::super::macos_recipe::get(version).unwrap();
+        let (name, mut source) = archive.locate_anchors(&[&recipe.main.anchor]).unwrap();
+        source.push(b' ');
+        replace_entry(&path, archive, &name, &source).unwrap();
+        assert!(active_selection(&path, version).is_err());
+        assert!(inspect(&path, version).is_err());
     }
 
     #[test]

@@ -2406,8 +2406,8 @@ mod imp {
             state: RendererState::Unsupported,
             missing_anchors: Vec::new(),
         };
-        if version.as_deref() == Some("3.1623.4") {
-            match crate::computer_use::fast_status::installed(Path::new(DESKTOP_APP), "3.1623.4") {
+        if let Some(version) = version.as_deref().filter(|v| crate::computer_use::native::supports_extended(v)) {
+            match crate::computer_use::fast_status::installed(Path::new(DESKTOP_APP), version) {
                 Ok(true) => renderer.state = RendererState::Patched,
                 Ok(false) => renderer.state = RendererState::Pristine,
                 Err(error) => {

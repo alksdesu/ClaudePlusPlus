@@ -332,6 +332,18 @@ Unofficial tool. Relies on Claude Desktop's internal storage layout; future vers
 AGPL-3.0-only
 
 
+### macOS 原生增强适配
+
+主进程、后台模式、中文、模拟器、预热和 Fast 原生状态按同一份已验证适配记录检查。记录包含原始内容、功能组合和输出哈希；chunk 改名但内容未变时按内容发现，未知内容仍停止修改。旧版适配与独立备份保留。
+
+原生权限、管理员策略和 Fast 的模型／服务端资格检查不变。更新维护只恢复原先选择且已验证支持的功能，不会自动打开新增选项。
+
+### macOS native compatibility
+
+Main-process patches, background controls, Chinese catalogs, simulators, prewarming, and native Fast state share verified build metadata. Original and output hashes cover every feature combination; content-based renderer discovery tolerates renamed chunks, while unknown content remains untouched. Existing build support and independent backups are retained.
+
+System permissions, administrator policies, and native Fast eligibility checks remain intact. Update maintenance restores previously selected compatible features without enabling newly added options.
+
 ### macOS 自动更新维护
 
 仅 macOS 的重签增强需要此流程；Windows 不需要，继续使用官方更新。可在“功能增强”中开启“自动维护 Desktop 更新”，Claude++ 会保存当前功能组合与签名身份，并在托盘中维护更新状态。

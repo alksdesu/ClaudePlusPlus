@@ -27,13 +27,19 @@ fn installed_hashes(state: &str, status: &str, native: bool) -> Result<bool> {
 }
 
 pub fn installed(app: &Path, version: &str) -> Result<bool> {
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        let selected = asar::active_selection(&app.join("Contents/Resources/app.asar"), version)?.fast_mode_status;
+        recipe.fast_widget.inspect(app, false)?;
+        recipe.fast_state.inspect(app, selected)?;
+        return Ok(selected);
+    }
     if version != "3.1623.4" {
         return Ok(false);
     }
     let (_, source) = locate_source(app, BEFORE, AFTER, "Fast Mode 状态")?;
     let (_, status) = locate_source(app, STATUS_BEFORE, STATUS_LEGACY, "Fast Mode 原生组件")?;
     let native = asar::active_selection(&app.join("Contents/Resources/app.asar"), version)?.fast_mode_status;
-    if native && !asar::fast_controls_current(&app.join("Contents/Resources/app.asar"))? {
+    if native && !asar::fast_controls_current(&app.join("Contents/Resources/app.asar"), version)? {
         ensure!(hash(source.as_bytes()) == MODIFIED && hash(status.as_bytes()) == STATUS_ORIGINAL, "旧版 Fast Mode 原生映射不完整");
         return Ok(false);
     }
@@ -48,7 +54,11 @@ fn patch_source(source: &str) -> Result<String> {
     Ok(modified)
 }
 
-pub fn patch(app: &Path) -> Result<()> {
+pub fn patch(app: &Path, version: &str) -> Result<()> {
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        recipe.fast_widget.inspect(app, false)?;
+        return recipe.fast_state.apply(app);
+    }
     let (path, source) = locate_source(app, BEFORE, AFTER, "Fast Mode 状态")?;
     let (_, status) = locate_source(app, STATUS_BEFORE, STATUS_LEGACY, "Fast Mode 原生组件")?;
     ensure!(hash(status.as_bytes()) == STATUS_ORIGINAL, "需要未修改的 Fast Mode 原生组件");

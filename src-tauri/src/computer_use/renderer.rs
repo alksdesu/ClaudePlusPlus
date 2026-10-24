@@ -49,6 +49,9 @@ pub(super) fn locate_source(app: &Path, before: &str, after: &str, label: &str) 
 }
 
 pub fn inspect(app: &Path, version: &str, state: &PatchState) -> Result<()> {
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        return recipe.background.inspect(app, *state == PatchState::Patched);
+    }
     if version != "3.1623.4" {
         return Ok(());
     }
@@ -83,6 +86,9 @@ fn patch_source(source: &str) -> Result<String> {
 }
 
 pub fn patch(app: &Path, version: &str) -> Result<()> {
+    if let Some(recipe) = super::macos_recipe::get(version) {
+        return recipe.background.apply(app);
+    }
     if version != "3.1623.4" {
         return Ok(());
     }

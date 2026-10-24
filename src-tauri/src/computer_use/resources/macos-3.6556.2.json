@@ -1,0 +1,121 @@
+{
+  "version": "3.6556.2",
+  "main": {
+    "anchor": "function rsn(e){",
+    "config": "function rsn(e){return e.selfHostedSessions?e.builtinBrowserEnabled?nsn:tsn:e.builtinBrowserEnabled?Qon:Yon}",
+    "prefix": "function rsn(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?nsn:tsn:e.builtinBrowserEnabled?Qon:Yon;return{...t,",
+    "fields": [
+      {
+        "mask": 1,
+        "source": "1291166712:qon({enabled:!0,appScopedEnabled:!0}),1346958739:qon({major:27,minor:9999})"
+      },
+      {
+        "mask": 2,
+        "source": "3577536076:qon(!0),1403324732:qon(!0)"
+      },
+      {
+        "mask": 4,
+        "source": "4237076858:qon(!0)"
+      }
+    ],
+    "fast_changes": [
+      {
+        "before": "for(let t of[\"badge\",\"tooltip\",\"notice\",\"thinking\"])",
+        "after": "for(let t of[\"badge\",\"tooltip\",\"notice\",\"thinking\",\"fast_mode\"])",
+        "count": 1
+      },
+      {
+        "before": "g={id:i.id,name:f,description:h,thinking:aE(t,i.id,e),",
+        "after": "g={id:i.id,name:f,description:h,thinking:aE(t,i.id,e),...t===\"code\"&&s?.fast_mode!==void 0&&{fast_mode:s.fast_mode},",
+        "count": 1
+      },
+      {
+        "before": "claude_code_fast_mode:\"blocked_by_platform\"",
+        "after": "claude_code_fast_mode:t(n&&aT().allowsLocalSpawn)",
+        "count": 1
+      },
+      {
+        "before": "let o=kan(t.thinking);return o&&(n.thinking=o),Object.keys(n).length>0?n:void 0",
+        "after": "let o=kan(t.thinking);return o&&(n.thinking=o),jT(t.fast_mode)&&(n.fast_mode=t.fast_mode),Object.keys(n).length>0?n:void 0",
+        "count": 1
+      }
+    ],
+    "profiles": [
+      "6e898798943b990e6eefa9209c61d977866b7898f681864f02c8cad3bb691ed5",
+      "20540f42ba035b5b0f2db6683ff6cd99d3300697dc7fd4727261a124669d1272",
+      "35d3d812e12069189bfe5476bff14a3e8db928c2c57eeae0cf70714f6e4954dd",
+      "653715e02a4dfb4d38d215436b2e4f9edfac313eb4eb364a6e0cb6669381c810",
+      "a63fdae52f76d74fc1ea6faa933c34f5f51f663c9248ed798ea794afa0262969",
+      "94af4ee21b55b8cae74bf8e7877cd002ce70b0cc407a1b4b571611c8e35b5f2b",
+      "f9e422e26365c3fc7bc394faf1774894fd0c6cc2d39ee06c76205abe9dec49c6",
+      "fdac5edf0b8cf1f0d3d66a0d8592205dbaf7d21ecb59628d7fe6d49e1ef3fd4b",
+      "a21608f8428abb6026c6c359a3055ecd3a0b0502c756b78182bfa61df825f30f",
+      "405c5b555139bc53fb04268c6a00caf0b33382b6bbc3499c5bd3736e30c53d6b",
+      "b2fbd83efb5ff85cff29a3e061f428e000f6399937dccfdb7ad5e770162e528d",
+      "760990d53cbec262446b7566973e37ca3ab0abccffe97292a0a352ab97df1d57",
+      "91a0616a7b1931d67e312a193db6e406d7f328dbdb4866f608cce5c5dd458682",
+      "4d2a16e645e0fdd6dbec04c47cbe09584aad713a829b85479b0979c470df0167",
+      "fcf1203e4852caf255af8e3397fb07707af7da520f9a3735e63bcb7c9cea8e06",
+      "f5af991f31bbcc0d7018b32e51ee0557dde065c3a388250952db95d41642e5a6"
+    ]
+  },
+  "prewarm": {
+    "anchor": "async sparePrewarmSupport(){",
+    "original": "6b27cd273bedd283c531bf6770e4cd6e576bbeece0e0b92dbc0b0705099c3379",
+    "modified": "19a19077dc7e62cebdc5f546da5458119017d5b3e4f1b1eb3678f4c732698c1a",
+    "original_size": 2292816,
+    "modified_size": 2292759,
+    "changes": [
+      {
+        "before": "if(t.set().type!==\"1p\")return{unsupported:\"third_party\"};",
+        "after": "",
+        "count": 1
+      }
+    ]
+  },
+  "background": {
+    "original": "ae470abead4f769bdf0661897b47c2b17f3a7f706c725e97b29f49e6060e57b3",
+    "modified": "ae470abead4f769bdf0661897b47c2b17f3a7f706c725e97b29f49e6060e57b3",
+    "original_size": 311053,
+    "modified_size": 311053,
+    "changes": []
+  },
+  "fast_state": {
+    "original": "111038eb20583df952daa9006c7e9c283f2cd02ccdabdaa2011335313ff4dafd",
+    "modified": "669059acc0245ba6a77cfd5aaead2da0c80ad40273a3f10342f5c336de801a09",
+    "original_size": 163878,
+    "modified_size": 163927,
+    "changes": [
+      {
+        "before": "nt=ge??(E?D===\"on\"||D===\"cooldown\":xe?!1:Ze??(u===null||!t&&K?!1:re??G))",
+        "after": "nt=ge??(E?D===\"on\"||D===\"cooldown\":xe?!1:w&&[\"on\",\"off\",\"cooldown\"].includes(D)?D!==\"off\":Ze??(u===null||!t&&K?!1:re??G))",
+        "count": 1
+      }
+    ]
+  },
+  "fast_widget": {
+    "original": "fe2e064c6172162094dff263210a6e7e8f163b703471fe20e5f5bf0a1a12ccf2",
+    "modified": "fe2e064c6172162094dff263210a6e7e8f163b703471fe20e5f5bf0a1a12ccf2",
+    "original_size": 1118199,
+    "modified_size": 1118199,
+    "changes": []
+  },
+  "language": {
+    "original": "83537e599f2f6720c2a0a245162e44a5c7431e22872a32ed16ea716e65ded08a",
+    "modified": "3e339f619af78987bcaf9fa650f2d571fb668e0edbc4650d3df22a8d75acd2db",
+    "original_size": 403333,
+    "modified_size": 403123,
+    "changes": [
+      {
+        "before": "[\"en-US\",\"de-DE\",\"fr-FR\",\"ko-KR\",\"ja-JP\",\"es-419\",\"es-ES\",\"it-IT\",\"hi-IN\",\"pt-BR\",\"id-ID\"]",
+        "after": "[\"en-US\",\"de-DE\",\"fr-FR\",\"ko-KR\",\"ja-JP\",\"es-419\",\"es-ES\",\"it-IT\",\"hi-IN\",\"pt-BR\",\"id-ID\",\"zh-Hans\",\"zh-Hant\"]",
+        "count": 2
+      },
+      {
+        "before": "function xy(e,t=by){let n=new Map;for(let e of t){let t=e.toLowerCase();n.set(t,e);let r=t.split(\"-\")[0];n.has(r)||n.set(r,e)}for(let t of e)if(t){let e=t.toLowerCase(),r=n.get(e);if(r!==void 0)return r;let i=e.split(\"-\")[0],a=i.length?n.get(i):void 0;if(a!==void 0)return a}return yy}",
+        "after": "function xy(e,t=by){return vy(e,t)}",
+        "count": 1
+      }
+    ]
+  }
+}

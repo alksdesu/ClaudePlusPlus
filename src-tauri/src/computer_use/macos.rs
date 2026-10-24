@@ -384,10 +384,10 @@ fn patch(app: &Path, selected: super::native::Selection) -> Result<()> {
         renderer::patch(app, &version)?;
     }
     if selected.chinese {
-        super::native::language::patch(app)?;
+        super::native::language::patch(app, &version)?;
     }
     if selected.fast_mode_status {
-        super::fast_status::patch(app)?;
+        super::fast_status::patch(app, &version)?;
     }
     let mut info = plist_at(app)?;
     let entry = info

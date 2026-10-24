@@ -1,6 +1,6 @@
 [package]
 name = "claude-plus-plus"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2021"
 license = "AGPL-3.0-only"
 

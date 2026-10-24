@@ -55,7 +55,7 @@ pub fn status() -> Result<NativeStatus> {
     {
         supported.push("computerUse".into());
         #[cfg(target_os = "macos")]
-        if installation.desktop_version.as_deref() == Some("3.1623.4") {
+        if installation.desktop_version.as_deref().is_some_and(supports_extended) {
             supported.extend(["chinese", "simulators", "prewarm", "fastModeStatus"].map(String::from));
         }
     }
@@ -87,9 +87,14 @@ pub fn apply(identity: &str, selection: Selection) -> Result<String> {
 }
 
 #[cfg(any(test, target_os = "macos"))]
+pub(crate) fn supports_extended(version: &str) -> bool {
+    version == "3.1623.4" || super::macos_recipe::get(version).is_some()
+}
+
+#[cfg(any(test, target_os = "macos"))]
 pub(super) fn check_selection(version: &str, selection: Selection) -> Result<()> {
     ensure!(
-        version == "3.1623.4"
+        supports_extended(version)
             || (!selection.chinese && !selection.simulators && !selection.prewarm && !selection.fast_mode_status),
         "当前 Desktop 尚未验证所选原生功能，不会猜测入口"
     );
@@ -157,18 +162,15 @@ pub(super) mod language {
     }
 
     pub fn installed(app: &Path, version: &str) -> Result<bool> {
-        if version != "3.1623.4" {
-            return Ok(false);
-        }
-        let (_, text) = locate(app)?;
-        let digest = hash(text.as_bytes());
-        ensure!(
-            digest == ORIGINAL || digest == MODIFIED,
-            "语言入口内容已变化，拒绝覆盖"
-        );
-        if digest == ORIGINAL {
-            return Ok(false);
-        }
+        let active = if let Some(recipe) = super::super::macos_recipe::get(version) {
+            recipe.language.installed(app)?
+        } else if version == "3.1623.4" {
+            let (_, text) = locate(app)?;
+            let digest = hash(text.as_bytes());
+            ensure!(digest == ORIGINAL || digest == MODIFIED, "语言入口内容已变化，拒绝覆盖");
+            digest == MODIFIED
+        } else { false };
+        if !active { return Ok(false); }
         let root = app.join("Contents/Resources/ion-dist/i18n");
         for (relative, _, expected) in RESOURCES {
             let path = root.join(relative);
@@ -202,9 +204,13 @@ pub(super) mod language {
         Ok(output)
     }
 
-    pub fn patch(app: &Path) -> Result<()> {
-        let (path, text) = locate(app)?;
-        let modified = patch_text(&text)?;
+    pub fn patch(app: &Path, version: &str) -> Result<()> {
+        let recipe = super::super::macos_recipe::get(version);
+        let legacy = if recipe.is_none() {
+            ensure!(version == "3.1623.4", "当前版本没有语言适配记录");
+            let (path, text) = locate(app)?;
+            Some((path, patch_text(&text)?))
+        } else { None };
         let root = app.join("Contents/Resources/ion-dist/i18n");
         for (relative, bytes, expected) in RESOURCES {
             ensure!(hash(bytes) == *expected, "内置官方语言包校验失败");
@@ -221,7 +227,8 @@ pub(super) mod language {
             );
             fs::write(path, bytes)?;
         }
-        fs::write(path, modified)?;
+        if let Some(recipe) = recipe { recipe.language.apply(app)?; }
+        if let Some((path, modified)) = legacy { fs::write(path, modified)?; }
         Ok(())
     }
 

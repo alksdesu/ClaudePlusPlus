@@ -2,6 +2,8 @@
 mod asar;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(any(test, target_os = "macos"))]
+mod macos_recipe;
 pub mod native;
 pub mod updates;
 #[cfg(any(test, windows))]

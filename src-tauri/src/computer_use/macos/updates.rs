@@ -740,6 +740,8 @@ mod tests {
         };
         assert_eq!(compatible_selection("unknown", all), Selection::default());
         assert_eq!(compatible_selection("3.1623.4", all), all);
+        assert_eq!(compatible_selection("3.6556.2", all), all);
+        assert_eq!(compatible_selection("3.6556.3", all), Selection::default());
         let old = compatible_selection("3.1623.1", all);
         assert!(old.computer_use && !old.fast_mode_status);
         assert_eq!(names(remaining(all, old)).len(), 4);
