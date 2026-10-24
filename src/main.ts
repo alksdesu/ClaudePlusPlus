@@ -2,6 +2,7 @@ import { rendererPresentation } from "./ui/fastmode";
 import { state } from "./state";
 import type { PoolKind, PoolCombo, CliSession, DiscoveryReport, UnifyPlan, DesktopSession, RunningDesktop, RegisterReport, UnregisterReport, DeleteReport, WrapperState, FastModeSettings, FastModeStatus, FastModeReport, ComputerUseStatus, WatchStatus, TombstoneInfo, CodexStatus, CodexSession, CodexMigrateReport, CodexFilter, SessionPreview, PurgeOutcome, AppState } from "./state";
 import { esc } from "./ui/text";
+import type { DesktopUpdateStatus } from "./ui/desktop-update";
 import { renderFeatures, selectionChanged, canApply, type FeatureGroup, type FeatureView, type NativeStatus, type NativeSelection } from "./ui/native-features";
 import { renderNavigation, renderOverview, renderBackups, renderDiagnostics } from "./ui/shell";
 import { invoke } from "@tauri-apps/api/core";
@@ -741,7 +742,7 @@ async function initPreview(kind: string, id: string) {
 function watchChip(): string {
   const w = state.watch;
   if (!w) return "";
-  const waiting = w.pendingUnify || w.pendingFastmode;
+  const waiting = w.pendingUnify || w.pendingFastmode || w.pendingDesktopUpdate;
   const stateName = w.paused ? "paused" : waiting ? "pending" : "running";
   const label = w.paused ? "守护已暂停" : waiting ? "等待 Desktop 退出" : "守护运行中";
   return `<div class="watch-chip" data-state="${stateName}" title="${esc(w.lastEvent ?? "")}">
@@ -1288,6 +1289,15 @@ function featureView(): FeatureView {
     busy: state.busy, scanning: state.nativeScanning, error: state.nativeError ?? state.nativeActionError, identity: state.signingIdentity, confirm: state.nativeConfirm, result: state.nativeResult };
 }
 
+async function configureDesktopUpdate(enabled?: boolean) {
+  if (state.busy) return;
+  state.busy = true; state.nativeError = null; render();
+  try {
+    await invoke(enabled === undefined ? "desktop_update_retry" : "desktop_update_set_enabled", enabled === undefined ? undefined : { enabled });
+  } catch (error) { state.nativeError = String(error); }
+  finally { state.busy = false; await refreshNative(); }
+}
+
 async function refreshNative() {
   if (state.nativeScanning) return;
   state.nativeScanning = true;
@@ -1377,6 +1387,8 @@ app.addEventListener("click", (event) => {
     if (action === "win-close") void tauriWindow()?.close();
     if (action === "refresh") void refresh();
     if (action === "native-refresh") void refreshNative();
+    if (action === "desktop-update-toggle") void configureDesktopUpdate((target as HTMLInputElement).checked);
+    if (action === "desktop-update-retry") void configureDesktopUpdate();
     if (action === "native-reset" && state.native) { state.nativeDraft = { ...state.native.selection }; state.nativeDirty = false; state.nativeConfirm = false; render(); }
     if (action === "native-prepare" && canApply(featureView())) { state.nativeConfirm = true; render(); app.querySelector('[data-action="native-confirm"]')?.scrollIntoView({ block: "nearest" }); }
     if (action === "native-cancel") { state.nativeConfirm = false; render(); }
@@ -1543,6 +1555,12 @@ void listen<string>("fastmode-auto", (event) => {
   toast(`Fast Mode 已自动修复：${event.payload}`);
   void refresh();
 });
+for (const eventName of ["desktop-update", "desktop-update-error"]) {
+  void listen<string>(eventName, event => {
+    toast(event.payload, eventName.endsWith("error"));
+    void refreshNative();
+  });
+}
 void listen<string>("fastmode-error", (event) => toast(`Fast Mode 自动修复失败：${event.payload}`, true));
 
 /* Maximize toggles can come from the drag region double-click or Win+arrow,
@@ -1571,6 +1589,14 @@ setInterval(() => {
     state.watch = w;
     if (changed) render();
   });
+  if (state.native?.update?.supported && state.native.update.enabled && !state.busy) {
+    void invoke<DesktopUpdateStatus>("desktop_update_status").then(update => {
+      if (state.native && JSON.stringify(update) !== JSON.stringify(state.native.update)) {
+        state.native.update = update;
+        render();
+      }
+    }).catch(error => { state.nativeError = String(error); render(); });
+  }
 }, 15000);
 }
 

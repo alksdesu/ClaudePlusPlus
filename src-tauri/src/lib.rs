@@ -433,7 +433,7 @@ fn native_features_apply(
     identity: String,
     selection: computer_use::native::Selection,
 ) -> Result<String, String> {
-    computer_use::native::apply(&identity, selection).map_err(|e| format!("{e:#}"))
+    computer_use::updates::manual_change(selection.is_empty(), || computer_use::native::apply(&identity, selection)).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
@@ -443,12 +443,31 @@ fn computer_use_status() -> Result<computer_use::Status, String> {
 
 #[tauri::command(async)]
 fn computer_use_install(identity: String) -> Result<String, String> {
-    computer_use::install(&identity).map_err(|e| format!("{e:#}"))
+    computer_use::updates::manual_change(false, || computer_use::install(&identity)).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command(async)]
 fn computer_use_restore() -> Result<String, String> {
-    computer_use::restore().map_err(|e| format!("{e:#}"))
+    computer_use::updates::manual_change(true, computer_use::restore).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
+fn desktop_update_status() -> computer_use::updates::Status {
+    computer_use::updates::status()
+}
+
+#[tauri::command(async)]
+fn desktop_update_set_enabled(state: tauri::State<'_, Arc<WatchState>>, enabled: bool) -> Result<computer_use::updates::Status, String> {
+    let result = computer_use::updates::set_enabled(enabled).map_err(|e| format!("{e:#}"))?;
+    state.wake();
+    Ok(result)
+}
+
+#[tauri::command(async)]
+fn desktop_update_retry(state: tauri::State<'_, Arc<WatchState>>) -> Result<computer_use::updates::Status, String> {
+    let result = computer_use::updates::retry().map_err(|e| format!("{e:#}"))?;
+    state.wake();
+    Ok(result)
 }
 
 fn show_main_window(app: &tauri::AppHandle) {
@@ -501,6 +520,9 @@ pub fn run() {
             fastmode_set_auto,
             native_features_status,
             native_features_apply,
+            desktop_update_status,
+            desktop_update_set_enabled,
+            desktop_update_retry,
             computer_use_status,
             computer_use_install,
             computer_use_restore,

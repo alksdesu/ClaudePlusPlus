@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{RecursiveMode, Watcher};
 use serde::Serialize;
@@ -22,6 +22,7 @@ pub struct WatchStatus {
     pub paused: bool,
     pub pending_unify: bool,
     pub pending_fastmode: bool,
+    pub pending_desktop_update: bool,
     pub last_event: Option<String>,
 }
 
@@ -29,6 +30,9 @@ pub struct WatchState {
     paused: AtomicBool,
     pending: AtomicBool,
     fastmode_pending: AtomicBool,
+    update_pending: AtomicBool,
+    update_error: Mutex<Option<String>>,
+    wakeup: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     running: AtomicBool,
     last_event: Mutex<Option<String>>,
 }
@@ -39,6 +43,9 @@ impl WatchState {
             paused: AtomicBool::new(false),
             pending: AtomicBool::new(false),
             fastmode_pending: AtomicBool::new(false),
+            update_pending: AtomicBool::new(false),
+            update_error: Mutex::new(None),
+            wakeup: Mutex::new(None),
             running: AtomicBool::new(false),
             last_event: Mutex::new(None),
         }
@@ -50,12 +57,18 @@ impl WatchState {
             paused: self.paused.load(Ordering::Relaxed),
             pending_unify: self.pending.load(Ordering::Relaxed),
             pending_fastmode: self.fastmode_pending.load(Ordering::Relaxed),
+            pending_desktop_update: self.update_pending.load(Ordering::Relaxed),
             last_event: self.last_event.lock().unwrap().clone(),
         }
     }
 
+    pub fn wake(&self) {
+        if let Some(sender) = self.wakeup.lock().unwrap().as_ref() { let _ = sender.send(()); }
+    }
+
     pub fn set_paused(&self, value: bool) {
         self.paused.store(value, Ordering::Relaxed);
+        self.wake();
     }
 
     fn note(&self, message: impl Into<String>) {
@@ -113,27 +126,34 @@ fn has_unmerged_combo() -> bool {
 pub fn spawn(state: Arc<WatchState>, on_event: impl Fn(&str, String) + Send + 'static) {
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
-        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        *state.wakeup.lock().unwrap() = Some(tx.clone());
+        let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             if let Ok(event) = res {
                 use notify::EventKind;
                 if matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
                     let _ = tx.send(());
                 }
             }
-        }) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
+        }).ok();
         let roots = watch_roots();
         for root in &roots {
             // depth-2 combos appear under these roots; recursive keeps it simple
-            let _ = watcher.watch(root, RecursiveMode::Recursive);
+            if let Some(watcher) = &mut watcher { let _ = watcher.watch(root, RecursiveMode::Recursive); }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(home) = dirs::home_dir() {
+            for name in ["Claude", "Claude-3p"] {
+                if let Some(watcher) = &mut watcher { let _ = watcher.watch(&home.join("Library/Logs").join(name), RecursiveMode::NonRecursive); }
+            }
+            if let Some(watcher) = &mut watcher { let _ = watcher.watch(std::path::Path::new("/Applications"), RecursiveMode::NonRecursive); }
         }
         state.running.store(true, Ordering::Relaxed);
+        state.wake();
 
         loop {
             let waiting_desktop = state.pending.load(Ordering::Relaxed)
-                || state.fastmode_pending.load(Ordering::Relaxed);
+                || state.fastmode_pending.load(Ordering::Relaxed)
+                || state.update_pending.load(Ordering::Relaxed);
             let interval = if waiting_desktop { DESKTOP_POLL } else { IDLE_POLL };
             let woke = matches!(
                 rx.recv_timeout(interval),
@@ -143,10 +163,32 @@ pub fn spawn(state: Arc<WatchState>, on_event: impl Fn(&str, String) + Send + 's
                 break;
             }
             // swallow the burst that a directory move generates
-            while rx.recv_timeout(DEBOUNCE).is_ok() {}
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && rx.recv_timeout(DEBOUNCE).is_ok() {}
 
             if state.paused.load(Ordering::Relaxed) {
                 continue;
+            }
+            match crate::computer_use::updates::tick() {
+                Ok(result) => {
+                    state.update_pending.store(result.pending, Ordering::Relaxed);
+                    *state.update_error.lock().unwrap() = None;
+                    if result.changed {
+                        state.note(result.message.clone());
+                        on_event(if result.failed { "desktop-update-error" } else { "desktop-update" }, result.message);
+                    }
+                    if result.pending { continue; }
+                }
+                Err(error) => {
+                    let message = format!("更新维护暂缓：{error:#}");
+                    let mut last = state.update_error.lock().unwrap();
+                    if last.as_deref() != Some(&message) {
+                        state.note(message.clone());
+                        on_event("desktop-update-error", message.clone());
+                        *last = Some(message);
+                    }
+                    continue;
+                }
             }
             match fastmode::auto_repair() {
                 RepairOutcome::Skipped => {}

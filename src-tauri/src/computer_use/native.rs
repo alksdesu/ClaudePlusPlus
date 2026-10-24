@@ -32,6 +32,7 @@ pub struct NativeStatus {
     pub installation: Status,
     pub selection: Selection,
     pub supported_features: Vec<String>,
+    pub update: super::updates::Status,
 }
 
 pub fn status() -> Result<NativeStatus> {
@@ -62,6 +63,7 @@ pub fn status() -> Result<NativeStatus> {
         installation,
         selection,
         supported_features: supported,
+        update: super::updates::status(),
     })
 }
 

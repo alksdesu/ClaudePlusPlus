@@ -1,5 +1,6 @@
 import type { ComputerUseStatus } from "../state";
 import { esc } from "./text";
+import { renderDesktopUpdate, type DesktopUpdateStatus } from "./desktop-update";
 
 export interface NativeSelection {
   computerUse: boolean;
@@ -12,6 +13,7 @@ export interface NativeStatus {
   installation: ComputerUseStatus;
   selection: NativeSelection;
   supportedFeatures: string[];
+  update?: DesktopUpdateStatus;
 }
 export const emptySelection = (): NativeSelection => ({ computerUse: false, chinese: false, simulators: false, prewarm: false, fastModeStatus: false });
 export type FeatureGroup = "all" | "interaction" | "appearance" | "workflow";
@@ -67,6 +69,7 @@ export function canApply(v: FeatureView): boolean {
   if (!s || v.busy || v.scanning || s.installation.running) return false;
   if ((!selectionChanged(v.draft, s.selection) && s.installation.state !== "upgradeAvailable") || !selectionSupported(v.draft, s.supportedFeatures)) return false;
   if (selectedNames(v.draft).length === 0) return s.installation.canRestore;
+  if (s.update?.enabled && ["waitingForExit", "restoring", "awaitingUpdate", "waitingForReapply", "applying"].includes(s.update.phase)) return false;
   return s.installation.canInstall && (s.installation.requiresSigning === false || s.installation.identities.some(i => i.fingerprint === v.identity));
 }
 function featureCard(f: Feature, v: FeatureView): string {
@@ -92,6 +95,7 @@ export function renderFeatures(v: FeatureView): string {
     ${v.error ? `<div class="banner banner-error" role="alert">${esc(v.error)}</div>` : ""}
     ${v.result ? `<div class="banner" role="status">${esc(v.result)}</div>` : ""}
     ${native?.running ? '<div class="banner">Desktop 正在运行。可以选择功能；应用前请先退出，不会自动结束会话。</div>' : ""}
+    ${renderDesktopUpdate(v.status?.update ?? null, v.busy || v.scanning)}
     <div class="feature-toolbar"><div class="filter-group" aria-label="功能分类">${([["all", "全部"], ["interaction", "交互与控制"], ["appearance", "语言与个性化"], ["workflow", "工作流"]] as const).map(([id, name]) => `<button class="filter-button ${v.group === id ? "active" : ""}" data-feature-group="${id}" aria-pressed="${v.group === id}">${name}</button>`).join("")}</div><input id="feature-search" class="search-input" type="search" placeholder="搜索功能与说明" aria-label="搜索功能" value="${esc(v.search)}"/></div>
     <div class="feature-grid">${visible.map(f => featureCard(f, v)).join("") || '<div class="empty-note">没有匹配的功能，试试其他关键词。</div>'}</div>
     <div class="apply-panel"><div><strong>${dirty ? "有未应用的更改" : "功能组合"}</strong><p>${chosen.length ? esc(chosen.join(" · ")) : "未选择增强功能"}</p></div><div class="apply-controls">${native && native.requiresSigning !== false ? `<label class="signing-control">签名身份<select id="native-signing-identity" ${v.busy ? "disabled" : ""}><option value="">请选择</option>${native.identities.map(i => `<option value="${esc(i.fingerprint)}" ${v.identity === i.fingerprint ? "selected" : ""}>${esc(i.name)}</option>`).join("")}</select></label>` : ""}<button class="btn btn-secondary" data-action="native-reset" ${!dirty || v.busy ? "disabled" : ""}>撤销选择</button><button class="btn btn-primary" data-action="native-prepare" ${canApply(v) ? "" : "disabled"}>应用更改</button></div></div>

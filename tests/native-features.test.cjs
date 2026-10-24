@@ -5,7 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const ts = require('typescript');
 const output = fs.mkdtempSync(path.join(os.tmpdir(), 'claudeplusplus-ui-'));
-for (const name of ['text', 'native-features', 'shell']) {
+for (const name of ['text', 'desktop-update', 'native-features', 'shell']) {
   const source = fs.readFileSync(path.join(__dirname, '../src/ui', name + '.ts'), 'utf8');
   fs.writeFileSync(path.join(output, name + '.js'), ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText);
 }
@@ -78,4 +78,30 @@ test('Fast status is independently selectable and remains platform-gated', () =>
   assert.equal(ui.renderFeatures(v).includes('data-native-feature="fastModeStatus" checked'), true);
   v.status.supportedFeatures = ['computerUse'];
   assert.equal(ui.canApply(v), false);
+});
+
+const updates = require(path.join(output, 'desktop-update.js'));
+test('only macOS renders automatic restore and reapply controls', () => {
+  const base = { supported: false, enabled: false, phase: 'watching', message: '', desiredFeatures: [], pendingFeatures: [], error: null, busy: false };
+  const windows = updates.renderDesktopUpdate(base, false);
+  assert.ok(windows.includes('Windows 不需要'));
+  assert.equal(windows.includes('data-action="desktop-update-toggle"'), false);
+  const mac = updates.renderDesktopUpdate({ ...base, supported: true, enabled: true }, false);
+  assert.ok(mac.includes('仅 macOS 需要'));
+  assert.ok(mac.includes('data-action="desktop-update-toggle" checked'));
+});
+test('maintenance status and errors are escaped and busy operations cannot be toggled', () => {
+  const html = updates.renderDesktopUpdate({ supported: true, enabled: true, phase: 'applying', message: '<script>bad</script>', desiredFeatures: [], pendingFeatures: ['<img>'], error: '<script>error</script>', busy: true }, false);
+  assert.equal(html.includes('<script>'), false);
+  assert.equal(html.includes('<img>'), false);
+  assert.ok(html.includes('checked disabled'));
+});
+
+test('queued maintenance blocks competing patch installation but permits explicit restoration', () => {
+  const v = fixture();
+  v.status.update = { enabled: true, phase: 'awaitingUpdate' };
+  assert.equal(ui.canApply(v), false);
+  v.status.selection = v.draft;
+  v.draft = ui.emptySelection();
+  assert.equal(ui.canApply(v), true);
 });

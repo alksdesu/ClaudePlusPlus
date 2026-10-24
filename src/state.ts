@@ -135,6 +135,7 @@ export interface WatchStatus {
   paused: boolean;
   pendingUnify: boolean;
   pendingFastmode: boolean;
+  pendingDesktopUpdate: boolean;
   lastEvent: string | null;
 }
 

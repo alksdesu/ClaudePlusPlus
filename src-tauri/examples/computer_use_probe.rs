@@ -18,6 +18,11 @@ fn main() -> anyhow::Result<()> {
     );
     let app = Path::new(&args[1]);
     let store = Path::new(&args[2]);
+    #[cfg(target_os = "macos")]
+    if let Some(action) = args[0].strip_prefix("update-") {
+        println!("{}", serde_json::to_string_pretty(&computer_use::updates::probe(app, store, action)?)?);
+        return Ok(());
+    }
     match args[0].as_str() {
         "status" => println!(
             "{}",

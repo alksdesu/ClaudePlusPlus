@@ -330,3 +330,22 @@ Unofficial tool. Relies on Claude Desktop's internal storage layout; future vers
 ## License
 
 AGPL-3.0-only
+
+
+### macOS 自动更新维护
+
+仅 macOS 的重签增强需要此流程；Windows 不需要，继续使用官方更新。可在“功能增强”中开启“自动维护 Desktop 更新”，Claude++ 会保存当前功能组合与签名身份，并在托盘中维护更新状态。
+
+检测到官方更新后，Desktop 运行中只排队，不强关会话。退出后验证备份、还原完整官方包，并在后台启动官方 Desktop，让官方更新器继续下载与安装；官方重启提示和正常退出流程保持原样。更新期间不会抢占官方安装器或覆盖新版本。
+
+更新后的应用在退出后接受官方签名和补丁兼容性校验，只恢复当前 Claude++ 已验证支持的功能。未知版本保持官方原样，原功能选择保留；后续 Claude++ 适配后会重新检测。网络离线、签名身份失效或文件校验失败会显示具体状态，不假报成功，也不关闭更新签名校验。
+
+流程记录持久化，重启 Claude++ 后继续处理未完成阶段。手动还原增强会关闭自动维护，避免自动装回；也可随时关闭维护或重新检测。此功能不修改 API 配置、会话内容、系统授权或管理员更新策略。
+
+### Automatic update maintenance on macOS
+
+Only macOS needs the restore-and-reapply flow because native enhancements re-sign the app. Windows continues to use its official updater and does not expose these controls.
+
+Enable automatic maintenance under Native Features. Claude++ saves the feature selection and signing identity, queues work while Desktop is running, restores the verified official bundle after Desktop exits, and opens the official app in the background so its own updater can proceed. It never force-quits sessions or competes with the official installer.
+
+After an update, compatible enhancements are reapplied when Desktop is stopped. Unknown builds remain official with the requested selection retained for a future compatible Claude++ release. The journal survives restarts; manual restoration disables automatic reapplication. Signature verification, credentials, conversations, permissions, and administrator policies are preserved.

@@ -1,3 +1,5 @@
+pub(super) mod updates;
+
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
