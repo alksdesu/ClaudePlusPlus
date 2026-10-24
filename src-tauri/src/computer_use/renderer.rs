@@ -12,6 +12,10 @@ const AFTER: &str = "if(![\"darwin\",\"win32\"].includes(JE()?.platform))return\
 const MAX_SOURCE: u64 = 64 * 1024 * 1024;
 
 fn locate(app: &Path) -> Result<(PathBuf, String)> {
+    locate_source(app, BEFORE, AFTER, "后台模式")
+}
+
+pub(super) fn locate_source(app: &Path, before: &str, after: &str, label: &str) -> Result<(PathBuf, String)> {
     let directory = app.join("Contents/Resources/ion-dist/assets/v1");
     let canonical = fs::canonicalize(app)?;
     ensure!(
@@ -31,17 +35,17 @@ fn locate(app: &Path) -> Result<(PathBuf, String)> {
         );
         ensure!(metadata.len() <= MAX_SOURCE, "renderer 文件过大");
         let source = fs::read_to_string(&path)?;
-        let matches = source.matches(BEFORE).count() + source.matches(AFTER).count();
+        let matches = source.matches(before).count() + source.matches(after).count();
         if matches == 0 {
             continue;
         }
         ensure!(
             matches == 1 && found.is_none(),
-            "后台模式 renderer 锚点不唯一"
+            "{label} renderer 锚点不唯一"
         );
         found = Some((path, source));
     }
-    found.context("未找到后台模式 renderer 入口")
+    found.with_context(|| format!("未找到{label} renderer 入口"))
 }
 
 pub fn inspect(app: &Path, version: &str, state: &PatchState) -> Result<()> {

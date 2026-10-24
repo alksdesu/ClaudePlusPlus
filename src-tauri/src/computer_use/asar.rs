@@ -39,6 +39,22 @@ const BACKGROUND_AFTER: &str = "function Fen(e){let t=e.selfHostedSessions?e.bui
 const MODE_BEFORE: &str = "function YU(e={}){let t=e.requireFreshGrowthBook??!0;if(process.platform!==\"darwin\")return!1;let n=_O();return n.major<15||S_r(n,x_r())||t&&!GU()?!1:wb(WU,\"appScopedEnabled\",!1,O())}";
 #[cfg(any(test, target_os = "macos"))]
 const MODE_AFTER: &str = "function YU(e={}){let t=e.requireFreshGrowthBook??!0;if(process.platform!==\"darwin\"&&process.platform!==\"win32\")return!1;if(process.platform===\"darwin\"){let n=_O();if(n.major<15||S_r(n,x_r()))return!1}return t&&!GU()?!1:wb(WU,\"appScopedEnabled\",!1,O())}";
+#[cfg(any(test, target_os = "macos"))]
+const FAST_0_BEFORE: &str = r#"for(let t of["badge","tooltip","notice","thinking"])"#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_0_AFTER: &str = r#"for(let t of["badge","tooltip","notice","thinking","fast_mode"])"#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_1_BEFORE: &str = r#"g={id:i.id,name:f,description:h,thinking:Xw(t,i.id,e),"#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_1_AFTER: &str = r#"g={id:i.id,name:f,description:h,thinking:Xw(t,i.id,e),...t==="code"&&s?.fast_mode!==void 0&&{fast_mode:s.fast_mode},"#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_2_BEFORE: &str = r#"claude_code_fast_mode:"blocked_by_platform""#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_2_AFTER: &str = r#"claude_code_fast_mode:t(n&&iw().allowsLocalSpawn)"#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_3_BEFORE: &str = r#"let o=o9t(t.thinking);return o&&(n.thinking=o),Object.keys(n).length>0?n:void 0"#;
+#[cfg(any(test, target_os = "macos"))]
+const FAST_3_AFTER: &str = r#"let o=o9t(t.thinking);return o&&(n.thinking=o),ww(t.fast_mode)&&(n.fast_mode=t.fast_mode),Object.keys(n).length>0?n:void 0"#;
 const MAX_HEADER: u64 = 32 * 1024 * 1024;
 const MAX_ENTRY: u64 = 64 * 1024 * 1024;
 
@@ -384,7 +400,18 @@ fn profile_hash(mask: u8) -> Result<String> {
 
 #[cfg(any(test, target_os = "macos"))]
 fn profile_mask(hash: &str) -> Option<u8> {
-    (0..8).find(|mask| profile_hash(*mask).ok().as_deref() == Some(hash))
+    let profiles: Vec<Value> = serde_json::from_str(include_str!("resources/native-profiles.json")).ok()?;
+    profiles.iter().find(|profile| profile["sha256"].as_str() == Some(hash))
+        .and_then(|profile| profile["mask"].as_u64()).and_then(|mask| u8::try_from(mask).ok())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn fast_controls_current(path: &Path) -> Result<bool> {
+    let mut archive = Archive::open(path)?;
+    let (_, bytes) = archive.locate()?;
+    let digest = hash(&bytes);
+    let mask = profile_mask(&digest).context("原生功能组合未适配")?;
+    Ok(mask & 8 != 0 && profile_hash(mask)? == digest)
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -416,6 +443,7 @@ pub fn active_selection(path: &Path, version: &str) -> Result<super::native::Sel
         simulators: mask & 2 != 0,
         prewarm: mask & 4 != 0,
         chinese: false,
+        fast_mode_status: mask & 8 != 0,
     })
 }
 
@@ -450,6 +478,12 @@ fn native_source(source: &str, selection: super::native::Selection) -> Result<St
             "原生后台入口不唯一"
         );
         result = result.replacen(MODE_BEFORE, MODE_AFTER, 1);
+    }
+    if selection.fast_mode_status {
+        for (before, after) in [(FAST_0_BEFORE, FAST_0_AFTER), (FAST_1_BEFORE, FAST_1_AFTER), (FAST_2_BEFORE, FAST_2_AFTER), (FAST_3_BEFORE, FAST_3_AFTER)] {
+            ensure!(result.matches(before).count() == 1 && !result.contains(after), "Fast Mode 原生映射不唯一");
+            result = result.replacen(before, after, 1);
+        }
     }
     Ok(result)
 }
@@ -509,16 +543,20 @@ mod tests {
 
     #[test]
     fn native_combinations_preserve_unselected_features_and_checks() {
-        for mask in 0..8 {
+        for mask in 0..16 {
             let selection = super::super::native::Selection {
                 computer_use: mask & 1 != 0,
                 simulators: mask & 2 != 0,
                 prewarm: mask & 4 != 0,
                 chinese: false,
+                fast_mode_status: mask & 8 != 0,
             };
-            let input = format!("{BEFORE};{MODE_BEFORE};permissions();");
+            let input = format!("{BEFORE};{MODE_BEFORE};{FAST_0_BEFORE};{FAST_1_BEFORE};{FAST_2_BEFORE};{FAST_3_BEFORE};permissions();");
             let output = native_source(&input, selection).unwrap();
             assert!(output.ends_with(";permissions();"));
+            assert_eq!(output.contains(FAST_2_AFTER), selection.fast_mode_status);
+            assert_eq!(output.contains(FAST_0_AFTER), selection.fast_mode_status);
+            assert_eq!(output.contains(FAST_1_AFTER), selection.fast_mode_status);
             assert_eq!(output.contains("3577536076:Ten(!0)"), selection.simulators);
             assert_eq!(output.contains("4237076858:Ten(!0)"), selection.prewarm);
             assert_eq!(output.contains(MODE_AFTER), selection.computer_use);
@@ -527,7 +565,7 @@ mod tests {
             if mask == 1 {
                 assert_eq!(
                     output,
-                    format!("{BACKGROUND_AFTER};{MODE_AFTER};permissions();")
+                    format!("{BACKGROUND_AFTER};{MODE_AFTER};{FAST_0_BEFORE};{FAST_1_BEFORE};{FAST_2_BEFORE};{FAST_3_BEFORE};permissions();")
                 );
             }
         }

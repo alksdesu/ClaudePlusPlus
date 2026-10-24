@@ -1,5 +1,6 @@
+import { rendererPresentation } from "./ui/fastmode";
 import { state } from "./state";
-import type { PoolKind, PoolCombo, CliSession, DiscoveryReport, UnifyPlan, DesktopSession, RunningDesktop, RegisterReport, UnregisterReport, DeleteReport, WrapperState, RendererState, FastModeSettings, FastModeStatus, FastModeReport, ComputerUseStatus, WatchStatus, TombstoneInfo, CodexStatus, CodexSession, CodexMigrateReport, CodexFilter, SessionPreview, PurgeOutcome, AppState } from "./state";
+import type { PoolKind, PoolCombo, CliSession, DiscoveryReport, UnifyPlan, DesktopSession, RunningDesktop, RegisterReport, UnregisterReport, DeleteReport, WrapperState, FastModeSettings, FastModeStatus, FastModeReport, ComputerUseStatus, WatchStatus, TombstoneInfo, CodexStatus, CodexSession, CodexMigrateReport, CodexFilter, SessionPreview, PurgeOutcome, AppState } from "./state";
 import { esc } from "./ui/text";
 import { renderFeatures, selectionChanged, canApply, type FeatureGroup, type FeatureView, type NativeStatus, type NativeSelection } from "./ui/native-features";
 import { renderNavigation, renderOverview, renderBackups, renderDiagnostics } from "./ui/shell";
@@ -53,6 +54,14 @@ function toast(message: string, isError = false) {
   setTimeout(() => node.remove(), 6000);
 }
 
+async function refreshFastMode() {
+  try {
+    state.fastmode = await invoke<FastModeStatus>("fastmode_status");
+  } catch {
+    state.fastmode = null;
+  }
+}
+
 async function refresh() {
   try {
     const [report, plans, running, watch] = await Promise.all([
@@ -87,11 +96,6 @@ async function refresh() {
   } catch {
     state.codexSessions = [];
     state.codexRunning = false;
-  }
-  try {
-    state.fastmode = await invoke<FastModeStatus>("fastmode_status");
-  } catch {
-    state.fastmode = null;
   }
   await refreshNative();
   render();
@@ -1014,28 +1018,17 @@ const WRAPPER_META: Record<WrapperState, { label: string; cls: string }> = {
   noCli: { label: "未找到 CLI", cls: "pill-foreign" },
 };
 
-const RENDERER_META: Record<RendererState, { label: string; cls: string }> = {
-  patched: { label: "已 patch", cls: "pill-registered" },
-  outdated: { label: "补丁需更新", cls: "pill-pending" },
-  pristine: { label: "官方原样", cls: "pill-pending" },
-  mismatch: { label: "锚点失配", cls: "pill-tombstone" },
-  notFound: { label: "未找到", cls: "pill-foreign" },
-  unreadable: { label: "不可读", cls: "pill-foreign" },
-  unsupported: { label: "本平台不适用", cls: "pill-foreign" },
-};
-
 function renderFastMode(): string {
   const fm = state.fastmode;
-  // Fast Mode 的 macOS 实现只部署 wrapper，整包重签由独立功能管理。
-  const rendererOff = fm?.renderer.state === "unsupported";
+  const rendererNative = fm?.renderer.requiresSigning === true;
   const head = `
       <div class="page-head">
         <div>
           <div class="eyebrow">Fast Mode</div>
           <h1>让 API key 登录的 Desktop 也能 fast</h1>
-          <p class="lead">3p 模式下官方把 fast 能力位硬编码为封锁，但服务端对有资格的 Console key 是放行的。wrapper 顶替 bundled CLI 把 fastMode 合并进启动参数，${
-            rendererOff ? "所有会话默认走 fast" : "renderer patch 亮出实时开关"
-          }；Desktop 或 CLI 更新后由托盘守护自动补上。</p>
+          <p class="lead">wrapper 为有资格的 API key 会话请求 Fast Mode，实际结果以服务端 usage.speed 为准。${
+            rendererNative ? "原生开关通过功能增强的整包重签安装" : "renderer patch 亮出实时开关"
+          }。CLI wrapper 由托盘守护维护；原生开关补丁在 Desktop 更新后重新检测并应用。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
@@ -1044,13 +1037,13 @@ function renderFastMode(): string {
               ? `<button class="btn btn-secondary" data-action="fastmode-uninstall" ${
                   anyDesktopRunning() ||
                   state.busy ||
-                  (fm.wrapper !== "deployed" && fm.renderer.state !== "patched" && fm.renderer.state !== "outdated")
+                  (fm.wrapper !== "deployed" && (rendererNative || (fm.renderer.state !== "patched" && fm.renderer.state !== "outdated")))
                     ? "disabled"
                     : ""
-                }>还原官方</button>
+                }>${rendererNative ? "还原 wrapper" : "还原官方"}</button>
                 <button class="btn btn-primary" data-action="fastmode-install" ${
                   anyDesktopRunning() || state.busy ? "disabled" : ""
-                }>${fm.settings.installed ? "修复 · 重新 patch" : "安装"}</button>`
+                }>${rendererNative ? fm.settings.installed ? "修复 wrapper" : "安装 wrapper" : fm.settings.installed ? "修复 · 重新 patch" : "安装"}</button>`
               : ""
           }
         </div>
@@ -1059,21 +1052,21 @@ function renderFastMode(): string {
     return `<div class="view">${head}<div class="empty-note">Fast Mode 状态读取失败，请重新扫描</div></div>`;
   }
   if (!fm.supported) {
-    return `<div class="view">${head}<div class="banner">Fast Mode 解锁依赖 Windows 版 Desktop 的 MSIX 布局，当前系统不支持。</div></div>`;
+    return `<div class="view">${head}<div class="banner">当前系统尚未提供 Fast Mode 安装器。</div></div>`;
   }
   const runningNote = anyDesktopRunning()
     ? '<div class="banner banner-error">Claude Desktop 正在运行 —— 安装与还原需要替换它加载的文件，请先退出 Desktop</div>'
     : "";
   const pendingNote = state.watch?.pendingFastmode
     ? `<div class="banner">检测到 Desktop 或 CLI 已更新，守护会在 Desktop 退出后自动${
-        rendererOff ? "重新部署 wrapper" : "重新 patch（renderer 部分会弹一次 UAC）"
+        rendererNative ? "重新部署 wrapper" : "重新 patch（renderer 部分会弹一次 UAC）"
       }</div>`
     : "";
   const failureNote = fm.settings.lastFailure
     ? `<div class="banner banner-error">上次修复失败：${esc(fm.settings.lastFailure)}。同一版本不再自动重试，点「修复」手动执行</div>`
     : "";
   const wrapper = WRAPPER_META[fm.wrapper];
-  const renderer = RENDERER_META[fm.renderer.state];
+  const renderer = rendererPresentation(fm.renderer);
   const anchorsNote =
     fm.renderer.state === "mismatch"
       ? `<span>未命中：${fm.renderer.missingAnchors.map(esc).join("、")}（Desktop 大版本变化，需重新适配锚点；wrapper 仍让 Opus 会话默认 fast）</span>`
@@ -1086,7 +1079,7 @@ function renderFastMode(): string {
       ? "最近的 3p 会话里还没有 Opus 5 / 4.8 的回复"
       : `最近 ${fm.speed.sessions} 个 3p 会话中 Opus 5 / 4.8 的回复：<strong>fast ${fm.speed.fast}</strong> · standard ${fm.speed.standard}`;
   const settings = fm.settings;
-  // 后端只记确实生效的组件：mac 恒无 renderer，wrapper 失败时也不会冒出 CLI 版本
+  // 只列后端已确认生效的组件。
   const patchedParts = [
     settings.patchedDesktopVersion ? `Desktop <span class="mono">${esc(settings.patchedDesktopVersion)}</span>` : "",
     settings.patchedCliVersion ? `CLI <span class="mono">${esc(settings.patchedCliVersion)}</span>` : "",
@@ -1101,15 +1094,16 @@ function renderFastMode(): string {
         <div class="eyebrow">组件状态</div>
         <div class="card">
           <div class="card-title">
-            <span>Claude Desktop · renderer patch</span>
+            <span>Claude Desktop · ${rendererNative ? "原生 Fast 开关" : "renderer patch"}</span>
             <span class="pill ${renderer.cls}">${renderer.label}</span>
           </div>
           <div class="card-meta">
             <span>版本 <span class="mono">${esc(fm.desktopVersion ?? "—")}</span></span>
             ${
-              rendererOff
-                ? `<span>当前 Fast Mode 不修改 macOS renderer：签名资源的修改需要同步更新完整性记录并重签整包。Computer Use 页的重签流程只用于该功能，不改变这里的 wrapper 方案</span>
-                   <span>影响：不会多出 UI 实时开关，改用 wrapper 让每个会话默认就是 fast；要临时关掉就点「还原官方」</span>`
+              rendererNative
+                ? `<span>macOS 可以安装官方 Fast 开关；签名资源通过原生增强统一备份、校验和整包重签。</span>
+                   <span>复用官方模型菜单和实时控制接口，尊重关闭选择及原生限制；wrapper 的安装与还原单独管理。</span>
+                   ${anchorsNote}<button class="btn btn-secondary" data-tab="features">配置原生开关</button>`
                 : `${fm.renderer.file ? `<span>文件 <span class="mono">${esc(fm.renderer.file)}</span></span>` : ""}
                    ${fm.msixPath ? `<span class="mono">${esc(fm.msixPath)}</span>` : ""}
                    ${anchorsNote}`
@@ -1126,9 +1120,9 @@ function renderFastMode(): string {
             ${fm.cliDir ? `<span class="mono">${esc(fm.cliDir)}</span>` : ""}
             ${
               fm.wrapper === "deployed"
-                ? `<span>官方 CLI 原样改名藏为 <span class="mono">${rendererOff ? "claude-real" : "claude-real.exe"}</span>，Desktop 只校验 .verified 不比二进制本体</span>
+                ? `<span>wrapper 转发到保留的官方 CLI：<span class="mono">${rendererNative ? "claude-real.app" : "claude-real.exe"}</span>；官方二进制内容不变</span>
                    ${
-                     rendererOff
+                     rendererNative
                        ? '<span>顶替物是指向 Claude++ 自身的软链 —— Desktop 每次启动会读前 8 字节验 Mach-O 魔数，脚本会被判定失效并重下整个 bundle。移动或删除 Claude++ 会让软链断掉，届时 Desktop 自动重下官方 CLI，回到原样</span>'
                        : ""
                    }`
@@ -1143,7 +1137,7 @@ function renderFastMode(): string {
           <div class="card-title">
             <label class="toggle">
               <input type="checkbox" data-action="fastmode-auto" ${settings.auto ? "checked" : ""} ${state.busy ? "disabled" : ""}/>
-              <span>Desktop / CLI 更新后自动${rendererOff ? "重新部署 wrapper" : "重新 patch"}</span>
+              <span>Desktop / CLI 更新后自动${rendererNative ? "重新部署 wrapper" : "重新 patch"}</span>
             </label>
             <span class="pill ${settings.installed ? "pill-registered" : "pill-pending"}">${settings.installed ? "已安装" : "未安装"}</span>
           </div>
@@ -1160,8 +1154,8 @@ function renderFastMode(): string {
           <div class="card-meta">
             <span>${speedNote}</span>
             <span>${
-              rendererOff
-                ? "以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。macOS 没有 UI 开关，这张卡是确认 wrapper 真的生效的唯一途径"
+              rendererNative
+                ? "以转录里的 usage.speed 为准。macOS 原生开关在功能增强中安装，模型菜单和 Fast 标记跟随 CLI 实际状态。"
                 : "以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。Opus 4.6 服务端已不再提供 fast，按钮对它不显示"
             }</span>
           </div>
@@ -1309,6 +1303,7 @@ async function refreshNative() {
     state.nativeError = String(error);
     state.native = null;
   } finally {
+    await refreshFastMode();
     state.nativeScanning = false;
     render();
   }

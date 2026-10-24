@@ -30,5 +30,77 @@
   {
     "mask": 7,
     "sha256": "64d3c49b2e485a7175b96fbe6c90776998bebbe448c506a41818f3142a245b30"
+  },
+  {
+    "mask": 8,
+    "sha256": "b47ba00fd4cd602227d9e259cac5bc06c9a746a39a9aeacbbf2e2394c9d32457"
+  },
+  {
+    "mask": 9,
+    "sha256": "7213d1467b27e445222346569a35e96df1957c1be1449901005d7b76e719cb9e"
+  },
+  {
+    "mask": 10,
+    "sha256": "f5c696655745aaa1c5b0b84bc5342563c9d501c0440d2e542c21e9e789abef2d"
+  },
+  {
+    "mask": 11,
+    "sha256": "344d80db3164627a7df5878d314a093b6645f567ff0f1c5411c8ddd3957fce77"
+  },
+  {
+    "mask": 12,
+    "sha256": "007f01bc0d557e79b80de3b29a7f65d7444d709304c1889b5124e2e8f2c97ebe"
+  },
+  {
+    "mask": 13,
+    "sha256": "1720b0c5c2353ffa5670fde2a5cb7cebc5ee2bbc786ea2f658f1ef12e0d943d3"
+  },
+  {
+    "mask": 14,
+    "sha256": "a57a2419b8627310251b93872868652cbae662ef2443e96b098706f4594dd00e"
+  },
+  {
+    "mask": 15,
+    "sha256": "4454ff342b616465b4ba375ab57b69696a8d910cffe68259acfa4f25689e827d"
+  },
+  {
+    "mask": 8,
+    "sha256": "c9bf99417ade13b758dcf38fa97cf1a0b9f40a812626f9544cc3812fbbe93ebd",
+    "legacyFast": true
+  },
+  {
+    "mask": 9,
+    "sha256": "115be0045d4f1a77555b54a38e6011a118cea25614c7c64ba362d82b61c8cb4e",
+    "legacyFast": true
+  },
+  {
+    "mask": 10,
+    "sha256": "26cc1ef8fa2770eeee8e8e5370b460f053b06e2f2d4612e6d5d9576efd1a930b",
+    "legacyFast": true
+  },
+  {
+    "mask": 11,
+    "sha256": "d7f6b4c050e12eec1c67a0a87ad6c73044be73bd8a5241f33e05815fda23f188",
+    "legacyFast": true
+  },
+  {
+    "mask": 12,
+    "sha256": "5890caf16a823977843a99dacd937ddfeb6d6fbe54272e2408cc5ddcb7a0ea77",
+    "legacyFast": true
+  },
+  {
+    "mask": 13,
+    "sha256": "be655a50453defdb1dc20b52b5536747ddd1654dee7a1df616f3883cdee169a4",
+    "legacyFast": true
+  },
+  {
+    "mask": 14,
+    "sha256": "bc66a33febb9332439301c5fbcaa53181ddb8ccfb3b7ac504aa07158a382b05b",
+    "legacyFast": true
+  },
+  {
+    "mask": 15,
+    "sha256": "562dbf7d09f1596a50ae503f044c4c1cc16d734812c060d564e670fd0ae0fa1e",
+    "legacyFast": true
   }
 ]

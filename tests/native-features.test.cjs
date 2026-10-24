@@ -13,7 +13,7 @@ const ui = require(path.join(output, 'native-features.js'));
 const { esc } = require(path.join(output, 'text.js'));
 process.on('exit', () => fs.rmSync(output, { recursive: true, force: true }));
 function fixture() {
-  return { status: { installation: { running: false, canInstall: true, canRestore: true, requiresSigning: true, identities: [{ fingerprint: 'valid', name: 'Test' }], appPath: '/Applications/Claude.app' }, selection: ui.emptySelection(), supportedFeatures: ['computerUse', 'chinese', 'simulators', 'prewarm'] }, draft: { ...ui.emptySelection(), chinese: true }, identity: 'valid', group: 'all', search: '', scanning: false, busy: false, error: null, confirm: false, result: null };
+  return { status: { installation: { running: false, canInstall: true, canRestore: true, requiresSigning: true, identities: [{ fingerprint: 'valid', name: 'Test' }], appPath: '/Applications/Claude.app' }, selection: ui.emptySelection(), supportedFeatures: ['computerUse', 'chinese', 'simulators', 'prewarm', 'fastModeStatus'] }, draft: { ...ui.emptySelection(), chinese: true }, identity: 'valid', group: 'all', search: '', scanning: false, busy: false, error: null, confirm: false, result: null };
 }
 test('batch application requires a real supported change and a signing identity', () => {
   const v = fixture();
@@ -70,4 +70,12 @@ test('missing signing capability fails closed instead of enabling installation',
   const v = fixture();delete v.status.installation.requiresSigning;v.identity = '';
   assert.equal(ui.canApply(v), false);
   assert.equal(ui.renderFeatures(v).includes('native-signing-identity'), true);
+});
+
+test('Fast status is independently selectable and remains platform-gated', () => {
+  const v = fixture();v.draft = { ...ui.emptySelection(), fastModeStatus: true };
+  assert.equal(ui.canApply(v), true);
+  assert.equal(ui.renderFeatures(v).includes('data-native-feature="fastModeStatus" checked'), true);
+  v.status.supportedFeatures = ['computerUse'];
+  assert.equal(ui.canApply(v), false);
 });

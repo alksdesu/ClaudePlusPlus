@@ -10,6 +10,7 @@ pub struct Selection {
     pub chinese: bool,
     pub simulators: bool,
     pub prewarm: bool,
+    pub fast_mode_status: bool,
 }
 
 impl Selection {
@@ -17,10 +18,11 @@ impl Selection {
         u8::from(self.computer_use)
             | (u8::from(self.simulators) << 1)
             | (u8::from(self.prewarm) << 2)
+            | (u8::from(self.fast_mode_status) << 3)
     }
 
     pub fn is_empty(self) -> bool {
-        self.mask() == 0 && !self.chinese
+        self.mask() == 0 && !self.chinese && !self.fast_mode_status
     }
 }
 
@@ -53,7 +55,7 @@ pub fn status() -> Result<NativeStatus> {
         supported.push("computerUse".into());
         #[cfg(target_os = "macos")]
         if installation.desktop_version.as_deref() == Some("3.1623.4") {
-            supported.extend(["chinese", "simulators", "prewarm"].map(String::from));
+            supported.extend(["chinese", "simulators", "prewarm", "fastModeStatus"].map(String::from));
         }
     }
     Ok(NativeStatus {
@@ -71,7 +73,7 @@ pub fn apply(identity: &str, selection: Selection) -> Result<String> {
     #[cfg(not(target_os = "macos"))]
     {
         ensure!(
-            !selection.chinese && !selection.simulators && !selection.prewarm,
+            !selection.chinese && !selection.simulators && !selection.prewarm && !selection.fast_mode_status,
             "当前平台未验证这些原生功能补丁"
         );
         if selection.computer_use {
@@ -86,7 +88,7 @@ pub fn apply(identity: &str, selection: Selection) -> Result<String> {
 pub(super) fn check_selection(version: &str, selection: Selection) -> Result<()> {
     ensure!(
         version == "3.1623.4"
-            || (!selection.chinese && !selection.simulators && !selection.prewarm),
+            || (!selection.chinese && !selection.simulators && !selection.prewarm && !selection.fast_mode_status),
         "当前 Desktop 尚未验证所选原生功能，不会猜测入口"
     );
     Ok(())
@@ -245,12 +247,13 @@ mod tests {
     use super::*;
     #[test]
     fn selections_roundtrip_and_reject_unknown_fields() {
-        for mask in 0..8 {
+        for mask in 0..16 {
             let s = Selection {
                 computer_use: mask & 1 != 0,
                 simulators: mask & 2 != 0,
                 prewarm: mask & 4 != 0,
                 chinese: true,
+                fast_mode_status: mask & 8 != 0,
             };
             assert_eq!(s.mask(), mask);
             assert_eq!(
@@ -259,6 +262,8 @@ mod tests {
             );
         }
         assert!(serde_json::from_str::<Selection>(r#"{"disablePermissions":true}"#).is_err());
+        assert!(!serde_json::from_str::<Selection>(r#"{"computerUse":true}"#).unwrap().fast_mode_status);
+        assert!(!Selection { fast_mode_status: true, ..Default::default() }.is_empty());
     }
     #[test]
     fn older_builds_do_not_receive_unverified_features() {

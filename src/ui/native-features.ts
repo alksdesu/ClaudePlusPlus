@@ -6,13 +6,14 @@ export interface NativeSelection {
   chinese: boolean;
   simulators: boolean;
   prewarm: boolean;
+  fastModeStatus: boolean;
 }
 export interface NativeStatus {
   installation: ComputerUseStatus;
   selection: NativeSelection;
   supportedFeatures: string[];
 }
-export const emptySelection = (): NativeSelection => ({ computerUse: false, chinese: false, simulators: false, prewarm: false });
+export const emptySelection = (): NativeSelection => ({ computerUse: false, chinese: false, simulators: false, prewarm: false, fastModeStatus: false });
 export type FeatureGroup = "all" | "interaction" | "appearance" | "workflow";
 interface Feature {
   id: string;
@@ -29,6 +30,7 @@ export const features: Feature[] = [
   { id: "simulators", key: "simulators", name: "iOS / Android 模拟器", group: "interaction", description: "原生实时画面、设备面板和模拟器工具。", detail: "沿用官方设备枚举、画面传输和操作实现。用于本地 Code 会话，需要 Xcode 或 Android SDK，并由你批准设备访问。" },
   { id: "chinese", key: "chinese", name: "简体与繁体中文", group: "appearance", description: "官方语言包、语言选择器和地区识别。", detail: "在 Claude 原生设置中选择简体中文或繁體中文。沿用官方翻译与地区解析；当前词典未覆盖的内容保留原文，不机器补译。" },
   { id: "prewarm", key: "prewarm", name: "CLI 原生预热", group: "workflow", description: "复用官方备用进程池，减少新会话冷启动等待。", detail: "实验性：可能增加常驻内存。仅移除部署限制并启用官方预热路径，不修改推理请求、凭据处理或权限判断；不承诺降低每轮模型等待时间。", experimental: true },
+  { id: "fast-mode-status", key: "fastModeStatus", name: "Fast Mode 原生开关", group: "workflow", description: "官方模型菜单开关与 Fast 标记，跟随本地 CLI 状态。", detail: "复用官方模型菜单开关、Fast 标记和实时控制接口；关闭选择会保留到下次启动。模型支持、组织策略、额度与冷却限制仍由原生逻辑处理，实际速度以 usage.speed 为准。" },
   { id: "name", name: "姓名与昵称", group: "appearance", description: "官方个人资料和称呼设置。", detail: "3p 的原生账户接口拒绝保存姓名。当前不创建本地替代账户接口。", reason: "缺少原生账户写入链路" },
   { id: "photo", name: "照片头像", group: "appearance", description: "官方照片上传、裁剪与头像显示。", detail: "裁剪组件存在，但照片存储与回填依赖官方服务。普通图案头像不受此限制。", reason: "缺少原生照片服务" },
   { id: "artifact-pane", name: "Artifacts 原生侧栏", group: "workflow", description: "使用官方产物浏览与管理面板。", detail: "入口可见不等于产物可读取。没有完整的本地原生数据链路前，不只打开空面板。", reason: "原生数据链路待验证" },

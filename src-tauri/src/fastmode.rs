@@ -1,5 +1,5 @@
-//! Claude Desktop 3p Fast Mode：wrapper 顶替 bundled CLI 注入 fastMode；Windows 另有 renderer patch
-//! 亮出实时开关（macOS 上会被 Gatekeeper 拒），版本变化后由 watch 线程自动修复。
+//! Claude Desktop 3p Fast Mode：wrapper 顶替 bundled CLI 注入 fastMode；Windows 直接 patch，macOS 通过原生增强安装开关
+//! macOS 的状态显示补丁由原生增强的整包重签流程管理。
 
 // Windows / macOS 之外只有 stub，共享的 wrapper 与统计逻辑在那里用不到
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
@@ -35,13 +35,13 @@ pub enum RendererState {
     Mismatch,
     NotFound,
     Unreadable,
-    /// macOS：改 ion-dist 会让 Gatekeeper 判定 app 已损坏并拒绝启动，只能上 wrapper
     Unsupported,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RendererInfo {
+    pub requires_signing: bool,
     pub file: Option<String>,
     pub state: RendererState,
     pub missing_anchors: Vec<String>,
@@ -407,7 +407,8 @@ fn adopt_existing(status: &FastModeStatus, settings: &mut FastModeSettings) -> b
         return false;
     }
     if status.wrapper != WrapperState::Deployed
-        && !matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated)
+        && (status.renderer.requires_signing
+            || !matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated))
     {
         return false;
     }
@@ -1148,6 +1149,7 @@ mod imp {
 
     fn renderer_info(msix_root: Option<&Path>) -> RendererInfo {
         let not_found = RendererInfo {
+            requires_signing: false,
             file: None,
             state: RendererState::NotFound,
             missing_anchors: Vec::new(),
@@ -1161,9 +1163,10 @@ mod imp {
             Ok(assets) => {
                 let file = Some(assets.iter().map(|a| dir_label(&a.path)).collect::<Vec<_>>().join(" · "));
                 let (state, missing_anchors) = classify_assets(&assets);
-                RendererInfo { file, state, missing_anchors }
+                RendererInfo { requires_signing: false, file, state, missing_anchors }
             }
             Err(error) => RendererInfo {
+                requires_signing: false,
                 file: None,
                 state: if !v1.is_dir() {
                     RendererState::NotFound
@@ -2098,8 +2101,8 @@ mod imp {
     use crate::procs;
 
     const DESKTOP_APP: &str = "/Applications/Claude.app";
-    const RENDERER_NOTE: &str = "macOS Fast Mode 当前只部署 CLI wrapper，不修改 Desktop UI；\
-         修改签名资源需要更新完整性记录并重签整包，Computer Use 页提供独立的安装与还原流程";
+    const RENDERER_NOTE: &str = "macOS wrapper 已单独处理；原生开关请在功能增强中选择，\
+         由备份、完整性校验与整包重签流程安装或还原";
     const WRAPPER_NAME: &str = "claude";
     const REAL_NAME: &str = "claude-real";
     const CLI_BUNDLE: &str = "claude.app";
@@ -2267,18 +2270,33 @@ mod imp {
     }
 
     fn snapshot(cli: Option<&CliInstall>) -> FastModeStatus {
+        let version = desktop_version();
+        let mut renderer = RendererInfo {
+            requires_signing: true,
+            file: None,
+            state: RendererState::Unsupported,
+            missing_anchors: Vec::new(),
+        };
+        if version.as_deref() == Some("3.1623.4") {
+            match crate::computer_use::fast_status::installed(Path::new(DESKTOP_APP), "3.1623.4") {
+                Ok(true) => renderer.state = RendererState::Patched,
+                Ok(false) => renderer.state = RendererState::Pristine,
+                Err(error) => {
+                    renderer.state = RendererState::Mismatch;
+                    renderer.missing_anchors.push(error.to_string());
+                }
+            }
+        } else if version.is_none() {
+            renderer.state = RendererState::NotFound;
+        }
         FastModeStatus {
             supported: true,
-            desktop_version: desktop_version(),
+            desktop_version: version,
             msix_path: None,
             cli_version: cli.map(|c| c.version.clone()),
             cli_dir: cli.map(|c| c.exe_dir.clone()),
             wrapper: cli.map(|c| wrapper_state(&c.exe_dir)).unwrap_or(WrapperState::NoCli),
-            renderer: RendererInfo {
-                file: None,
-                state: RendererState::Unsupported,
-                missing_anchors: Vec::new(),
-            },
+            renderer,
             settings: load_settings(),
             speed: SpeedStats::default(),
         }
@@ -2378,7 +2396,7 @@ mod imp {
     fn merge_fast(settings: &str) -> String {
         match serde_json::from_str::<serde_json::Value>(settings) {
             Ok(serde_json::Value::Object(mut map)) => {
-                map.insert("fastMode".into(), serde_json::Value::Bool(true));
+                map.entry("fastMode").or_insert(serde_json::Value::Bool(true));
                 serde_json::to_string(&serde_json::Value::Object(map))
                     .unwrap_or_else(|_| FAST_ONLY.to_string())
             }
@@ -2409,11 +2427,114 @@ mod imp {
         out
     }
 
-    /// 合并 fastMode 后 exec 官方本体：换的是进程映像不是子进程，PID 不变，
-    /// Desktop 杀 wrapper 就是杀 CLI，不会留孤儿占着管道
+    fn managed_fast_mode_restricted(settings: &serde_json::Value) -> bool {
+        settings.get("fastMode").and_then(|v| v.as_bool()) == Some(false)
+            || settings
+                .get("fastModePerSessionOptIn")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            || settings.get("processWrapper").is_some()
+            || settings.get("env").is_some_and(|env| {
+                env.get("CLAUDE_CODE_DISABLE_FAST_MODE").is_some()
+                    || env.get("CLAUDE_CODE_PROCESS_WRAPPER").is_some()
+            })
+    }
+
+    fn managed_fast_mode_file_restricted(path: &Path) -> bool {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .map(|settings| !settings.is_object() || managed_fast_mode_restricted(&settings))
+                .unwrap_or(true),
+            Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+        }
+    }
+
+    fn desktop_fast_mode_override(
+        env: impl Fn(&str) -> Option<OsString>,
+        managed_settings: &Path,
+        managed_preferences: &Path,
+    ) -> bool {
+        let is = |name, value| env(name).as_deref() == Some(std::ffi::OsStr::new(value));
+        if !is("CLAUDE_CODE_ENTRYPOINT", "claude-desktop-3p")
+            || !is("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "1")
+            || !is("CLAUDE_CODE_DISABLE_FAST_MODE", "1")
+            || env("CLAUDE_CODE_PROCESS_WRAPPER").is_some()
+            || env("CLAUDE_CODE_MANAGED_SETTINGS_PATH").is_some()
+            || managed_fast_mode_file_restricted(managed_settings)
+        {
+            return false;
+        }
+        let entries = match fs::read_dir(managed_preferences) {
+            Ok(entries) => entries,
+            Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { return false };
+            let path = entry.path();
+            if path
+                .file_name()
+                .is_some_and(|name| name == "com.anthropic.claudecode.plist")
+            {
+                return false;
+            }
+            match fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_dir() => {
+                    let policy = path.join("com.anthropic.claudecode.plist");
+                    match policy.try_exists() {
+                        Ok(false) => {}
+                        _ => return false,
+                    }
+                }
+                Ok(meta) if !meta.file_type().is_symlink() => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    fn fast_mode_api_key(current: Option<OsString>, token: Option<OsString>) -> Option<OsString> {
+        if current.as_ref().is_some_and(|key| !key.is_empty()) {
+            return None;
+        }
+        let token = token?;
+        let value = token.to_str()?;
+        (value.starts_with("sk-ant-api")
+            && value.len() > 24
+            && value.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+        .then_some(token)
+    }
+
+    fn wrapper_command(
+        real: &Path,
+        args: Vec<OsString>,
+        clear_desktop_default: bool,
+        api_key: Option<OsString>,
+    ) -> Command {
+        let mut command = Command::new(real);
+        command.args(args);
+        if clear_desktop_default {
+            // Desktop 的 3p 默认禁用早于 fastMode 设置；组织策略仍由官方 CLI 校验。
+            command.env_remove("CLAUDE_CODE_DISABLE_FAST_MODE");
+            if let Some(key) = api_key {
+                // 官方 Fast 资格预检不读取 Desktop 的 ANTHROPIC_AUTH_TOKEN。
+                command.env("ANTHROPIC_API_KEY", key);
+            }
+        }
+        command
+    }
+
     pub fn run_wrapper(argv0: &Path) -> i32 {
         let real = argv0.with_file_name(REAL_NAME);
-        let error = Command::new(&real).args(merged_args()).exec();
+        let clear_desktop_default = desktop_fast_mode_override(
+            |name| std::env::var_os(name),
+            Path::new("/Library/Application Support/ClaudeCode/managed-settings.json"),
+            Path::new("/Library/Managed Preferences"),
+        );
+        let api_key = fast_mode_api_key(
+            std::env::var_os("ANTHROPIC_API_KEY"),
+            std::env::var_os("ANTHROPIC_AUTH_TOKEN"),
+        );
+        let error = wrapper_command(&real, merged_args(), clear_desktop_default, api_key).exec();
         eprintln!("[fast-wrapper] exec {} 失败: {error}", real.display());
         1
     }
@@ -2421,6 +2542,164 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        fn desktop_env(name: &str) -> Option<OsString> {
+            match name {
+                "CLAUDE_CODE_ENTRYPOINT" => Some("claude-desktop-3p".into()),
+                "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST" | "CLAUDE_CODE_DISABLE_FAST_MODE" => {
+                    Some("1".into())
+                }
+                _ => None,
+            }
+        }
+
+        #[test]
+        fn fast_override_only_accepts_the_desktop_default() {
+            let dir = tempfile::tempdir().unwrap();
+            let settings = dir.path().join("managed-settings.json");
+            let preferences = dir.path().join("preferences");
+            assert!(desktop_fast_mode_override(
+                desktop_env,
+                &settings,
+                &preferences
+            ));
+            for (name, value) in [
+                ("CLAUDE_CODE_ENTRYPOINT", None),
+                ("CLAUDE_CODE_ENTRYPOINT", Some("cli")),
+                ("CLAUDE_CODE_ENTRYPOINT", Some("claude-desktop")),
+                ("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", None),
+                ("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", Some("0")),
+                ("CLAUDE_CODE_DISABLE_FAST_MODE", None),
+                ("CLAUDE_CODE_DISABLE_FAST_MODE", Some("0")),
+                ("CLAUDE_CODE_DISABLE_FAST_MODE", Some("true")),
+                ("CLAUDE_CODE_PROCESS_WRAPPER", Some("/org/launcher")),
+                ("CLAUDE_CODE_MANAGED_SETTINGS_PATH", Some("/org/settings")),
+            ] {
+                let env = |key: &str| {
+                    if key == name {
+                        value.map(OsString::from)
+                    } else {
+                        desktop_env(key)
+                    }
+                };
+                assert!(
+                    !desktop_fast_mode_override(env, &settings, &preferences),
+                    "{name}"
+                );
+            }
+        }
+
+        #[test]
+        fn fast_override_preserves_managed_restrictions_and_launchers() {
+            let dir = tempfile::tempdir().unwrap();
+            let settings = dir.path().join("managed-settings.json");
+            let preferences = dir.path().join("preferences");
+            for source in [
+                r#"{"fastMode":false}"#,
+                r#"{"fastModePerSessionOptIn":true}"#,
+                r#"{"processWrapper":"/org/launcher"}"#,
+                r#"{"env":{"CLAUDE_CODE_PROCESS_WRAPPER":"/org/launcher"}}"#,
+                r#"{"env":{"CLAUDE_CODE_DISABLE_FAST_MODE":"1"}}"#,
+                "not json",
+                "[]",
+                "null",
+            ] {
+                fs::write(&settings, source).unwrap();
+                assert!(
+                    !desktop_fast_mode_override(desktop_env, &settings, &preferences),
+                    "{source}"
+                );
+            }
+            fs::write(&settings, r#"{"sandbox":{"enabled":true}}"#).unwrap();
+            assert!(desktop_fast_mode_override(
+                desktop_env,
+                &settings,
+                &preferences
+            ));
+        }
+
+        #[test]
+        fn fast_override_preserves_machine_and_user_mdm_settings() {
+            let dir = tempfile::tempdir().unwrap();
+            let settings = dir.path().join("managed-settings.json");
+            let preferences = dir.path().join("preferences");
+            fs::create_dir_all(preferences.join("user")).unwrap();
+            assert!(desktop_fast_mode_override(
+                desktop_env,
+                &settings,
+                &preferences
+            ));
+            for parent in [&preferences, &preferences.join("user")] {
+                let policy = parent.join("com.anthropic.claudecode.plist");
+                fs::write(&policy, "managed").unwrap();
+                assert!(!desktop_fast_mode_override(
+                    desktop_env,
+                    &settings,
+                    &preferences
+                ));
+                fs::remove_file(policy).unwrap();
+            }
+            fs::remove_dir_all(&preferences).unwrap();
+            fs::write(&preferences, "not a directory").unwrap();
+            assert!(!desktop_fast_mode_override(
+                desktop_env,
+                &settings,
+                &preferences
+            ));
+        }
+
+        #[test]
+        fn wrapper_command_only_removes_the_desktop_fast_default() {
+            let args = vec!["--settings".into(), FAST_ONLY.into()];
+            for clear in [false, true] {
+                let command = wrapper_command(Path::new("/cli/claude-real"), args.clone(), clear, None);
+                assert_eq!(command.get_args().collect::<Vec<_>>(), args);
+                let changes = command.get_envs().collect::<Vec<_>>();
+                if clear {
+                    assert_eq!(
+                        changes,
+                        vec![(std::ffi::OsStr::new("CLAUDE_CODE_DISABLE_FAST_MODE"), None)]
+                    );
+                } else {
+                    assert!(changes.is_empty());
+                }
+            }
+        }
+
+        #[test]
+        fn fast_api_key_alias_only_accepts_official_static_keys() {
+            let key = OsString::from("sk-ant-api03-test-only-not-a-real-key");
+            assert_eq!(fast_mode_api_key(None, Some(key.clone())), Some(key.clone()));
+            assert_eq!(fast_mode_api_key(Some("".into()), Some(key.clone())), Some(key.clone()));
+            assert_eq!(fast_mode_api_key(Some("existing-key".into()), Some(key)), None);
+            assert_eq!(fast_mode_api_key(None, None), None);
+            for token in [
+                "gateway-token",
+                "sk-ant-oat01-test-only-not-a-real-token",
+                "sk-ant-sid01-test-only-not-a-real-session",
+                "sk-ant-api03-short",
+                "sk-ant-api03-test-only-with whitespace",
+                "sk-ant-api03-test-only-with\nnewline",
+            ] {
+                assert_eq!(fast_mode_api_key(None, Some(token.into())), None, "{token}");
+            }
+        }
+
+        #[test]
+        fn api_key_alias_is_scoped_to_the_desktop_override() {
+            let key = OsString::from("sk-ant-api03-test-only-not-a-real-key");
+            for clear in [false, true] {
+                let command = wrapper_command(Path::new("/cli/claude-real"), vec![], clear, Some(key.clone()));
+                let changes: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+                if clear {
+                    assert_eq!(changes.get(std::ffi::OsStr::new("ANTHROPIC_API_KEY")), Some(&Some(key.as_os_str())));
+                } else {
+                    assert!(changes.is_empty());
+                }
+                assert!(!changes.contains_key(std::ffi::OsStr::new("ANTHROPIC_AUTH_TOKEN")));
+                assert!(!changes.contains_key(std::ffi::OsStr::new("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK")));
+            }
+        }
 
         /// 官方本体连 bundle 一起挪走，主程序位上的文件名和相对层级都保持原样
         #[test]
@@ -2535,7 +2814,7 @@ mod imp {
             // 显式关掉的就地改写，不留重复键
             let over: serde_json::Value =
                 serde_json::from_str(&merge_fast(r#"{"fastMode":false,"x":1}"#)).unwrap();
-            assert_eq!(over["fastMode"], serde_json::json!(true));
+            assert_eq!(over["fastMode"], serde_json::json!(false));
             assert_eq!(over["x"], serde_json::json!(1));
             // 空的、坏的、不是对象的，一律退回最小设置
             assert_eq!(merge_fast("{}"), FAST_ONLY);
@@ -2628,6 +2907,7 @@ mod imp {
             cli_dir: None,
             wrapper: WrapperState::NoCli,
             renderer: RendererInfo {
+                requires_signing: false,
                 file: None,
                 state: RendererState::NotFound,
                 missing_anchors: Vec::new(),
@@ -2678,10 +2958,19 @@ mod shared_tests {
             cli_version: Some("2.1.260".into()),
             cli_dir: None,
             wrapper,
-            renderer: RendererInfo { file: None, state: renderer, missing_anchors: Vec::new() },
+            renderer: RendererInfo { requires_signing: false, file: None, state: renderer, missing_anchors: Vec::new() },
             settings: FastModeSettings::default(),
             speed: SpeedStats::default(),
         }
+    }
+
+    #[test]
+    fn signed_display_patch_does_not_enable_the_wrapper_guardian() {
+        let mut status = status_with(WrapperState::Absent, RendererState::Patched);
+        status.renderer.requires_signing = true;
+        let mut settings = FastModeSettings::default();
+        assert!(!adopt_existing(&status, &mut settings));
+        assert!(!settings.installed);
     }
 
     #[test]
@@ -2866,7 +3155,7 @@ mod shared_tests {
         let mut outdated = FastModeSettings::default();
         assert!(adopt_existing(&status_with(WrapperState::Absent, RendererState::Outdated), &mut outdated));
         assert_eq!(outdated.patched_desktop_version, None);
-        // mac 上 renderer 恒为 Unsupported，认领只看 wrapper，也不会冒出 Desktop 版本
+        // 无 renderer 的部署只认领已在位的 wrapper
         let mut mac = FastModeSettings::default();
         assert!(!adopt_existing(&status_with(WrapperState::Absent, RendererState::Unsupported), &mut mac));
         assert!(adopt_existing(&status_with(WrapperState::Deployed, RendererState::Unsupported), &mut mac));

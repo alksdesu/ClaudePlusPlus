@@ -7,6 +7,8 @@ pub mod native;
 mod pe;
 #[cfg(any(test, target_os = "macos"))]
 mod renderer;
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) mod fast_status;
 #[cfg(windows)]
 mod windows;
 

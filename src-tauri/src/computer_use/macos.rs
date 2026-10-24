@@ -180,6 +180,7 @@ fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
         },
     )?;
     super::native::language::installed(app, version)?;
+    super::fast_status::installed(app, version)?;
     let integrity = dict
         .get("ElectronAsarIntegrity")
         .and_then(plist::Value::as_dictionary)
@@ -369,6 +370,7 @@ pub(super) fn selection_at(app: &Path) -> Result<super::native::Selection> {
         .context("缺少 Desktop 版本")?;
     let mut selected = asar::active_selection(&app.join("Contents/Resources/app.asar"), version)?;
     selected.chinese = super::native::language::installed(app, version)?;
+    selected.fast_mode_status = super::fast_status::installed(app, version)?;
     Ok(selected)
 }
 
@@ -381,6 +383,9 @@ fn patch(app: &Path, selected: super::native::Selection) -> Result<()> {
     }
     if selected.chinese {
         super::native::language::patch(app)?;
+    }
+    if selected.fast_mode_status {
+        super::fast_status::patch(app)?;
     }
     let mut info = plist_at(app)?;
     let entry = info
