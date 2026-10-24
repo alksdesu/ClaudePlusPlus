@@ -11,6 +11,8 @@ mod renderer;
 pub(crate) mod fast_status;
 #[cfg(windows)]
 mod windows;
+#[cfg(any(test, windows))]
+mod windows_recipe;
 
 #[cfg(any(test, not(windows)))]
 use anyhow::Result;

@@ -1258,7 +1258,7 @@ function renderComputerUse(): string {
     <section class="card"><div class="card-title">安装后</div><div class="computer-use-details">
       <p>打开 Claude → 设置 → Computer use，自行启用并按官方提示授权。安装不会自动授予屏幕录制、辅助功能或其他应用的控制权限。</p>
       <p>Background 在已允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。</p>
-      <p>HIPAA、会话授权与禁止控制的应用检查保持原样。Desktop 更新后请重新扫描；未知版本不自动打补丁${requiresSigning ? "，也不会在后台重签" : ""}。</p>
+      <p>HIPAA、会话授权与禁止控制的应用检查保持原样。Desktop 更新后请重新扫描；${requiresSigning ? "未知版本不自动打补丁，也不会在后台重签" : "按当前应用结构自动识别，无法唯一匹配或完整性校验失败时停止修改"}。</p>
     </div></section>
   </div>`;
 }

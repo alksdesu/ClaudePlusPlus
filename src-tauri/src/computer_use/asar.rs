@@ -2,7 +2,9 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use anyhow::{bail, ensure, Context, Result};
+#[cfg(any(test, windows))]
+use super::windows_recipe::WindowsRecipe;
+use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -58,17 +60,6 @@ const FAST_3_AFTER: &str = r#"let o=o9t(t.thinking);return o&&(n.thinking=o),ww(
 const MAX_HEADER: u64 = 32 * 1024 * 1024;
 const MAX_ENTRY: u64 = 64 * 1024 * 1024;
 
-#[cfg(any(test, windows))]
-const WINDOWS_VERSION: &str = "3.1623.4";
-#[cfg(any(test, windows))]
-const WINDOWS_ORIGINAL: &str = "468cf72f123798b84e748c7cbb572f81ee9eafb8bc3023d4cc343101aecec001";
-#[cfg(any(test, windows))]
-const WINDOWS_PATCHED: &str = "7c7093571059ef464fd5f295c0559d007edf59860da54a5f945e2c5bbbfb946e";
-#[cfg(any(test, windows))]
-const WINDOWS_BEFORE: &str = "function Atn(e){return e.selfHostedSessions?e.builtinBrowserEnabled?ktn:Otn:e.builtinBrowserEnabled?Ttn:Stn}";
-#[cfg(any(test, windows))]
-const WINDOWS_AFTER: &str = "function Atn(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?ktn:Otn:e.builtinBrowserEnabled?Ttn:Stn;return{...t,1291166712:btn({enabled:!0}),40173473:btn(!0)}}";
-
 #[derive(Debug, PartialEq, Eq)]
 pub enum PatchState {
     Pristine,
@@ -101,7 +92,7 @@ fn classify_hash(hash: &str, build: &Build) -> Result<PatchState> {
     } else if Some(hash) == build.legacy_hash {
         Ok(PatchState::Legacy)
     } else {
-        bail!(
+        anyhow::bail!(
             "主进程入口哈希与 Desktop {} 的适配记录不符，拒绝修改",
             build.version
         )
@@ -203,8 +194,8 @@ impl Archive {
         self.locate_anchors(&[BEFORE, NATIVE_PREFIX])
     }
 
-    fn locate_anchors(&mut self, anchors: &[&str]) -> Result<(String, Vec<u8>)> {
-        let names: Vec<String> = self
+    fn main_entries(&self) -> Result<Vec<String>> {
+        Ok(self
             .header
             .pointer("/files/.vite/files/build/files")
             .and_then(Value::as_object)
@@ -212,7 +203,12 @@ impl Archive {
             .keys()
             .filter(|name| name.starts_with("index") && name.ends_with(".js"))
             .cloned()
-            .collect();
+            .collect())
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    fn locate_anchors(&mut self, anchors: &[&str]) -> Result<(String, Vec<u8>)> {
+        let names = self.main_entries()?;
         let mut found = None;
         for name in names {
             let source = self.source(&[".vite", "build", &name])?;
@@ -235,6 +231,20 @@ impl Archive {
             found = Some((name, source));
         }
         found.context("未找到 Computer Use 配置函数，主进程结构可能已变化")
+    }
+
+    #[cfg(any(test, windows))]
+    fn locate_windows(&mut self) -> Result<(String, Vec<u8>, WindowsRecipe)> {
+        let mut found = None;
+        for name in self.main_entries()? {
+            let source = self.source(&[".vite", "build", &name])?;
+            let text = std::str::from_utf8(&source).context("主进程入口不是 UTF-8")?;
+            if let Some(recipe) = WindowsRecipe::detect(text)? {
+                ensure!(found.is_none(), "多个主进程文件含有 Computer Use 配置函数");
+                found = Some((name, source, recipe));
+            }
+        }
+        found.context("未找到兼容的 Windows Computer Use 配置结构")
     }
 }
 
@@ -346,34 +356,20 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
 
 #[cfg(any(test, windows))]
 pub fn inspect_windows(path: &Path, version: &str) -> Result<(PatchState, String)> {
-    ensure!(
-        version == WINDOWS_VERSION,
-        "Windows Desktop {version} 尚未适配"
-    );
     let mut archive = Archive::open(path)?;
-    let (_, source) = archive.locate_anchors(&[WINDOWS_BEFORE, WINDOWS_AFTER])?;
-    let state = match hash(&source).as_str() {
-        WINDOWS_ORIGINAL => PatchState::Pristine,
-        WINDOWS_PATCHED => PatchState::Patched,
-        _ => bail!("Windows 主进程入口内容与 {version} 的适配记录不符"),
-    };
-    Ok((state, hash(&archive.raw_header)))
+    let (_, _, recipe) = archive
+        .locate_windows()
+        .with_context(|| format!("检测 Windows Desktop {version} 的主进程"))?;
+    Ok((recipe.state, hash(&archive.raw_header)))
 }
 
 #[cfg(any(test, windows))]
 pub fn patch_windows(path: &Path, version: &str) -> Result<String> {
-    ensure!(
-        inspect_windows(path, version)?.0 == PatchState::Pristine,
-        "需要已验证的官方 Windows 入口"
-    );
     let mut archive = Archive::open(path)?;
-    let (name, source) = archive.locate_anchors(&[WINDOWS_BEFORE])?;
-    let source = std::str::from_utf8(&source)?;
-    let modified = source.replacen(WINDOWS_BEFORE, WINDOWS_AFTER, 1);
-    ensure!(
-        hash(modified.as_bytes()) == WINDOWS_PATCHED,
-        "Windows 补丁输出哈希不匹配"
-    );
+    let (name, source, recipe) = archive
+        .locate_windows()
+        .with_context(|| format!("检测 Windows Desktop {version} 的主进程"))?;
+    let modified = recipe.patch(std::str::from_utf8(&source)?)?;
     replace_entry(path, archive, &name, modified.as_bytes())
 }
 
@@ -780,15 +776,40 @@ mod tests {
     }
 
     #[test]
-    fn windows_recipe_only_changes_local_feature_values() {
-        assert!(!WINDOWS_AFTER.contains("appScopedEnabled"));
-        assert!(!WINDOWS_AFTER.contains("chicagoEnabled"));
-        assert!(WINDOWS_AFTER.contains("40173473:btn(!0)"));
-        let (_dir, path) = fixture(&[("index.chunk-win.js", WINDOWS_BEFORE)]);
-        let original = fs::read(&path).unwrap();
-        assert!(inspect_windows(&path, WINDOWS_VERSION).is_err());
-        assert!(patch_windows(&path, WINDOWS_VERSION).is_err());
-        assert!(patch_windows(&path, "3.1623.5").is_err());
-        assert_eq!(fs::read(&path).unwrap(), original);
+    fn windows_discovery_patches_only_the_unique_entry_and_updates_integrity() {
+        let source = super::super::windows_recipe::TEST_SOURCE;
+        let (_dir, path) = fixture(&[
+            ("index.chunk-renamed.js", source),
+            ("index.other.js", "unchanged"),
+        ]);
+        assert_eq!(
+            inspect_windows(&path, "future-build").unwrap().0,
+            PatchState::Pristine
+        );
+        let header_hash = patch_windows(&path, "future-build").unwrap();
+        assert_eq!(
+            inspect_windows(&path, "future-build").unwrap(),
+            (PatchState::Patched, header_hash)
+        );
+        let mut archive = Archive::open(&path).unwrap();
+        assert_eq!(
+            archive
+                .source(&[".vite", "build", "index.other.js"])
+                .unwrap(),
+            b"unchanged"
+        );
+        let bytes = fs::read(&path).unwrap();
+        assert!(patch_windows(&path, "future-build").is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn windows_discovery_refuses_ambiguous_archives_without_writing() {
+        let source = super::super::windows_recipe::TEST_SOURCE;
+        let (_dir, path) = fixture(&[("index.one.js", source), ("index.two.js", source)]);
+        let bytes = fs::read(&path).unwrap();
+        assert!(inspect_windows(&path, "future-build").is_err());
+        assert!(patch_windows(&path, "future-build").is_err());
+        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 }

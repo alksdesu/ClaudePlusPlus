@@ -52,7 +52,7 @@ Claude++ 针对这两层分别下手。
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
 | **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 wrapper 请求默认开启；原生开关可通过「原生增强 → Fast Mode 原生开关」的整包重签流程安装。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
-| **原生 Computer Use** | 在「Computer Use」页检测、安装或还原 API key 模式的原生电脑操作入口，沿用 Desktop 自身的开关、授权和执行器。Windows 备份并修改 exe 与 ASAR；macOS 备份整包并使用本机有效签名身份重签。按已验证的版本与内容哈希匹配，未知版本拒绝修改 |
+| **原生 Computer Use** | 在「Computer Use」页检测、安装或还原 API key 模式的原生电脑操作入口，沿用 Desktop 自身的开关、授权和执行器。Windows 自动识别配置函数并计算内容哈希，备份后修改 exe 与 ASAR；macOS 按已适配版本校验，备份整包并使用本机有效签名身份重签。匹配不唯一或校验失败时拒绝修改 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
 
 ### 存储结构
@@ -129,7 +129,7 @@ Fast Mode 支持单文件和主逻辑、模型菜单分布在多个 renderer 文
 
 记录与备份存于 `<配置目录>/com.claudeplusplus.manager/computer-use/windows/`。两个文件的替换有操作锁和恢复记录；中途失败可以还原，发现 Desktop 被外部更新或修改则拒绝覆盖。Fast Mode 的 renderer 文件、会话、API 配置与授权设置不在本次修改范围内。
 
-Computer Use 不使用 Fast Mode 的自动修复守护。Desktop 更新后需重新扫描；未知版本或内容哈希不匹配时拒绝修改，已有备份保留，也不会用旧文件覆盖新版本。
+Computer Use 不使用 Fast Mode 的自动修复守护。Desktop 更新后重新扫描，按当前代码结构自动提取配置函数、辅助函数及改写前后的内容哈希；结构无法唯一匹配或签名、完整性校验失败时拒绝修改。通过校验的更新包可重新安装并建立独立备份，旧版备份保留，不跨版本还原。
 
 开发验收在 `src-tauri` 目录执行 `cargo run --example computer_use_probe -- status`，只读探测当前安装。副本验收使用 `status|install|restore COPY/app STORE`，其中 `COPY/app` 是独立应用副本，`STORE` 是副本外的独立记录目录；Windows 不需要签名身份参数，探针拒绝直接修改系统安装目录。
 
@@ -203,7 +203,7 @@ Claude++ addresses both layers.
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
 | **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the native toggle is installed through the signed Native Features transaction, while the wrapper supplies a default only when the launch settings do not explicitly choose on or off. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
-| **Native Computer Use** | Detects, installs, and restores native computer-control entry points for API-key deployments from the Computer Use tab, using Desktop's own switches, consent flow, and executor. Windows backs up and patches the executable and ASAR; macOS backs up the whole bundle and re-signs it with a valid local identity. Installation requires a verified version and matching content hashes; unknown versions are refused |
+| **Native Computer Use** | Detects, installs, and restores native computer-control entry points for API-key deployments from the Computer Use tab, using Desktop's own switches, consent flow, and executor. Windows discovers the configuration function and computes content hashes before backing up and patching the executable and ASAR. macOS checks supported builds, backs up the whole bundle, and re-signs it with a valid local identity. Ambiguous matches and failed verification are refused |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
 
 ### Storage layout
@@ -280,7 +280,7 @@ Installation and restoration request UAC elevation. Claude++ backs up `claude.ex
 
 Records and backups live in `<config dir>/com.claudeplusplus.manager/computer-use/windows/`. File replacement uses an operation lock and recovery journal. Interrupted operations can be restored; externally updated or modified Desktop files are never overwritten. Fast Mode renderer files, conversations, API configuration, and consent settings are outside this change.
 
-Computer Use does not use Fast Mode's automatic repair daemon. Rescan after a Desktop update. Unknown versions or mismatched content hashes are refused, backups are retained, and old files do not overwrite newer versions.
+Computer Use does not use Fast Mode's automatic repair daemon. Rescanning after a Desktop update discovers the configuration and helper functions from the current code structure and computes the original and patched content hashes. Ambiguous structures or failed signature and integrity checks are refused. A verified update can be patched with its own backup; earlier backups are retained and cannot be restored over a different version.
 
 For development validation, run `cargo run --example computer_use_probe -- status` from `src-tauri` to inspect the installed app without modifying it. Test independent copies with `status|install|restore COPY/app STORE`, where `COPY/app` is a separate app copy and `STORE` is a separate record directory outside it. Windows needs no signing-identity argument; the probe refuses system installation directories.
 

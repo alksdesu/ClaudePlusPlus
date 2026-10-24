@@ -204,6 +204,16 @@ fn normalize_version(version: &str) -> Result<String> {
     Ok(parts[..3].join("."))
 }
 
+fn version_tuple(version: &str) -> Option<[u64; 3]> {
+    let normalized = normalize_version(version).ok()?;
+    let mut parts = normalized.split('.');
+    Some([
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    ])
+}
+
 impl Installation {
     fn standard() -> Result<Option<Self>> {
         let text = powershell("$ErrorActionPreference='Stop'; Get-AppxPackage -Name Claude | Sort-Object Version -Descending | Select-Object -First 1 @{n='root';e={$_.InstallLocation}},@{n='version';e={$_.Version.ToString()}} | ConvertTo-Json -Compress")?;
@@ -303,6 +313,14 @@ impl Installation {
 
     fn transaction(&self, record: &Record) -> PathBuf {
         self.store.join(record.id.to_string())
+    }
+
+    fn is_package_update(&self, record: &Record) -> bool {
+        self.app != record.target
+            && matches!(
+                (version_tuple(&self.version), version_tuple(&record.version)),
+                (Some(current), Some(previous)) if current > previous
+            )
     }
     fn baseline(&self, record: &Record) -> PathBuf {
         self.transaction(record).join("baseline")
@@ -461,7 +479,15 @@ impl Installation {
         s.app_path = self.app.display().to_string();
         s.desktop_version = Some(self.version.clone());
         s.running = running(&self.app)?;
-        if let Some(record) = self.record()? {
+        let record = self.record()?;
+        let package_update = match record.as_ref() {
+            Some(record) if self.is_package_update(record) => {
+                self.verify_backup(record)?;
+                true
+            }
+            _ => false,
+        };
+        if let Some(record) = record.filter(|_| !package_update) {
             s.backup_path = Some(self.baseline(&record).display().to_string());
             if record.phase != "restored" {
                 if !self.owned(&record)? {
@@ -491,7 +517,12 @@ impl Installation {
             Ok(asar::PatchState::Pristine) => match verify_original(&self.app, &self.version) {
                 Ok(()) => {
                     s.state = "available".into();
-                    s.message = "可安装 Windows 原生电脑操作；安装和还原需要管理员确认".into();
+                    s.message = if package_update {
+                        "检测到 Desktop 更新，可为当前应用安装原生电脑操作；旧版备份保留"
+                    } else {
+                        "可安装 Windows 原生电脑操作；安装和还原需要管理员确认"
+                    }
+                    .into();
                     s.can_install = !s.running;
                 }
                 Err(e) => {
@@ -526,7 +557,13 @@ impl Installation {
                 );
                 return Ok("Windows 原生 Computer Use 已安装".into());
             }
-            ensure!(record.phase == "restored", "请先还原以结束已有安装记录");
+            ensure!(
+                record.phase == "restored" || self.is_package_update(&record),
+                "请先还原以结束已有安装记录"
+            );
+            if self.is_package_update(&record) {
+                self.verify_backup(&record)?;
+            }
         }
         verify_original(&self.app, &self.version)?;
         plain(&self.app.join("resources/app.asar.unpacked/node_modules/@ant/claude-native/claude-native-binding.node"), false)?;
@@ -715,6 +752,38 @@ mod tests {
             r"C:\Program Files\WindowsApps\Claude_test\app-other\Claude.exe"
         ));
         assert!(!process_belongs_to(app, r"E:\tools\claude.exe"));
+    }
+
+    #[test]
+    fn package_updates_require_both_a_new_path_and_a_newer_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_app = dir.path().join("old/app");
+        let new_app = dir.path().join("new/app");
+        let record = Record {
+            schema: 1,
+            id: Uuid::new_v4(),
+            target: old_app.clone(),
+            version: "3.9.1".into(),
+            baseline: [asar::hash(b"original"), asar::hash(b"original")],
+            modified: [asar::hash(b"patched"), asar::hash(b"patched")],
+            phase: "installed".into(),
+        };
+        for (app, version, expected) in [
+            (&new_app, "3.10.0", true),
+            (&old_app, "3.10.0", false),
+            (&new_app, "3.9.1", false),
+            (&new_app, "3.8.9", false),
+            (&new_app, "invalid", false),
+        ] {
+            let installation = Installation {
+                app: app.clone(),
+                store: dir.path().join("store"),
+                version: version.into(),
+                elevated: false,
+            };
+            assert_eq!(installation.is_package_update(&record), expected);
+            assert!(!installation.owned(&record).unwrap());
+        }
     }
 
     #[test]

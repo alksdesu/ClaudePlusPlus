@@ -586,7 +586,7 @@ mod imp {
         pattern: &'static str,
         patched: &'static str,
         aliases: &'static [(&'static str, &'static str)],
-        alternate: Option<(&'static str, &'static [(&'static str, &'static str)])>,
+        alternates: &'static [(&'static str, &'static [(&'static str, &'static str)])],
     }
 
     /// minify 只重命名局部变量与函数，属性名和字符串字面量不动 —— 锚点拿它们当骨架，
@@ -613,7 +613,7 @@ mod imp {
                 r#"fastModeCarrier:[\w$]+\?"local":[\w$]+\}"#,
             ),
             aliases: &[("show", "show2")],
-            alternate: None,
+            alternates: &[],
         },
         Anchor {
             label: "模型支持判定",
@@ -632,6 +632,8 @@ mod imp {
                 r#",[\w$]+=!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
                 r"|,[\w$]+=[\w$]+\([\w$]+=>[\w$]+\?[^;]+?:",
                 r#"!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
+                r"|,[\w$]+=[\w$]+\([\w$]+,\d+,[\w$]+,[\w$]+\)\?[\w$]+\([\w$]+,\d+,[\w$]+,[\w$]+,",
+                r#"[\w$]+=>[\w$]+\?[^;]+?:!!\([\w$]+&&\([\w$]+\.toLowerCase\(\)\.includes\("opus-5"\)"#,
             ),
             aliases: &[
                 ("arg", "arg2"),
@@ -642,7 +644,7 @@ mod imp {
                 ("remote", "remote2"),
                 ("ris46", "ris46b"),
             ],
-            alternate: Some((
+            alternates: &[(
                 CALLBACK_SUPPORT,
                 &[
                     ("arg", "arg2"),
@@ -653,7 +655,16 @@ mod imp {
                     ("remote", "remote3"),
                     ("model", "model2"),
                 ],
-            )),
+            ), (
+                COMPILED_SUPPORT,
+                &[
+                    ("arg", "arg2"), ("arg", "arg3"), ("fnc", "fnc2"),
+                    ("lookup", "lookup2"), ("lookup", "lookup3"),
+                    ("remote", "remote2"), ("remote", "remote3"), ("remote", "remote4"),
+                    ("cache", "cache2"), ("cache", "cache3"), ("slot", "slot2"),
+                    ("model", "model2"),
+                ],
+            )],
         },
         Anchor {
             label: "禁用原因",
@@ -670,9 +681,17 @@ mod imp {
                 r"|[\w$]+=!1,[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
                 r"|[\w$]+=[\w$]+\?\((?:[\w$]+\|\|)?[\w$]+\([\w$]+\?\.fastModeDisabledReason\)\):!1,",
                 r"[\w$]+=[\w$]+\?\.fastMode\?\.value===!0,",
+                r"|[\w$]+=[\w$]+\?\.fastModeDisabledReason,[\w$]+=[\w$]+\?\([\w$]+\([\w$]+,\d+,[\w$]+\)\?",
+                r"[\w$]+\([\w$]+,\d+,[\w$]+,[\w$]+\([\w$]+\)\):[\w$]+\[\d+\]\):!1,",
+                r#"[\w$]+=[\w$]+\?\(![\w$]+&&\([\w$]+==="extra_usage_disabled"\|\|[\w$]+&&![\w$]+&&![\w$]+\)\):!1,"#,
+                r"[\w$]+=[\w$]+\|\|[\w$]+\|\|[\w$]+,",
             ),
             aliases: &[("msg", "msg2")],
-            alternate: None,
+            alternates: &[(COMPILED_REASON, &[
+                ("reason", "reason2"), ("reason", "reason3"), ("reason", "reason4"), ("reason", "reason5"),
+                ("blocked", "blocked2"), ("blocked", "blocked3"), ("credits", "credits2"), ("old", "old2"),
+                ("cache", "cache2"), ("cache", "cache3"), ("slot", "slot2"),
+            ])],
         },
         Anchor {
             label: "模型菜单",
@@ -683,13 +702,20 @@ mod imp {
                 r"(?P<tail>\}\},\[[^\]]*\]\)[^;]*?,[\w$]+=[\w$]+\?\.models\.find\()",
             ),
             patched: concat!(
-                r"return\{\.\.\.[\w$]+,models:[\w$]+\.map\([\w$]+\)\.map\([\w$]+=>[^{};]+",
+                r"(?:return\{\.\.\.[\w$]+,models:[\w$]+\.map\([\w$]+\)",
+                r"|[\w$]+\([\w$]+,\d+,[\w$]+,[\w$]+,\{\.\.\.[\w$]+,models:[\w$]+)\.map\([\w$]+=>[^{};]+",
                 r#"\?\{\.\.\.[\w$]+,fast_mode:\{type:"toggle",name:"Fast mode",options:\["#,
                 r#"\{id:"fast",name:"Enable fast mode",selector_label:"Fast"\},\{id:"off",name:"Off"\}"#,
                 r"\]\}\}:[\w$]+\)",
             ),
             aliases: &[],
-            alternate: None,
+            alternates: &[(
+                concat!(
+                    r"(?P<models>[\w$]+\((?P<cache>[\w$]+),\d+,(?P<catalog>[\w$]+),(?P<list>[\w$]+),",
+                    r"\{\.\.\.(?P<catalog2>[\w$]+),models:(?P<list2>[\w$]+))(?P<tail>\}\):(?P<cache2>[\w$]+)\[\d+\])",
+                ),
+                &[("cache", "cache2"), ("catalog", "catalog2"), ("list", "list2")],
+            )],
         },
     ];
 
@@ -703,10 +729,28 @@ mod imp {
 
     const MENU_DEFINITION: &str = r#""data-testid":"epitaxy-cds-model-selector""#;
 
+    const COMPILED_SUPPORT: &str = concat!(
+        r",(?P<fnc>[\w$]+)=(?P<cache_open>[\w$]+\((?P<cache>[\w$]+),(?P<slot>\d+),(?P<lookup>[\w$]+),(?P<remote>[\w$]+)\)\?",
+        r"[\w$]+\((?P<cache2>[\w$]+),(?P<slot2>\d+),(?P<lookup2>[\w$]+),(?P<remote2>[\w$]+),)",
+        r"(?P<arg>[\w$]+)=>(?P<body>(?P<lookup3>[\w$]+)\([\w$]+\((?P<arg2>[\w$]+)\)\)!==void 0&&",
+        r#"\((?P<remote3>[\w$]+)\|\|(?P<arg3>[\w$]+)\.toLowerCase\(\)\.includes\("opus-4-6"\)\|\|[\w$]+\(\)\))"#,
+        r"(?P<cache_close>\):(?P<cache3>[\w$]+)\[\d+\]),",
+        r"(?P<sup>[\w$]+)=!!(?P<model>[\w$]+)&&(?P<fnc2>[\w$]+)\((?P<model2>[\w$]+)\),",
+        r"(?P<needs>[\w$]+)=!(?P<remote4>[\w$]+)&&[\w$]+&&![\w$]+,",
+    );
+
+    const COMPILED_REASON: &str = concat!(
+        r"(?P<reason>[\w$]+)=(?P<meta>[\w$]+)\?\.fastModeDisabledReason,",
+        r"(?P<blocked>[\w$]+)=(?P<blocked_expr>[\w$]+\((?P<cache>[\w$]+),(?P<slot>\d+),(?P<reason2>[\w$]+)\)\?",
+        r"[\w$]+\((?P<cache2>[\w$]+),(?P<slot2>\d+),(?P<reason3>[\w$]+),[\w$]+\((?P<reason4>[\w$]+)\)\):(?P<cache3>[\w$]+)\[\d+\]),",
+        r#"(?P<credits>[\w$]+)=(?P<credits_expr>!(?P<old>[\w$]+)&&\((?P<reason5>[\w$]+)==="extra_usage_disabled"\|\|[\w$]+&&![\w$]+&&!(?P<blocked2>[\w$]+)\)),"#,
+        r"(?P<flag>[\w$]+)=(?P<old2>[\w$]+)\|\|(?P<credits2>[\w$]+)\|\|(?P<blocked3>[\w$]+),",
+    );
+
     impl Anchor {
         fn matches<'a>(&self, text: &'a str) -> Vec<regex::Captures<'a>> {
             let mut hits = Vec::new();
-            for (pattern, aliases) in std::iter::once((self.pattern, self.aliases)).chain(self.alternate) {
+            for (pattern, aliases) in std::iter::once((self.pattern, self.aliases)).chain(self.alternates.iter().copied()) {
                 hits.extend(rx(pattern).captures_iter(text).filter(|c| {
                     aliases.iter().all(|(a, b)| c.name(a).map(|m| m.as_str()) == c.name(b).map(|m| m.as_str()))
                 }));
@@ -722,7 +766,11 @@ mod imp {
     }
 
     /// 目标函数的 modelId 形参：全文有多个 modelId: 属性，取被改代码所在函数的那个
-    const MODEL_ID_SIGNATURE: &str = r"function [\w$]+\(\{[^{}]*?modelId:([\w$]+)[^{}]*?\}\)\{";
+    const MODEL_ID_SIGNATURE: &str = concat!(
+        r"function [\w$]+\(\{[^{}]*?modelId:(?P<direct>[\w$]+)[^{}]*?\}\)\{",
+        r"|function [\w$]+\((?P<props>[\w$]+)\)\{let [\w$]+=[\w$]+\(\d+\),",
+        r"\{[^{}]*?modelId:(?P<compiled>[\w$]+)[^{}]*?\}=(?P<props2>[\w$]+),",
+    );
 
     fn rx(pattern: &str) -> regex::Regex {
         regex::Regex::new(pattern).expect("锚点正则")
@@ -766,7 +814,12 @@ mod imp {
             rx(MODEL_ID_SIGNATURE)
                 .captures_iter(&self.text[..offset])
                 .last()
-                .map(|c| c[1].to_string())
+                .and_then(|c| {
+                    if c.name("props").map(|m| m.as_str()) != c.name("props2").map(|m| m.as_str()) {
+                        return None;
+                    }
+                    c.name("direct").or_else(|| c.name("compiled")).map(|m| m.as_str().to_string())
+                })
         }
 
         fn is_patched(&self) -> bool {
@@ -877,15 +930,17 @@ mod imp {
                     if model.as_str() != model_id {
                         bail!("模型支持判定引用了其他 modelId");
                     }
+                    let callback = if let Some(open) = caps.name("cache_open") {
+                        format!("{}{}=>{}?{}:{}{}", open.as_str(), &caps["arg"], &caps["remote"],
+                            &caps["body"], supports_fast_js(&caps["arg"]), &caps["cache_close"])
+                    } else {
+                        format!("{}({}=>{}?{}:{},{})", &caps["cb"], &caps["arg"], &caps["remote"],
+                            &caps["body"], supports_fast_js(&caps["arg"]), &caps["deps"])
+                    };
                     let replacement = format!(
-                        ",{}={}({}=>{}?{}:{},{}),{}=!!{}&&{}({}),{}=!1,",
+                        ",{}={},{}=!!{}&&{}({}),{}=!1,",
                         &caps["fnc"],
-                        &caps["cb"],
-                        &caps["arg"],
-                        &caps["remote"],
-                        &caps["body"],
-                        supports_fast_js(&caps["arg"]),
-                        &caps["deps"],
+                        callback,
                         &caps["sup"],
                         model_id,
                         &caps["fnc"],
@@ -920,6 +975,14 @@ mod imp {
                         } else {
                             format!("{}=!1{}", flag.as_str(), &caps["tail"])
                         }
+                    }
+                    None if caps.name("blocked_expr").is_some() => {
+                        let remote = remote.as_deref().context("缓存禁用原因缺少远程会话上下文")?;
+                        format!(
+                            "{}={}?.fastModeDisabledReason,{}={remote}?({}):!1,{}={remote}?({}):!1,{}={}||{}||{},",
+                            &caps["reason"], &caps["meta"], &caps["blocked"], &caps["blocked_expr"],
+                            &caps["credits"], &caps["credits_expr"], &caps["flag"], &caps["old"], &caps["credits"], &caps["blocked"]
+                        )
                     }
                     None => format!("{}=null,{}=!1", &caps["msg"], &caps["flag"]),
                 };
@@ -1628,6 +1691,72 @@ mod imp {
             r#"let f=o&&(t?t.type==="remote":e==="anthropic_cloud"||e==="byoc"||e==="pool"),p=r&&!i&&c&&!s?f?"remote":a&&(t?n:e==="local"||e==="ssh")?"local":null:null,m=p!==null&&!l&&u;"#,
             r#"return{showFastModeToggle:m,fastModeToggleDisabled:m&&d,fastModeCarrier:p}}"#,
         );
+
+        const COMPILED_CORE: &str = concat!(
+            r#"function rc(e){let $=J9(97),{sessionRef:t,sessionMeta:n,modelId:s,fastModeFor:c,capabilities:l,config:u,offerRemoteFastMode:f}=e,"#,
+            r#"x=l.fastMode!==!1,E=f&&t?.type==="remote",D=n?.fastModeState,O=D==="on"||D==="cooldown",A=E&&n?.cliVersion!==void 0&&ka(n.cliVersion,nc)<0&&!O,"#,
+            r#"N=J2($,0,c,s)?K2($,0,c,s,s?c(U(s))!==void 0:!1):$[2],P=J1($,3,s)?K1($,3,s,(s?.toLowerCase().includes("opus-4-6")??!1)||ft()):$[4],"#,
+            r#"ee=J2($,5,c,E)?K2($,5,c,E,e=>c(U(e))!==void 0&&(E||e.toLowerCase().includes("opus-4-6")||ft())):$[7],L=!!s&&ee(s),R=!E&&N&&!P,"#,
+            r#"z=E||u?.fastModePerSessionOptIn?.value!==!1,te=tc(x),B=n?.fastModeDisabledReason,V=J1($,8,B)?K1($,8,B,cc(B)):$[9],"#,
+            r#"H=!A&&(B==="extra_usage_disabled"||te&&!O&&!V),W=A||H||V,ne=J5($,10,W,H,A,E,B,n)?K5($,10,W,H,A,E,B,n,W&&!H?Qs(B,{engineTooOld:A,host:E?fr(n):void 0}):null):$[16],G=u?.fastMode?.value===!0,K=u?.fastModePerSessionOptIn?.value===!0;"#,
+            r#"return{modelSupportsFastMode:L,modelSupportsFastModeFor:ee,fastModeNeedsDesktopUpdate:R,fastModeBlocked:W,fastModeNeedsCredits:H,fastModeChoice:!A&&!V&&G,reason:ne}}"#,
+            r#"function ps({envType:e,sessionRef:t,isLocalSession:n,fastModeCapable:r,fastModeEnableHint:i,fastModeIpcAvailable:a,remoteFastMode:o,remoteFastModeAwaitingReport:s,perSessionOptInAllowed:c,fastModeNeedsDesktopUpdate:l,modelSupportsFastMode:u,fastModeBlocked:d}){"#,
+            r#"let f=o&&(t?t.type==="remote":e==="anthropic_cloud"||e==="byoc"||e==="pool"),p=r&&!i&&c&&!s?f?"remote":a&&(t?n:e==="local"||e==="ssh")?"local":null:null,m=p!==null&&!l&&u;"#,
+            r#"return{showFastModeToggle:m,fastModeToggleDisabled:m&&d,fastModeCarrier:p}}"#,
+        );
+
+        const COMPILED_MENU: &str = concat!(
+            r#"function menu(R,s){let $=J9(43),l=R.models,u=J2($,37,l,s)?K2($,37,l,s,l.map(s)):$[39],K=J2($,40,R,u)?K2($,40,R,u,{...R,models:u}):$[42];"#,
+            r#"return{catalog:K,"data-testid":"epitaxy-cds-model-selector"}}"#,
+        );
+
+        #[test]
+        fn compiler_cache_shapes_patch_and_restore() {
+            for (core, menu) in [
+                (COMPILED_CORE.to_string(), COMPILED_MENU.to_string()),
+                (
+                    rx(r"\b(?:[A-Za-z]|rc|ps|ee|ne|te|J9|J1|J2|J5|K1|K2|K5)\b")
+                        .replace_all(COMPILED_CORE, |c: &regex::Captures<'_>| format!("${}$", &c[0])).into_owned(),
+                    rx(r"\b(?:[A-Za-z]|menu|J9|J2|K2)\b")
+                        .replace_all(COMPILED_MENU, |c: &regex::Captures<'_>| format!("${}$", &c[0])).into_owned(),
+                ),
+            ] {
+                let dir = tempfile::tempdir().unwrap();
+                fs::write(dir.path().join("core.js"), &core).unwrap();
+                fs::write(dir.path().join("menu.js"), &menu).unwrap();
+                assert_eq!(renderer_info_in(dir.path()).state, RendererState::Pristine);
+                patch_renderer_in(dir.path(), |_| Ok(())).unwrap();
+                assert_eq!(renderer_info_in(dir.path()).state, RendererState::Patched);
+                let patched = fs::read_to_string(dir.path().join("core.js")).unwrap();
+                patch_renderer_in(dir.path(), |_| Ok(())).unwrap();
+                assert_eq!(fs::read_to_string(dir.path().join("core.js")).unwrap(), patched);
+                assert_eq!(restore_renderer_in(dir.path(), |_| Ok(())).unwrap(), 2);
+                assert_eq!(fs::read_to_string(dir.path().join("core.js")).unwrap(), core);
+                assert_eq!(fs::read_to_string(dir.path().join("menu.js")).unwrap(), menu);
+            }
+        }
+
+        #[test]
+        fn compiler_cache_alias_drift_and_duplicate_anchors_are_refused() {
+            for (from, to) in [
+                ("K2($,5,c,E,e=>", "K2($,5,c,Z,e=>"),
+                ("K2($,5,c,E,e=>", "K2(other,5,c,E,e=>"),
+                ("K2($,5,c,E,e=>", "K2($,6,c,E,e=>"),
+                ("L=!!s&&ee(s)", "L=!!other&&ee(other)"),
+                ("}=e,x=", "}=other,x="),
+                ("K1($,8,B,cc(B))", "K1($,8,B,cc(other))"),
+                ("W=A||H||V", "W=A||H||other"),
+            ] {
+                assert!(COMPILED_CORE.contains(from));
+                assert!(Renderer::new(&COMPILED_CORE.replace(from, to)).patch().is_err(), "{from}");
+            }
+            for source in [COMPILED_CORE, COMPILED_MENU] {
+                assert!(Renderer::new(&format!("{source}{source}")).patch().is_err());
+            }
+            for (from, to) in [("models:u}", "models:other}"), ("...R,", "...other,")] {
+                assert!(Renderer::new(&COMPILED_MENU.replace(from, to)).patch().is_err());
+            }
+        }
 
         fn split_assets(dir: &Path) {
             fs::write(dir.join("core.js"), SPLIT_CORE).unwrap();
