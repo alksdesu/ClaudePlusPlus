@@ -1,5 +1,6 @@
 #[cfg(any(windows, target_os = "macos"))]
 fn main() -> anyhow::Result<()> {
+    use anyhow::Context;
     use claude_plus_plus_lib::computer_use;
     use std::path::Path;
 
@@ -27,6 +28,15 @@ fn main() -> anyhow::Result<()> {
             #[cfg(target_os = "macos")]
             anyhow::ensure!(!identity.is_empty(), "缺少签名身份");
             println!("{}", computer_use::install_copy(app, store, identity)?);
+        }
+        #[cfg(target_os = "macos")]
+        "apply" => {
+            let identity = args.get(3).context("缺少签名身份")?;
+            let selection = serde_json::from_str(args.get(4).context("缺少功能组合 JSON")?)?;
+            println!(
+                "{}",
+                computer_use::apply_copy(app, store, identity, selection)?
+            );
         }
         "restore" => println!("{}", computer_use::restore_copy(app, store)?),
         _ => anyhow::bail!("未知操作"),

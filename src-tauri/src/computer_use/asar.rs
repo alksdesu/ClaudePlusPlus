@@ -78,7 +78,9 @@ pub fn check_version(version: &str) -> Result<()> {
 fn classify_hash(hash: &str, build: &Build) -> Result<PatchState> {
     if hash == build.original_hash {
         Ok(PatchState::Pristine)
-    } else if hash == build.patched_hash {
+    } else if hash == build.patched_hash
+        || build.version == "3.1623.4" && profile_mask(hash).is_some()
+    {
         Ok(PatchState::Patched)
     } else if Some(hash) == build.legacy_hash {
         Ok(PatchState::Legacy)
@@ -94,7 +96,7 @@ pub fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-struct Archive {
+pub(super) struct Archive {
     file: File,
     header: Value,
     raw_header: Vec<u8>,
@@ -182,7 +184,7 @@ impl Archive {
 
     #[cfg(any(test, target_os = "macos"))]
     fn locate(&mut self) -> Result<(String, Vec<u8>)> {
-        self.locate_anchors(&[BEFORE, AFTER, BACKGROUND_AFTER])
+        self.locate_anchors(&[BEFORE, NATIVE_PREFIX])
     }
 
     fn locate_anchors(&mut self, anchors: &[&str]) -> Result<(String, Vec<u8>)> {
@@ -295,7 +297,7 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
         .context("缺少 ASAR blockSize")?;
     entry["offset"] = json!((archive.length - archive.payload_start).to_string());
     entry["size"] = json!(modified.len());
-    entry["integrity"] = integrity(&modified, block_size)?;
+    entry["integrity"] = integrity(modified, block_size)?;
     let header = serde_json::to_vec(&archive.header)?;
     ensure!(
         header.len() as u64 <= MAX_HEADER - 16,
@@ -314,7 +316,7 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
         out.write_all(&[0; 3][..padding])?;
         archive.file.seek(SeekFrom::Start(archive.payload_start))?;
         std::io::copy(&mut archive.file, &mut out)?;
-        out.write_all(&modified)?;
+        out.write_all(modified)?;
         out.sync_all()?;
         fs::rename(&tmp, path)?;
         Ok(())
@@ -359,11 +361,178 @@ pub fn patch_windows(path: &Path, version: &str) -> Result<String> {
     replace_entry(path, archive, &name, modified.as_bytes())
 }
 
+#[cfg(any(test, target_os = "macos"))]
+const NATIVE_PREFIX: &str = "function Fen(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?Pen:Nen:e.builtinBrowserEnabled?Aen:Den;return{...t,";
+#[cfg(any(test, target_os = "macos"))]
+const PREWARM_BEFORE: &str = "if(t.e7().type!==\"1p\")return{unsupported:\"third_party\"};";
+#[cfg(any(test, target_os = "macos"))]
+const PREWARM_ORIGINAL: &str = "f834d7febfc57c4957968eaa33a96f2f0c9454d2b8e8fbc89036189fb005fc6d";
+#[cfg(any(test, target_os = "macos"))]
+const PREWARM_PATCHED: &str = "595d1ec6852a4970f7b2e2d97b998ca052e3060c3aeeaf4ab6bd51ea77cfd391";
+
+#[cfg(any(test, target_os = "macos"))]
+fn profile_hash(mask: u8) -> Result<String> {
+    let profiles: Vec<Value> =
+        serde_json::from_str(include_str!("resources/native-profiles.json"))?;
+    profiles
+        .iter()
+        .find(|p| p["mask"].as_u64() == Some(u64::from(mask)))
+        .and_then(|p| p["sha256"].as_str())
+        .map(str::to_owned)
+        .context("未知原生功能组合")
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn profile_mask(hash: &str) -> Option<u8> {
+    (0..8).find(|mask| profile_hash(*mask).ok().as_deref() == Some(hash))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub fn active_selection(path: &Path, version: &str) -> Result<super::native::Selection> {
+    let mut archive = Archive::open(path)?;
+    let (_, bytes) = archive.locate()?;
+    let digest = hash(&bytes);
+    let build = build(version)?;
+    let state = classify_hash(&digest, build)?;
+    let mask = if version == "3.1623.4" {
+        profile_mask(&digest).unwrap_or(1)
+    } else {
+        u8::from(state != PatchState::Pristine)
+    };
+    if version == "3.1623.4" {
+        let (_, source) = archive.locate_anchors(&["async sparePrewarmSupport(){"])?;
+        ensure!(
+            hash(&source)
+                == if mask & 4 != 0 {
+                    PREWARM_PATCHED
+                } else {
+                    PREWARM_ORIGINAL
+                },
+            "原生预热模块校验失败"
+        );
+    }
+    Ok(super::native::Selection {
+        computer_use: mask & 1 != 0,
+        simulators: mask & 2 != 0,
+        prewarm: mask & 4 != 0,
+        chinese: false,
+    })
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn native_source(source: &str, selection: super::native::Selection) -> Result<String> {
+    ensure!(source.matches(BEFORE).count() == 1, "原生配置入口不唯一");
+    let mut fields = Vec::new();
+    if selection.computer_use {
+        fields.extend([
+            "1291166712:Ten({enabled:!0,appScopedEnabled:!0})",
+            "1346958739:Ten({major:27,minor:9999})",
+        ]);
+    }
+    if selection.simulators {
+        fields.extend(["3577536076:Ten(!0)", "1403324732:Ten(!0)"]);
+    }
+    if selection.prewarm {
+        fields.push("4237076858:Ten(!0)");
+    }
+    let mut result = if fields.is_empty() {
+        source.to_owned()
+    } else {
+        source.replacen(
+            BEFORE,
+            &format!("{NATIVE_PREFIX}{}}}}}", fields.join(",")),
+            1,
+        )
+    };
+    if selection.computer_use {
+        ensure!(
+            result.matches(MODE_BEFORE).count() == 1 && !result.contains(MODE_AFTER),
+            "原生后台入口不唯一"
+        );
+        result = result.replacen(MODE_BEFORE, MODE_AFTER, 1);
+    }
+    Ok(result)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub fn patch_features(
+    path: &Path,
+    version: &str,
+    selection: super::native::Selection,
+) -> Result<String> {
+    super::native::check_selection(version, selection)?;
+    if version != "3.1623.4" {
+        return if selection.computer_use {
+            patch(path, version)
+        } else {
+            Ok(hash(&Archive::open(path)?.raw_header))
+        };
+    }
+    let mut archive = Archive::open(path)?;
+    let (name, source) = archive.locate()?;
+    ensure!(
+        hash(&source) == build(version)?.original_hash,
+        "必须从官方基线组合原生补丁"
+    );
+    let modified = native_source(std::str::from_utf8(&source)?, selection)?;
+    ensure!(
+        hash(modified.as_bytes()) == profile_hash(selection.mask())?,
+        "原生组合补丁输出不匹配"
+    );
+    if selection.mask() != 0 {
+        replace_entry(path, archive, &name, modified.as_bytes())?;
+    }
+    if selection.prewarm {
+        let mut archive = Archive::open(path)?;
+        let (name, source) = archive.locate_anchors(&["async sparePrewarmSupport(){"])?;
+        ensure!(hash(&source) == PREWARM_ORIGINAL, "预热原生模块内容未适配");
+        let text = std::str::from_utf8(&source)?;
+        ensure!(
+            text.matches(PREWARM_BEFORE).count() == 1,
+            "预热部署门槛不唯一"
+        );
+        let modified = text.replacen(PREWARM_BEFORE, "", 1);
+        ensure!(
+            hash(modified.as_bytes()) == PREWARM_PATCHED,
+            "预热模块输出校验失败"
+        );
+        replace_entry(path, archive, &name, modified.as_bytes())?;
+    }
+    Ok(hash(&Archive::open(path)?.raw_header))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const TEST_ENTRY: &[&str] = &[".vite", "build", "index.chunk-fixture.js"];
+
+    #[test]
+    fn native_combinations_preserve_unselected_features_and_checks() {
+        for mask in 0..8 {
+            let selection = super::super::native::Selection {
+                computer_use: mask & 1 != 0,
+                simulators: mask & 2 != 0,
+                prewarm: mask & 4 != 0,
+                chinese: false,
+            };
+            let input = format!("{BEFORE};{MODE_BEFORE};permissions();");
+            let output = native_source(&input, selection).unwrap();
+            assert!(output.ends_with(";permissions();"));
+            assert_eq!(output.contains("3577536076:Ten(!0)"), selection.simulators);
+            assert_eq!(output.contains("4237076858:Ten(!0)"), selection.prewarm);
+            assert_eq!(output.contains(MODE_AFTER), selection.computer_use);
+            assert_eq!(output.contains(MODE_BEFORE), !selection.computer_use);
+            assert_eq!(profile_mask(&profile_hash(mask).unwrap()), Some(mask));
+            if mask == 1 {
+                assert_eq!(
+                    output,
+                    format!("{BACKGROUND_AFTER};{MODE_AFTER};permissions();")
+                );
+            }
+        }
+        assert!(native_source("unknown()", Default::default()).is_err());
+    }
 
     #[test]
     fn only_the_feature_map_changes() {

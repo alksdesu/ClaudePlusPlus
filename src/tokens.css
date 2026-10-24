@@ -156,3 +156,22 @@
                         border-color 0.2s ease-in-out,
                         box-shadow 0.2s ease-in-out;
 }
+
+:root {
+  --nav-width: 13.5rem;
+  --feature-card-min: 16rem;
+  --feature-glyph-size: 2.5rem;
+  --hero-mark-size: 7rem;
+  --metric-size: 2.25rem;
+  --toolbar-control-height: 2.5rem;
+  --font-size-page-title: 1.8rem;
+  --font-size-section-title: 1.05rem;
+  --theme-success-bg: #e6ece4;
+  --theme-success-fg: #304f35;
+  --theme-hero-bg: #ece9df;
+  --theme-disabled-opacity: 0.55;
+  --layout-zero: 0;
+  --layout-full: 100%;
+  --layout-min-content: min-content;
+  --transition-duration: 140ms;
+}

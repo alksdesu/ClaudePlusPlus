@@ -21,7 +21,7 @@ const IDENTITY_KEYS: &[&str] = &[
     "com.apple.security.application-groups",
 ];
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct Record {
     schema: u32,
     id: uuid::Uuid,
@@ -31,6 +31,10 @@ struct Record {
     baseline_hash: String,
     modified_hash: Option<String>,
     phase: String,
+    #[serde(default)]
+    selection: Option<super::native::Selection>,
+    #[serde(default)]
+    previous_modified_hash: Option<String>,
 }
 
 struct Installation {
@@ -165,7 +169,17 @@ fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
         "app.asar 不允许是符号链接"
     );
     let (state, header_hash) = asar::inspect(&archive, version)?;
-    renderer::inspect(app, version, &state)?;
+    let selected = asar::active_selection(&archive, version)?;
+    renderer::inspect(
+        app,
+        version,
+        if selected.computer_use {
+            &state
+        } else {
+            &asar::PatchState::Pristine
+        },
+    )?;
+    super::native::language::installed(app, version)?;
     let integrity = dict
         .get("ElectronAsarIntegrity")
         .and_then(plist::Value::as_dictionary)
@@ -266,6 +280,12 @@ fn is_macho(path: &Path) -> Result<bool> {
         ))
 }
 
+fn signing_workspace(transaction: &Path) -> Result<PathBuf> {
+    let path = transaction.join(format!("entitlements-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&path)?;
+    Ok(path)
+}
+
 fn sign(app: &Path, identity: &str, transaction: &Path) -> Result<()> {
     let log = transaction.join("commands.jsonl");
     let paths = walk(app)?;
@@ -292,8 +312,7 @@ fn sign(app: &Path, identity: &str, transaction: &Path) -> Result<()> {
     bundles.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     files.extend(bundles);
     files.push(app.to_path_buf());
-    let entitlements = transaction.join("entitlements");
-    fs::create_dir(&entitlements)?;
+    let entitlements = signing_workspace(transaction)?;
     let mut plans = Vec::new();
     for (i, target) in files.iter().enumerate() {
         let out = execute(
@@ -341,10 +360,28 @@ fn sign(app: &Path, identity: &str, transaction: &Path) -> Result<()> {
     verify_signature(app, Some(&log))
 }
 
-fn patch(app: &Path) -> Result<()> {
+pub(super) fn selection_at(app: &Path) -> Result<super::native::Selection> {
+    let info = plist_at(app)?;
+    let version = info
+        .as_dictionary()
+        .and_then(|d| d.get("CFBundleShortVersionString"))
+        .and_then(plist::Value::as_string)
+        .context("缺少 Desktop 版本")?;
+    let mut selected = asar::active_selection(&app.join("Contents/Resources/app.asar"), version)?;
+    selected.chinese = super::native::language::installed(app, version)?;
+    Ok(selected)
+}
+
+fn patch(app: &Path, selected: super::native::Selection) -> Result<()> {
     let (version, _) = inspect(app)?;
-    let hash = asar::patch(&app.join("Contents/Resources/app.asar"), &version)?;
-    renderer::patch(app, &version)?;
+    super::native::check_selection(&version, selected)?;
+    let hash = asar::patch_features(&app.join("Contents/Resources/app.asar"), &version, selected)?;
+    if selected.computer_use {
+        renderer::patch(app, &version)?;
+    }
+    if selected.chinese {
+        super::native::language::patch(app)?;
+    }
     let mut info = plist_at(app)?;
     let entry = info
         .as_dictionary_mut()
@@ -355,10 +392,8 @@ fn patch(app: &Path) -> Result<()> {
         .context("缺少 Electron ASAR 完整性记录")?;
     entry.insert("hash".into(), plist::Value::String(hash));
     info.to_file_xml(app.join("Contents/Info.plist"))?;
-    ensure!(
-        inspect(app)?.1 == asar::PatchState::Patched,
-        "补丁回读验证失败"
-    );
+    inspect(app)?;
+    ensure!(selection_at(app)? == selected, "原生功能组合回读验证失败");
     Ok(())
 }
 
@@ -444,7 +479,7 @@ impl Installation {
         let r: Record =
             serde_json::from_slice(&fs::read(path)?).context("安装记录损坏，拒绝覆盖备份")?;
         ensure!(
-            r.schema == 1 && r.target == self.app,
+            (r.schema == 1 || r.schema == 2) && r.target == self.app,
             "安装记录与目标不匹配"
         );
         Ok(Some(r))
@@ -519,10 +554,14 @@ impl Installation {
         if let Some(r) = &record {
             let baseline = current.as_deref() == Some(r.baseline_hash.as_str());
             let modified = r.modified_hash.is_some() && current == r.modified_hash;
+            let previous = r.phase != "installed"
+                && r.previous_modified_hash.is_some()
+                && current == r.previous_modified_hash;
             if r.phase != "restored" {
-                status.can_restore =
-                    (baseline || modified) && self.baseline(r).is_dir() && !status.running;
-                if !baseline && !modified {
+                status.can_restore = (baseline || modified || previous)
+                    && self.baseline(r).is_dir()
+                    && !status.running;
+                if !baseline && !modified && !previous {
                     status.state = "changed".into();
                     status.message = "Desktop 已被外部更新或修改；为避免覆盖新版本，停止安装和还原，原包备份仍保留".into();
                     return Ok(status);
@@ -542,7 +581,8 @@ impl Installation {
                     } else {
                         status.state = "installed".into();
                         status.message =
-                            "原生电脑操作已安装；请在 Claude 设置中自行启用并完成授权".into();
+                            "原生增强已安装；功能开关与设备授权仍由 Claude 原生界面管理".into();
+                        status.can_install = !status.running && !status.identities.is_empty();
                     }
                     return Ok(status);
                 }
@@ -569,92 +609,142 @@ impl Installation {
     }
 
     fn install(&self, identity: &str) -> Result<String> {
+        let selected = selection_at(&self.app)?;
+        self.apply(
+            identity,
+            super::native::Selection {
+                computer_use: true,
+                ..selected
+            },
+        )
+    }
+
+    fn apply(&self, identity: &str, selected: super::native::Selection) -> Result<String> {
         let _lock = self.lock()?;
-        validate_identity(identity, &identities()?)?;
         ensure_stopped(&self.app)?;
-        if let Some(record) = self.record()? {
-            if record.phase == "installed"
-                && record.modified_hash.as_deref() == Some(fingerprint(&self.app)?.as_str())
-                && inspect(&self.app)?.1 == asar::PatchState::Legacy
-            {
-                verify_signature(&self.app, None)?;
-                self.restore_locked()?;
-            }
+        if selected.is_empty() {
+            return self.restore_locked();
         }
-        if let Some(r) = self.record()? {
-            let current = fingerprint(&self.app)?;
-            if r.phase == "installed" && r.modified_hash.as_deref() == Some(current.as_str()) {
-                ensure!(
-                    inspect(&self.app)?.1 == asar::PatchState::Patched,
-                    "已记录的补丁状态异常"
-                );
-                verify_signature(&self.app, None)?;
-                return Ok("原生 Computer Use 入口已经安装，无需重复修改".into());
-            }
+        validate_identity(identity, &identities()?)?;
+        let before = fingerprint(&self.app)?;
+        let old = self.record()?;
+        if let Some(r) = &old {
             ensure!(
-                r.phase == "restored" || r.phase == "installed" && current == r.baseline_hash,
-                "存在未完成或已发生外部变化的安装，请先检查状态并还原"
+                r.phase == "installed" || r.phase == "restored",
+                "存在未完成事务，请先还原"
             );
-            self.clear_staging(&r)?;
+            if r.phase == "installed" {
+                ensure!(
+                    r.modified_hash.as_deref() == Some(&before) || before == r.baseline_hash,
+                    "应用已被外部修改，拒绝覆盖"
+                );
+                if r.modified_hash.as_deref() == Some(&before)
+                    && selection_at(&self.app)? == selected
+                    && inspect(&self.app)?.1 != asar::PatchState::Legacy
+                {
+                    verify_signature(&self.app, None)?;
+                    return Ok("所选原生功能已安装，无需重复修改".into());
+                }
+            }
         }
-        let version = verify_original(&self.app, None)?;
-        let mut record = Record {
-            schema: 1,
-            id: uuid::Uuid::new_v4(),
-            target: self.app.clone(),
-            version,
-            identity: identity.into(),
-            baseline_hash: fingerprint(&self.app)?,
-            modified_hash: None,
-            phase: "preparing".into(),
+        let mut record = if let Some(r) = old
+            .as_ref()
+            .filter(|r| r.phase == "installed" || r.baseline_hash == before)
+        {
+            let baseline = self.baseline(r);
+            ensure!(
+                fingerprint(&baseline)? == r.baseline_hash,
+                "原包备份哈希不一致"
+            );
+            verify_original(&baseline, None)?;
+            r.clone()
+        } else {
+            let version = verify_original(&self.app, None)?;
+            let r = Record {
+                schema: 2,
+                id: uuid::Uuid::new_v4(),
+                target: self.app.clone(),
+                version,
+                identity: identity.into(),
+                baseline_hash: before.clone(),
+                modified_hash: None,
+                phase: "restored".into(),
+                selection: None,
+                previous_modified_hash: None,
+            };
+            let transaction = self.transaction(&r);
+            fs::create_dir(&transaction)?;
+            fs::create_dir(transaction.join("baseline"))?;
+            execute(
+                Command::new("/usr/bin/ditto")
+                    .arg(&self.app)
+                    .arg(self.baseline(&r)),
+                Some(&transaction.join("commands.jsonl")),
+            )?;
+            ensure!(
+                fingerprint(&self.baseline(&r))? == before,
+                "原包备份哈希不一致"
+            );
+            verify_original(&self.baseline(&r), None)?;
+            r
         };
+        super::native::check_selection(&record.version, selected)?;
+        self.clear_staging(&record)?;
         let transaction = self.transaction(&record);
-        fs::create_dir(&transaction)?;
-        let log = transaction.join("commands.jsonl");
-        let baseline = self.baseline(&record);
-        fs::create_dir(transaction.join("baseline"))?;
-        execute(
-            Command::new("/usr/bin/ditto").arg(&self.app).arg(&baseline),
-            Some(&log),
-        )?;
-        ensure!(
-            fingerprint(&baseline)? == record.baseline_hash,
-            "原包备份哈希不一致"
-        );
-        verify_original(&baseline, Some(&log))?;
-        self.save(&record)?;
         let stage = self.sibling(record.id, "app")?;
         let retired = self.sibling(record.id, "previous")?;
-        ensure!(
-            !stage.try_exists()? && !stage.is_symlink(),
-            "补丁暂存路径已存在"
-        );
-        execute(
-            Command::new("/usr/bin/ditto").arg(&baseline).arg(&stage),
-            Some(&log),
-        )?;
-        patch(&stage)?;
-        sign(&stage, identity, &transaction)?;
-        record.modified_hash = Some(fingerprint(&stage)?);
-        record.phase = "ready".into();
+        let log = transaction.join("commands.jsonl");
+        record.schema = 2;
+        record.identity = identity.into();
+        record.selection = Some(selected);
+        record.previous_modified_hash = Some(before.clone());
+        record.phase = "preparing".into();
         self.save(&record)?;
-        ensure_stopped(&self.app)?;
-        ensure!(
-            fingerprint(&self.app)? == record.baseline_hash,
-            "制作补丁期间原应用发生变化，停止替换"
-        );
-        swap(&stage, &self.app, &retired)?;
-        if let Err(error) = verify_signature(&self.app, Some(&log)) {
-            fs::rename(&self.app, &stage)?;
-            fs::rename(&retired, &self.app)?;
-            record.phase = "restored".into();
+        let result = (|| -> Result<()> {
+            execute(
+                Command::new("/usr/bin/ditto")
+                    .arg(self.baseline(&record))
+                    .arg(&stage),
+                Some(&log),
+            )?;
+            patch(&stage, selected)?;
+            sign(&stage, identity, &transaction)?;
+            record.modified_hash = Some(fingerprint(&stage)?);
+            record.phase = "ready".into();
             self.save(&record)?;
-            return Err(error).context("替换后的签名校验失败，已回滚原应用");
+            ensure_stopped(&self.app)?;
+            ensure!(
+                fingerprint(&self.app)? == before,
+                "生成补丁期间应用发生变化，停止替换"
+            );
+            swap(&stage, &self.app, &retired)?;
+            if let Err(error) = verify_signature(&self.app, Some(&log)) {
+                fs::rename(&self.app, &stage)?;
+                fs::rename(&retired, &self.app)?;
+                return Err(error).context("签名校验失败，已恢复此前应用");
+            }
+            record.phase = "installed".into();
+            record.previous_modified_hash = None;
+            self.save(&record)?;
+            fs::remove_dir_all(&retired).context("安装完成，但旧暂存应用清理失败")?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            if fingerprint(&self.app).ok().as_deref() == Some(&before) {
+                self.clear_staging(&record)?;
+                if let Some(previous) = old {
+                    self.save(&previous)?;
+                } else {
+                    record.phase = "restored".into();
+                    record.modified_hash = None;
+                    record.previous_modified_hash = None;
+                    record.selection = None;
+                    self.save(&record)?;
+                }
+            }
+            return Err(error);
         }
-        record.phase = "installed".into();
-        self.save(&record)?;
-        let _ = fs::remove_dir_all(retired);
-        Ok("原生 Computer Use 入口已安装。请打开 Claude → 设置 → Computer use，自行启用并完成授权；如系统要求，请重新授予权限".into())
+        Ok("所选原生功能已安装并通过完整性验证。请在 Claude 原生设置中选择语言或授权设备；未自动授予任何权限".into())
     }
 
     fn restore(&self) -> Result<String> {
@@ -680,7 +770,9 @@ impl Installation {
                 return Ok("应用已经是备份中的原版；安装记录已结束，原包备份保留".into());
             }
             ensure!(
-                record.modified_hash.as_deref() == Some(current.as_str()),
+                record.modified_hash.as_deref() == Some(current.as_str())
+                    || record.phase != "installed"
+                        && record.previous_modified_hash.as_deref() == Some(current.as_str()),
                 "应用已被外部更新或修改，拒绝用旧备份覆盖；请检查备份路径"
             );
         }
@@ -700,7 +792,10 @@ impl Installation {
         ensure_stopped(&self.app)?;
         if self.app.try_exists()? {
             ensure!(
-                record.modified_hash.as_deref() == Some(fingerprint(&self.app)?.as_str()),
+                record.modified_hash.as_deref() == Some(fingerprint(&self.app)?.as_str())
+                    || record.phase != "installed"
+                        && record.previous_modified_hash.as_deref()
+                            == Some(fingerprint(&self.app)?.as_str()),
                 "还原期间应用发生变化"
             );
         }
@@ -727,6 +822,17 @@ pub fn status() -> Result<Status> {
 pub fn install(identity: &str) -> Result<String> {
     Installation::standard()?.install(identity)
 }
+pub fn apply(identity: &str, selected: super::native::Selection) -> Result<String> {
+    Installation::standard()?.apply(identity, selected)
+}
+pub fn apply_copy(
+    app: &Path,
+    store: &Path,
+    identity: &str,
+    selected: super::native::Selection,
+) -> Result<String> {
+    Installation::copy(app, store)?.apply(identity, selected)
+}
 pub fn restore() -> Result<String> {
     Installation::standard()?.restore()
 }
@@ -744,6 +850,15 @@ pub fn restore_copy(app: &Path, store: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn combination_updates_keep_independent_signing_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = signing_workspace(dir.path()).unwrap();
+        let second = signing_workspace(dir.path()).unwrap();
+        assert_ne!(first, second);
+        assert!(first.is_dir() && second.is_dir());
+    }
 
     #[test]
     fn signing_preserves_capabilities_but_not_vendor_identity() {
@@ -854,6 +969,8 @@ mod tests {
             baseline_hash: "baseline".into(),
             modified_hash: None,
             phase: "preparing".into(),
+            selection: None,
+            previous_modified_hash: None,
         };
         installation.save(&record).unwrap();
         assert!(installation.record().unwrap().is_some());
@@ -862,6 +979,9 @@ mod tests {
         assert!(installation.record().is_err());
         record.target = installation.app.clone();
         record.schema = 2;
+        installation.save(&record).unwrap();
+        assert!(installation.record().unwrap().is_some());
+        record.schema = 3;
         installation.save(&record).unwrap();
         assert!(installation.record().is_err());
     }

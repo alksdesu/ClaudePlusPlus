@@ -117,7 +117,10 @@ fn list_desktop_sessions() -> Result<Vec<DesktopSession>, String> {
 }
 
 #[tauri::command(async)]
-fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<RegisterReport>, String> {
+fn register_sessions(
+    session_ids: Vec<String>,
+    policy: String,
+) -> Result<Vec<RegisterReport>, String> {
     ensure_desktop_stopped()?;
     let policy = match policy.as_str() {
         "overwrite" => ConflictPolicy::Overwrite,
@@ -169,7 +172,10 @@ fn register_sessions(session_ids: Vec<String>, policy: String) -> Result<Vec<Reg
 }
 
 #[tauri::command(async)]
-fn unregister_sessions(metadata_files: Vec<String>, hard_delete: bool) -> Result<Vec<UnregisterReport>, String> {
+fn unregister_sessions(
+    metadata_files: Vec<String>,
+    hard_delete: bool,
+) -> Result<Vec<UnregisterReport>, String> {
     ensure_desktop_stopped()?;
     let code_dir = canonical_code_dir()?;
     let mut results = Vec::new();
@@ -324,7 +330,12 @@ fn migrate_codex_sessions(thread_ids: Vec<String>) -> Result<Vec<CodexMigrateRep
 /// 打开（或聚焦）某会话的预览窗口；id 进入窗口 label，须先消毒。
 /// async 必需：同步 command 在主线程创建 webview 会与消息泵死锁（Windows）
 #[tauri::command]
-async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: String) -> Result<(), String> {
+async fn open_preview(
+    app: tauri::AppHandle,
+    kind: String,
+    id: String,
+    title: String,
+) -> Result<(), String> {
     if !matches!(kind.as_str(), "claude" | "codex") {
         return Err("未知预览类型".into());
     }
@@ -339,10 +350,14 @@ async fn open_preview(app: tauri::AppHandle, kind: String, id: String, title: St
     // WebviewUrl::App 是路径而非 URL，query 会被当作文件名的一部分导致 404 白屏；
     // 参数经 initialization_script 注入（kind/id 已过白名单与 uuid 校验）
     tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
-        .initialization_script(&format!(
+        .initialization_script(format!(
             "window.__PREVIEW__ = {{ kind: {kind:?}, id: {id:?} }};"
         ))
-        .title(if title.is_empty() { "会话预览".into() } else { title })
+        .title(if title.is_empty() {
+            "会话预览".into()
+        } else {
+            title
+        })
         .inner_size(760.0, 640.0)
         .min_inner_size(480.0, 360.0)
         .decorations(false)
@@ -409,6 +424,19 @@ fn fastmode_set_auto(auto: bool) -> Result<FastModeSettings, String> {
 }
 
 #[tauri::command(async)]
+fn native_features_status() -> Result<computer_use::native::NativeStatus, String> {
+    computer_use::native::status().map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
+fn native_features_apply(
+    identity: String,
+    selection: computer_use::native::Selection,
+) -> Result<String, String> {
+    computer_use::native::apply(&identity, selection).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
 fn computer_use_status() -> Result<computer_use::Status, String> {
     computer_use::status().map_err(|e| format!("{e:#}"))
 }
@@ -471,6 +499,8 @@ pub fn run() {
             fastmode_install,
             fastmode_uninstall,
             fastmode_set_auto,
+            native_features_status,
+            native_features_apply,
             computer_use_status,
             computer_use_install,
             computer_use_restore,

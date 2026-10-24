@@ -1,9 +1,15 @@
+import { state } from "./state";
+import type { PoolKind, PoolCombo, CliSession, DiscoveryReport, UnifyPlan, DesktopSession, RunningDesktop, RegisterReport, UnregisterReport, DeleteReport, WrapperState, RendererState, FastModeSettings, FastModeStatus, FastModeReport, ComputerUseStatus, WatchStatus, TombstoneInfo, CodexStatus, CodexSession, CodexMigrateReport, CodexFilter, SessionPreview, PurgeOutcome, AppState } from "./state";
+import { esc } from "./ui/text";
+import { renderFeatures, selectionChanged, canApply, type FeatureGroup, type FeatureView, type NativeStatus, type NativeSelection } from "./ui/native-features";
+import { renderNavigation, renderOverview, renderBackups, renderDiagnostics } from "./ui/shell";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import "./styles.css";
+import "./workspace.css";
 
 // absent outside the Tauri shell (browser preview), where controls are hidden
 function tauriWindow() {
@@ -13,250 +19,6 @@ function tauriWindow() {
     return null;
   }
 }
-
-type PoolKind = "code" | "agent";
-
-interface PoolCombo {
-  rootLabel: string;
-  pool: PoolKind;
-  accountId: string;
-  orgId: string;
-  path: string;
-  isJunction: boolean;
-  junctionTarget: string | null;
-  sessionCount: number;
-  tombstoneCount: number;
-}
-
-interface CliSession {
-  sessionId: string;
-  jsonlPath: string;
-  projectDir: string;
-  cwd: string | null;
-  entrypoint: string | null;
-  firstUserText: string | null;
-  firstTimestamp: string | null;
-  lastActivityMs: number;
-  sizeBytes: number;
-  registered: boolean;
-  tombstoned: boolean;
-  groupId: string;
-}
-
-interface DiscoveryReport {
-  roots: { label: string; path: string; antDid: string | null }[];
-  combos: PoolCombo[];
-  cliSessions: CliSession[];
-}
-
-interface UnifyPlan {
-  pool: PoolKind;
-  canonical: PoolCombo;
-  toMerge: PoolCombo[];
-  alreadyUnified: PoolCombo[];
-  foreignJunctions: PoolCombo[];
-}
-
-interface DesktopSession {
-  fileName: string;
-  sessionId: string;
-  cliSessionId: string | null;
-  cwd: string | null;
-  title: string | null;
-  model: string | null;
-  isArchived: boolean;
-  createdAt: number | null;
-  lastActivityAt: number | null;
-  completedTurns: number | null;
-  sandboxed: boolean;
-}
-
-interface RunningDesktop {
-  rootLabel: string;
-  running: boolean;
-}
-
-interface RegisterReport {
-  sessionId: string;
-  outcome: { status: string; metadataFile?: string; reason?: string } | null;
-  error: string | null;
-}
-
-interface UnregisterReport {
-  metadataFile: string;
-  outcome: { tombstone: string | null; removed: string } | null;
-  error: string | null;
-}
-
-interface DeleteReport {
-  target: string;
-  outcome: {
-    cliSessionId: string | null;
-    metadataRemoved: string | null;
-    tombstoneRemoved: boolean;
-    transcriptRemoved: boolean;
-  } | null;
-  error: string | null;
-}
-
-type WrapperState = "deployed" | "absent" | "broken" | "noCli";
-type RendererState = "patched" | "outdated" | "pristine" | "mismatch" | "notFound" | "unreadable" | "unsupported";
-
-interface FastModeSettings {
-  auto: boolean;
-  installed: boolean;
-  lastRepair: string | null;
-  patchedDesktopVersion: string | null;
-  patchedCliVersion: string | null;
-  lastFailure: string | null;
-  failedFor: string | null;
-}
-
-interface FastModeStatus {
-  supported: boolean;
-  desktopVersion: string | null;
-  msixPath: string | null;
-  cliVersion: string | null;
-  cliDir: string | null;
-  wrapper: WrapperState;
-  renderer: { file: string | null; state: RendererState; missingAnchors: string[] };
-  settings: FastModeSettings;
-  speed: { sessions: number; fast: number; standard: number };
-}
-
-interface FastModeReport {
-  wrapper: string;
-  renderer: string;
-}
-
-interface ComputerUseStatus {
-  supported: boolean;
-  requiresSigning?: boolean;
-  appPath: string;
-  desktopVersion: string | null;
-  state: string;
-  message: string;
-  identities: { fingerprint: string; name: string }[];
-  backupPath: string | null;
-  running: boolean;
-  canInstall: boolean;
-  canRestore: boolean;
-}
-
-interface WatchStatus {
-  running: boolean;
-  paused: boolean;
-  pendingUnify: boolean;
-  pendingFastmode: boolean;
-  lastEvent: string | null;
-}
-
-interface TombstoneInfo {
-  fileName: string;
-  cliSessionId: string;
-  deletedAt: number | null;
-  jsonlPath: string | null;
-  jsonlSize: number;
-}
-
-type CodexStatus = "migrated" | "mirror" | "orphanMirror" | "nativeOnly";
-
-interface CodexSession {
-  threadId: string;
-  rolloutPath: string;
-  cwd: string | null;
-  originator: string | null;
-  title: string | null;
-  sizeBytes: number;
-  lastActivityMs: number;
-  status: CodexStatus;
-  claudePath: string | null;
-}
-
-interface CodexMigrateReport {
-  threadId: string;
-  outcome: { status: string; claudePath?: string; turns?: number; reason?: string } | null;
-  error: string | null;
-}
-
-type CodexFilter = "all" | "nativeOnly" | "migrated" | "mirror";
-
-interface PreviewMessage {
-  role: string;
-  text: string;
-  timestamp: string | null;
-}
-
-interface SessionPreview {
-  title: string | null;
-  cwd: string | null;
-  totalMessages: number;
-  truncated: boolean;
-  messages: PreviewMessage[];
-}
-
-interface PurgeOutcome {
-  fileName: string;
-  markerRemoved: boolean;
-  transcriptRemoved: boolean;
-  error: string | null;
-}
-
-interface AppState {
-  tab: "unify" | "migrate" | "codex" | "fastmode" | "computer-use";
-  report: DiscoveryReport | null;
-  plans: UnifyPlan[];
-  desktopSessions: DesktopSession[];
-  running: RunningDesktop[];
-  watch: WatchStatus | null;
-  selectedCli: Set<string>;
-  selectedDesktop: Set<string>;
-  busy: boolean;
-  maximized: boolean;
-  tombstones: TombstoneInfo[];
-  purgeConfirmOpen: boolean;
-  deleteConfirm: "cli" | "desktop" | null;
-  expandedGroups: Set<string>;
-  codexSessions: CodexSession[];
-  codexRunning: boolean;
-  selectedCodex: Set<string>;
-  codexFilter: CodexFilter;
-  fastmode: FastModeStatus | null;
-  computerUse: ComputerUseStatus | null;
-  computerUseError: string | null;
-  computerUseScanning: boolean;
-  signingIdentity: string;
-  computerUseConfirm: "install" | "restore" | null;
-  computerUseResult: string | null;
-}
-
-const state: AppState = {
-  tab: "unify",
-  report: null,
-  plans: [],
-  desktopSessions: [],
-  running: [],
-  watch: null,
-  selectedCli: new Set(),
-  selectedDesktop: new Set(),
-  busy: false,
-  maximized: false,
-  tombstones: [],
-  purgeConfirmOpen: false,
-  deleteConfirm: null,
-  expandedGroups: new Set(),
-  codexSessions: [],
-  codexRunning: false,
-  selectedCodex: new Set(),
-  codexFilter: "all",
-  fastmode: null,
-  computerUse: null,
-  computerUseError: null,
-  computerUseScanning: false,
-  signingIdentity: "",
-  computerUseConfirm: null,
-  computerUseResult: null,
-};
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 
@@ -281,11 +43,6 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-function esc(text: string): string {
-  const div = document.createElement("div");
-  div.textContent = text;
-  return div.innerHTML;
-}
 
 function toast(message: string, isError = false) {
   const host = document.querySelector("#toast-host")!;
@@ -308,13 +65,9 @@ async function refresh() {
     state.plans = plans;
     state.running = running;
     state.watch = watch;
+    state.scanError = null;
   } catch (error) {
-    app.innerHTML = `
-      <div class="loading">
-        <p>扫描失败：${esc(String(error))}</p>
-        <p style="margin-top: var(--sp-16)"><button class="btn btn-secondary" data-action="refresh">重试</button></p>
-      </div>`;
-    return;
+    state.scanError = `会话扫描失败：${String(error)}`;
   }
   try {
     state.desktopSessions = await invoke<DesktopSession[]>("list_desktop_sessions");
@@ -340,7 +93,7 @@ async function refresh() {
   } catch {
     state.fastmode = null;
   }
-  if (state.tab === "computer-use") await refreshComputerUse();
+  await refreshNative();
   render();
 }
 
@@ -1080,41 +833,29 @@ function updateMigrateSelection() {
 let renderedTab: AppState["tab"] | null = null;
 
 function render() {
-  if (!state.report) {
-    app.innerHTML = '<div class="loading">正在扫描会话存储…</div>';
-    return;
-  }
   const scrollTops = new Map<string, number>();
   const mainScrollTop = renderedTab === state.tab ? app.querySelector("main")?.scrollTop ?? 0 : 0;
   const tabsScrollLeft = app.querySelector(".tabs")?.scrollLeft ?? 0;
   for (const column of app.querySelectorAll<HTMLElement>(".column-scroll")) {
     scrollTops.set(column.id, column.scrollTop);
   }
-  app.innerHTML = `
-    <header class="topbar" data-tauri-drag-region>
-      <div class="brand">${FLOWER_MARK}Claude++<span class="brand-sub">会话守护</span></div>
-      <nav class="tabs">
-        <button class="tab ${state.tab === "unify" ? "active" : ""}" data-tab="unify">存储归一</button>
-        <button class="tab ${state.tab === "migrate" ? "active" : ""}" data-tab="migrate">会话迁移</button>
-        <button class="tab ${state.tab === "codex" ? "active" : ""}" data-tab="codex">Codex 会话迁移</button>
-        <button class="tab ${state.tab === "fastmode" ? "active" : ""}" data-tab="fastmode">Fast Mode</button>
-        <button class="tab ${state.tab === "computer-use" ? "active" : ""}" data-tab="computer-use">Computer Use</button>
-      </nav>
-      ${watchChip()}
-      ${windowControls()}
-    </header>
-    <main>${
-      state.tab === "unify"
-        ? renderUnify()
-        : state.tab === "migrate"
-          ? renderMigrate()
-          : state.tab === "codex"
-            ? renderCodex()
-            : state.tab === "fastmode"
-              ? renderFastMode()
-              : renderComputerUse()
-    }</main>
-  `;
+  const focus = document.activeElement instanceof HTMLInputElement ? { id: document.activeElement.id, start: document.activeElement.selectionStart, end: document.activeElement.selectionEnd } : null;
+  const openDetails = [...app.querySelectorAll<HTMLDetailsElement>("details[open]")].map(el => el.closest<HTMLElement>("[data-feature-id]")?.dataset.featureId).filter(Boolean);
+  const sessionView = !["unify", "migrate", "codex"].includes(state.tab) ? "" : state.report ? state.tab === "unify" ? renderUnify() : state.tab === "migrate" ? renderMigrate() : renderCodex()
+    : `<div class="view"><div class="banner ${state.scanError ? "banner-error" : ""}">${esc(state.scanError ?? "正在扫描会话存储…")}<button class="btn btn-secondary" data-action="refresh">重新扫描</button></div></div>`;
+  const content = state.tab === "overview" ? renderOverview(state)
+    : state.tab === "features" || state.tab === "appearance" ? renderFeatures(featureView())
+    : state.tab === "backups" ? renderBackups(state)
+    : state.tab === "diagnostics" ? renderDiagnostics(state)
+    : state.tab === "fastmode" ? renderFastMode()
+    : state.tab === "computer-use" ? renderComputerUse() : sessionView;
+  app.innerHTML = `<header class="topbar" data-tauri-drag-region><div class="brand">${FLOWER_MARK}Claude++</div><span class="app-purpose">Desktop 工具箱</span>${watchChip()}${windowControls()}</header>
+    <div class="workspace">${renderNavigation(state)}<main id="main-content" tabindex="-1">${content}</main></div>`;
+  if (focus?.id) {
+    const input = document.getElementById(focus.id);
+    if (input instanceof HTMLInputElement) { input.focus({ preventScroll: true }); if (focus.start !== null) input.setSelectionRange(focus.start, focus.end); }
+  }
+  for (const id of openDetails) app.querySelector<HTMLDetailsElement>(`[data-feature-id="${id}"] details`)?.setAttribute("open", "");
   for (const [id, top] of scrollTops) {
     const column = document.getElementById(id);
     if (column) column.scrollTop = top;
@@ -1474,7 +1215,7 @@ function renderComputerUse(): string {
   const restoreDisabled = state.busy || state.computerUseScanning || !cu?.canRestore;
   const confirmation = state.computerUseConfirm;
   const header = `<div class="page-head">
-    <div><div class="eyebrow">Computer Use</div><h1>使用 Desktop 原生电脑操作</h1>
+    <div><div class="eyebrow">Computer Use</div><h1>原生增强安装与恢复</h1>
       <p class="lead">开放 API key 模式的原生电脑操作入口，沿用官方开关、授权卡片和会话 UI；不替换为另一套 MCP 服务。</p></div>
     <div class="head-actions"><button class="btn btn-secondary" data-action="refresh" ${state.busy || state.computerUseScanning ? "disabled" : ""}>重新扫描</button></div>
   </div>`;
@@ -1539,6 +1280,7 @@ async function doComputerUse() {
   try {
     state.computerUseResult = await invoke<string>(action === "install" ? "computer_use_install" : "computer_use_restore",
       action === "install" ? { identity: computerUseRequiresSigning(state.computerUse) ? state.signingIdentity : "" } : undefined);
+    if (action === "restore") state.nativeDirty = false;
   } catch (error) {
     state.computerUseResult = `操作未完成：${String(error)}。原包备份不会删除；请重新扫描查看是否需要还原。`;
   } finally {
@@ -1547,7 +1289,63 @@ async function doComputerUse() {
   }
 }
 
+function featureView(): FeatureView {
+  return { status: state.native, draft: state.nativeDraft, group: state.tab === "appearance" ? "appearance" : state.featureGroup, search: state.featureSearch,
+    busy: state.busy, scanning: state.nativeScanning, error: state.nativeError ?? state.nativeActionError, identity: state.signingIdentity, confirm: state.nativeConfirm, result: state.nativeResult };
+}
+
+async function refreshNative() {
+  if (state.nativeScanning) return;
+  state.nativeScanning = true;
+  state.nativeError = null;
+  render();
+  try {
+    const result = await invoke<NativeStatus>("native_features_status");
+    state.native = result;
+    state.computerUse = result.installation;
+    if (!state.nativeDirty) state.nativeDraft = { ...result.selection };
+    if (!result.installation.identities.some(i => i.fingerprint === state.signingIdentity)) state.signingIdentity = result.installation.identities.length === 1 ? result.installation.identities[0].fingerprint : "";
+  } catch (error) {
+    state.nativeError = String(error);
+    state.native = null;
+  } finally {
+    state.nativeScanning = false;
+    render();
+  }
+}
+
+async function applyNative() {
+  if (!state.nativeConfirm || !canApply(featureView())) return;
+  state.busy = true;
+  state.nativeConfirm = false;
+  state.nativeResult = null;
+  state.nativeActionError = null;
+  render();
+  try {
+    state.nativeResult = await invoke<string>("native_features_apply", { identity: state.signingIdentity, selection: { ...state.nativeDraft } });
+    state.nativeDirty = false;
+  } catch (error) { state.nativeActionError = `操作未完成：${String(error)}。原包备份保留，请检查状态后重试。`; }
+  finally { state.busy = false; await refreshNative(); }
+}
+
 function initMain() {
+app.addEventListener("input", event => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.id === "feature-search") { state.featureSearch = input.value; render(); }
+});
+app.addEventListener("change", event => {
+  const input = event.target;
+  if (input instanceof HTMLInputElement && input.dataset.nativeFeature && !state.busy && !state.nativeScanning) {
+    const key = input.dataset.nativeFeature as keyof NativeSelection;
+    if (!state.native?.supportedFeatures.includes(key) || !(key in state.nativeDraft)) return;
+    state.nativeDraft[key] = input.checked;
+    state.nativeDirty = selectionChanged(state.nativeDraft, state.native.selection);
+    state.nativeConfirm = false;
+    render();
+    app.querySelector<HTMLInputElement>(`[data-native-feature="${key}"]`)?.focus();
+  }
+  if (input instanceof HTMLSelectElement && input.id === "native-signing-identity") { state.signingIdentity = input.value; state.nativeConfirm = false; render(); }
+});
 app.addEventListener("change", (event) => {
   const target = event.target as HTMLSelectElement;
   if (target.id === "cu-signing-identity") {
@@ -1563,10 +1361,18 @@ app.addEventListener("click", (event) => {
   if (tab) {
     if (state.busy) return;
     state.computerUseConfirm = null;
+    state.nativeConfirm = false;
     state.tab = tab.dataset.tab as AppState["tab"];
     render();
     if (state.tab === "computer-use") void refreshComputerUse();
+    if (["features", "appearance", "backups", "diagnostics"].includes(state.tab) && !state.native) void refreshNative();
     return;
+  }
+  const group = target.closest<HTMLElement>("[data-feature-group]")?.dataset.featureGroup;
+  if (group && ["all", "interaction", "appearance", "workflow"].includes(group)) {
+    state.featureGroup = group as FeatureGroup;
+    if (state.tab === "appearance") state.tab = "features";
+    render(); return;
   }
   const action = target.closest<HTMLElement>("[data-action]")?.dataset.action;
   if (action) {
@@ -1575,6 +1381,16 @@ app.addEventListener("click", (event) => {
     if (action === "win-max") void tauriWindow()?.toggleMaximize();
     if (action === "win-close") void tauriWindow()?.close();
     if (action === "refresh") void refresh();
+    if (action === "native-refresh") void refreshNative();
+    if (action === "native-reset" && state.native) { state.nativeDraft = { ...state.native.selection }; state.nativeDirty = false; state.nativeConfirm = false; render(); }
+    if (action === "native-prepare" && canApply(featureView())) { state.nativeConfirm = true; render(); app.querySelector('[data-action="native-confirm"]')?.scrollIntoView({ block: "nearest" }); }
+    if (action === "native-cancel") { state.nativeConfirm = false; render(); }
+    if (action === "native-confirm") void applyNative();
+    if (action === "native-restore-prepare" && state.native?.installation.canRestore) {
+      state.computerUseConfirm = "restore";
+      state.tab = "computer-use";
+      render();
+    }
     if (action === "unify") void doUnify();
     if (action === "register") void doRegister();
     if (action === "unregister") void doUnregister();
@@ -1752,6 +1568,7 @@ function syncMaximized() {
 void tauriWindow()?.onResized(() => syncMaximized());
 syncMaximized();
 
+render();
 void refresh();
 setInterval(() => {
   void invoke<WatchStatus>("watch_status").then((w) => {

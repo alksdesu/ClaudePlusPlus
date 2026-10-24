@@ -2,6 +2,7 @@
 mod asar;
 #[cfg(target_os = "macos")]
 mod macos;
+pub mod native;
 #[cfg(any(test, windows))]
 mod pe;
 #[cfg(any(test, target_os = "macos"))]
@@ -37,7 +38,7 @@ pub struct Status {
 }
 
 #[cfg(target_os = "macos")]
-pub use macos::{install, install_copy, restore, restore_copy, status, status_copy};
+pub use macos::{apply_copy, install, install_copy, restore, restore_copy, status, status_copy};
 #[cfg(windows)]
 pub use windows::{
     elevated_entry, install, install_copy, restore, restore_copy, status, status_copy,
