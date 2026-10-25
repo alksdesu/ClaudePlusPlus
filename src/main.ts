@@ -1013,6 +1013,7 @@ async function doUnregister() {
 /* ---------- Fast Mode 页 ---------- */
 
 const WRAPPER_META: Record<WrapperState, { label: string; cls: string }> = {
+  outdated: { label: "wrapper 待更新", cls: "pill-pending" },
   deployed: { label: "wrapper 在位", cls: "pill-registered" },
   absent: { label: "官方原样", cls: "pill-pending" },
   broken: { label: "状态异常", cls: "pill-tombstone" },

@@ -86,7 +86,7 @@ export interface DeleteReport {
   error: string | null;
 }
 
-export type WrapperState = "deployed" | "absent" | "broken" | "noCli";
+export type WrapperState = "deployed" | "outdated" | "absent" | "broken" | "noCli";
 export type RendererState = "patched" | "outdated" | "pristine" | "mismatch" | "notFound" | "unreadable" | "unsupported";
 
 export interface FastModeSettings {

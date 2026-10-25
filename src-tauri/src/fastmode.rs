@@ -21,6 +21,7 @@ pub const ELEVATED_FLAG: &str = "--fastmode-elevated";
 #[serde(rename_all = "camelCase")]
 pub enum WrapperState {
     Deployed,
+    Outdated,
     Absent,
     Broken,
     NoCli,
@@ -1037,7 +1038,25 @@ mod imp {
     }
 
     fn wrapper_state(dir: &Path) -> WrapperState {
-        wrapper_state_from(slot_occupant(&dir.join(CLI_EXE)), dir.join(REAL_EXE).is_file())
+        let exe = dir.join(CLI_EXE);
+        let state = wrapper_state_from(slot_occupant(&exe), dir.join(REAL_EXE).is_file());
+        if state == WrapperState::Deployed {
+            return match fs::read(exe) {
+                Ok(bytes) if memchr::memmem::find(&bytes, wrapper_source_hash().as_bytes()).is_some() => state,
+                Ok(_) => WrapperState::Outdated,
+                Err(_) => WrapperState::Broken,
+            };
+        }
+        state
+    }
+
+    fn wrapper_source_hash() -> String {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(WRAPPER_SOURCE.as_bytes()))
+    }
+
+    fn wrapper_source() -> String {
+        WRAPPER_SOURCE.replace("__CPP_WRAPPER_SOURCE_HASH__", &wrapper_source_hash())
     }
 
     pub(super) fn reclaim_stray_stash(version_dir: &Path) -> Result<()> {
@@ -1281,10 +1300,10 @@ mod imp {
         let real = dir.join(REAL_EXE);
         stage_wrapper_slot(&exe, &real, slot_occupant(&exe))?;
         let source = std::env::temp_dir().join("claude-plus-plus-fast-wrapper.cs");
-        let compiled = fs::write(&source, WRAPPER_SOURCE).is_ok() && {
+        let compiled = fs::write(&source, wrapper_source()).is_ok() && {
             let out = format!("-out:{}", exe.display());
             let source_arg = source.to_string_lossy().into_owned();
-            quiet(CSC, &["-nologo", "-optimize", &out, &source_arg])
+            quiet(CSC, &["-nologo", "-optimize", "-r:System.Web.Extensions.dll", &out, &source_arg])
         };
         let _ = fs::remove_file(&source);
         if !compiled || !exe.is_file() {
@@ -2145,13 +2164,45 @@ mod imp {
             bytes
         }
 
+        #[test]
+        fn wrapper_source_changes_require_redeployment() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join(CLI_EXE), b"legacy wrapper").unwrap();
+            fs::write(dir.path().join(REAL_EXE), official("current")).unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Outdated);
+            fs::write(dir.path().join(CLI_EXE), wrapper_source_hash()).unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
+            fs::write(dir.path().join(CLI_EXE), b"other source hash").unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Outdated);
+        }
+
+        #[test]
+        fn windows_wrapper_preserves_settings_and_prepares_the_child_environment() {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("wrapper.cs");
+            let tests = dir.path().join("wrapper.tests.cs");
+            let real = dir.path().join(REAL_EXE);
+            fs::write(&source, wrapper_source()).unwrap();
+            fs::write(&tests, include_str!("fastmode/wrapper.tests.cs")).unwrap();
+            let output = Command::new(CSC).args([
+                "-nologo", "-optimize", "-r:System.Web.Extensions.dll", "-main:WrapperTests",
+                &format!("-out:{}", real.display()), &source.to_string_lossy(), &tests.to_string_lossy(),
+            ]).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            deploy_wrapper(dir.path()).unwrap();
+            assert_eq!(wrapper_state(dir.path()), WrapperState::Deployed);
+            let result = Command::new(real).output().unwrap();
+            assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains("assertions passed"));
+        }
+
         /// Desktop 2.19675 搬旧布局的现场：wrapper 被带进构建子目录，claude-real.exe 留在外层
         #[test]
         fn migrated_layout_gets_its_body_back() {
             let version = tempfile::tempdir().unwrap();
             let build = version.path().join("3f4bed3e44ad");
             fs::create_dir_all(&build).unwrap();
-            fs::write(build.join(CLI_EXE), b"wrapper").unwrap();
+            fs::write(build.join(CLI_EXE), wrapper_source_hash()).unwrap();
             fs::write(version.path().join(REAL_EXE), official("284")).unwrap();
             assert_eq!(wrapper_state(&build), WrapperState::Broken);
 
@@ -2182,7 +2233,7 @@ mod imp {
         #[test]
         fn legacy_deployment_keeps_its_own_body() {
             let version = tempfile::tempdir().unwrap();
-            fs::write(version.path().join(CLI_EXE), b"wrapper").unwrap();
+            fs::write(version.path().join(CLI_EXE), wrapper_source_hash()).unwrap();
             fs::write(version.path().join(REAL_EXE), official("284")).unwrap();
             let build = version.path().join("635c1867224a");
             fs::create_dir_all(&build).unwrap();
@@ -2521,36 +2572,52 @@ mod imp {
         (arg0.file_name()? == WRAPPER_NAME).then_some(arg0)
     }
 
-    /// 保留 Desktop 自带的 disableAutoMode 等键；解析不了就退回只带 fastMode 的最小设置
+    /// 保留 Desktop 自带的 disableAutoMode 等键；文件路径等非对象设置原样交给官方 CLI 解析
     fn merge_fast(settings: &str) -> String {
+        if settings.trim().is_empty() {
+            return FAST_ONLY.to_string();
+        }
         match serde_json::from_str::<serde_json::Value>(settings) {
-            Ok(serde_json::Value::Object(mut map)) => {
-                map.entry("fastMode").or_insert(serde_json::Value::Bool(true));
-                serde_json::to_string(&serde_json::Value::Object(map))
-                    .unwrap_or_else(|_| FAST_ONLY.to_string())
+            Ok(serde_json::Value::Object(mut map)) if !map.contains_key("fastMode") => {
+                map.insert("fastMode".into(), serde_json::Value::Bool(true));
+                serde_json::Value::Object(map).to_string()
             }
-            _ => FAST_ONLY.to_string(),
+            _ => settings.to_string(),
         }
     }
 
-    fn merged_args() -> Vec<OsString> {
-        let settings_flag = std::ffi::OsStr::new("--settings");
+    fn merge_fast_arg(value: OsString) -> OsString {
+        match value.to_str() {
+            Some(settings) => merge_fast(settings).into(),
+            None => value,
+        }
+    }
+
+    fn merged_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        const FLAG: &str = "--settings";
+        const INLINE: &[u8] = b"--settings=";
         let mut out = Vec::new();
         let mut merged = false;
-        let mut rest = std::env::args_os().skip(1);
+        let mut rest = args.into_iter();
         while let Some(arg) = rest.next() {
-            if arg == settings_flag {
-                if let Some(value) = rest.next() {
-                    out.push(arg);
-                    out.push(merge_fast(&value.to_string_lossy()).into());
-                    merged = true;
-                    continue;
-                }
+            if arg == FLAG {
+                out.push(arg);
+                out.extend(rest.next().map(merge_fast_arg));
+                merged = true;
+                continue;
             }
-            out.push(arg);
+            match arg.as_bytes().strip_prefix(INLINE) {
+                Some(value) => {
+                    let value = merge_fast_arg(std::ffi::OsStr::from_bytes(value).to_os_string());
+                    out.push(OsString::from_vec([INLINE, value.as_bytes()].concat()));
+                    merged = true;
+                }
+                None => out.push(arg),
+            }
         }
         if !merged {
-            out.push(settings_flag.to_os_string());
+            out.push(FLAG.into());
             out.push(FAST_ONLY.into());
         }
         out
@@ -2578,9 +2645,37 @@ mod imp {
         }
     }
 
+    /// 与官方 CLI 同规则：只读 .json 结尾、不以点开头的文件或软链
+    fn managed_fast_mode_dropins_restricted(dir: &Path) -> bool {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+        };
+        entries.into_iter().any(|entry| {
+            let Ok(entry) = entry else { return true };
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".json") || name.starts_with('.') {
+                return false;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_file() || kind.is_symlink() => {
+                    managed_fast_mode_file_restricted(&entry.path())
+                }
+                Ok(_) => false,
+                Err(_) => true,
+            }
+        })
+    }
+
+    fn managed_root_restricted(root: &Path) -> bool {
+        managed_fast_mode_file_restricted(&root.join("managed-settings.json"))
+            || managed_fast_mode_dropins_restricted(&root.join("managed-settings.d"))
+    }
+
     fn desktop_fast_mode_override(
         env: impl Fn(&str) -> Option<OsString>,
-        managed_settings: &Path,
+        managed_root: &Path,
         managed_preferences: &Path,
     ) -> bool {
         let is = |name, value| env(name).as_deref() == Some(std::ffi::OsStr::new(value));
@@ -2589,7 +2684,7 @@ mod imp {
             || !is("CLAUDE_CODE_DISABLE_FAST_MODE", "1")
             || env("CLAUDE_CODE_PROCESS_WRAPPER").is_some()
             || env("CLAUDE_CODE_MANAGED_SETTINGS_PATH").is_some()
-            || managed_fast_mode_file_restricted(managed_settings)
+            || managed_root_restricted(managed_root)
         {
             return false;
         }
@@ -2656,14 +2751,15 @@ mod imp {
         let real = argv0.with_file_name(REAL_NAME);
         let clear_desktop_default = desktop_fast_mode_override(
             |name| std::env::var_os(name),
-            Path::new("/Library/Application Support/ClaudeCode/managed-settings.json"),
+            Path::new("/Library/Application Support/ClaudeCode"),
             Path::new("/Library/Managed Preferences"),
         );
         let api_key = fast_mode_api_key(
             std::env::var_os("ANTHROPIC_API_KEY"),
             std::env::var_os("ANTHROPIC_AUTH_TOKEN"),
         );
-        let error = wrapper_command(&real, merged_args(), clear_desktop_default, api_key).exec();
+        let args = merged_args(std::env::args_os().skip(1));
+        let error = wrapper_command(&real, args, clear_desktop_default, api_key).exec();
         eprintln!("[fast-wrapper] exec {} 失败: {error}", real.display());
         1
     }
@@ -2685,11 +2781,10 @@ mod imp {
         #[test]
         fn fast_override_only_accepts_the_desktop_default() {
             let dir = tempfile::tempdir().unwrap();
-            let settings = dir.path().join("managed-settings.json");
             let preferences = dir.path().join("preferences");
             assert!(desktop_fast_mode_override(
                 desktop_env,
-                &settings,
+                dir.path(),
                 &preferences
             ));
             for (name, value) in [
@@ -2712,7 +2807,7 @@ mod imp {
                     }
                 };
                 assert!(
-                    !desktop_fast_mode_override(env, &settings, &preferences),
+                    !desktop_fast_mode_override(env, dir.path(), &preferences),
                     "{name}"
                 );
             }
@@ -2735,27 +2830,55 @@ mod imp {
             ] {
                 fs::write(&settings, source).unwrap();
                 assert!(
-                    !desktop_fast_mode_override(desktop_env, &settings, &preferences),
+                    !desktop_fast_mode_override(desktop_env, dir.path(), &preferences),
                     "{source}"
                 );
             }
             fs::write(&settings, r#"{"sandbox":{"enabled":true}}"#).unwrap();
             assert!(desktop_fast_mode_override(
                 desktop_env,
-                &settings,
+                dir.path(),
                 &preferences
             ));
         }
 
         #[test]
+        fn fast_override_reads_managed_dropins_like_the_cli() {
+            let dir = tempfile::tempdir().unwrap();
+            let preferences = dir.path().join("preferences");
+            let dropins = dir.path().join("managed-settings.d");
+            fs::create_dir_all(dropins.join("nested.json")).unwrap();
+            fs::write(dropins.join(".disabled.json"), r#"{"fastMode":false}"#).unwrap();
+            fs::write(dropins.join("notes.txt"), "not json").unwrap();
+            fs::write(dropins.join("10-sandbox.json"), r#"{"sandbox":{"enabled":true}}"#).unwrap();
+            std::os::unix::fs::symlink(dir.path().join("missing.json"), dropins.join("20-gone.json"))
+                .unwrap();
+            assert!(desktop_fast_mode_override(desktop_env, dir.path(), &preferences));
+            for source in [
+                r#"{"fastMode":false}"#,
+                r#"{"processWrapper":"/org/launcher"}"#,
+                r#"{"env":{"CLAUDE_CODE_DISABLE_FAST_MODE":"1"}}"#,
+                "not json",
+            ] {
+                fs::write(dropins.join("30-policy.json"), source).unwrap();
+                assert!(
+                    !desktop_fast_mode_override(desktop_env, dir.path(), &preferences),
+                    "{source}"
+                );
+            }
+            fs::remove_dir_all(&dropins).unwrap();
+            fs::write(&dropins, "not a directory").unwrap();
+            assert!(!desktop_fast_mode_override(desktop_env, dir.path(), &preferences));
+        }
+
+        #[test]
         fn fast_override_preserves_machine_and_user_mdm_settings() {
             let dir = tempfile::tempdir().unwrap();
-            let settings = dir.path().join("managed-settings.json");
             let preferences = dir.path().join("preferences");
             fs::create_dir_all(preferences.join("user")).unwrap();
             assert!(desktop_fast_mode_override(
                 desktop_env,
-                &settings,
+                dir.path(),
                 &preferences
             ));
             for parent in [&preferences, &preferences.join("user")] {
@@ -2763,7 +2886,7 @@ mod imp {
                 fs::write(&policy, "managed").unwrap();
                 assert!(!desktop_fast_mode_override(
                     desktop_env,
-                    &settings,
+                    dir.path(),
                     &preferences
                 ));
                 fs::remove_file(policy).unwrap();
@@ -2772,7 +2895,7 @@ mod imp {
             fs::write(&preferences, "not a directory").unwrap();
             assert!(!desktop_fast_mode_override(
                 desktop_env,
-                &settings,
+                dir.path(),
                 &preferences
             ));
         }
@@ -2940,15 +3063,47 @@ mod imp {
             let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
             assert_eq!(v["fastMode"], serde_json::json!(true));
             assert_eq!(v["disableAutoMode"], serde_json::json!("disable"));
-            // 显式关掉的就地改写，不留重复键
-            let over: serde_json::Value =
-                serde_json::from_str(&merge_fast(r#"{"fastMode":false,"x":1}"#)).unwrap();
-            assert_eq!(over["fastMode"], serde_json::json!(false));
-            assert_eq!(over["x"], serde_json::json!(1));
-            // 空的、坏的、不是对象的，一律退回最小设置
+            let explicit = r#"{"fastMode":false,"x":1}"#;
+            assert_eq!(merge_fast(explicit), explicit);
             assert_eq!(merge_fast("{}"), FAST_ONLY);
-            assert_eq!(merge_fast("not json"), FAST_ONLY);
-            assert_eq!(merge_fast("[1,2]"), FAST_ONLY);
+            assert_eq!(merge_fast(" "), FAST_ONLY);
+            // --settings 也接受文件路径，非对象内容交给官方 CLI 解析
+            for settings in ["not json", "/Users/me/settings file.json", "[1,2]", "null"] {
+                assert_eq!(merge_fast(settings), settings);
+            }
+        }
+
+        #[test]
+        fn merged_args_merge_every_settings_form_once() {
+            use std::os::unix::ffi::OsStringExt;
+            let args = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
+            let json = |value: &OsString, prefix: &str| -> serde_json::Value {
+                serde_json::from_str(value.to_str().unwrap().strip_prefix(prefix).unwrap()).unwrap()
+            };
+            let expected = serde_json::json!({"x": 1, "fastMode": true});
+
+            assert_eq!(merged_args(args(&["-p"])), args(&["-p", "--settings", FAST_ONLY]));
+            let spaced = merged_args(args(&["--settings", r#"{"x":1}"#, "-p"]));
+            assert_eq!(spaced.len(), 3);
+            assert_eq!(spaced[0], "--settings");
+            assert_eq!(spaced[2], "-p");
+            assert_eq!(json(&spaced[1], ""), expected);
+            let inline = merged_args(args(&[r#"--settings={"x":1}"#]));
+            assert_eq!(inline.len(), 1);
+            assert_eq!(json(&inline[0], "--settings="), expected);
+
+            for kept in [
+                args(&["--settings"]),
+                args(&["--settings", "/tmp/settings.json"]),
+                args(&["--settings=/tmp/settings.json"]),
+                args(&["--settings", r#"{"fastMode":false}"#]),
+            ] {
+                assert_eq!(merged_args(kept.clone()), kept);
+            }
+            let raw = vec![OsString::from("--settings"), OsString::from_vec(b"/tmp/\xff.json".to_vec())];
+            assert_eq!(merged_args(raw.clone()), raw);
+            let raw_inline = vec![OsString::from_vec(b"--settings=/tmp/\xff.json".to_vec())];
+            assert_eq!(merged_args(raw_inline.clone()), raw_inline);
         }
 
         #[test]

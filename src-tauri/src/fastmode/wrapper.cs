@@ -9,6 +9,10 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Web.Script.Serialization;
+using Microsoft.Win32;
+
+[assembly: AssemblyInformationalVersion("__CPP_WRAPPER_SOURCE_HASH__")]
 
 class W {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
@@ -53,7 +57,7 @@ class W {
     }
 
     // Windows 命令行参数转义（CommandLineToArgvW 的反向规则）
-    static string Q(string s) {
+    internal static string Q(string s) {
         if (s.Length > 0 && s.IndexOfAny(new[] { ' ', '\t', '"', '\n' }) < 0) return s;
         var b = new StringBuilder("\"");
         int bs = 0;
@@ -67,31 +71,107 @@ class W {
         return b.ToString();
     }
 
-    static readonly Regex FastKey = new Regex("\"fastMode\"\\s*:\\s*(true|false)");
-
-    // 保留 Desktop 自带的 disableAutoMode/enabledPlugins；若它已显式传了 fastMode 则就地改写，前插会留下重复 key 让后者胜出
-    static string MergeFast(string json) {
-        var t = (json ?? "").Trim();
-        if (t.Length == 0 || t == "{}") return "{\"fastMode\":true}";
-        if (FastKey.IsMatch(t)) return FastKey.Replace(t, "\"fastMode\":true", 1);
-        if (t[0] == '{') return "{\"fastMode\":true," + t.Substring(1);
-        return "{\"fastMode\":true}";
+    static Dictionary<string, object> ParseSettings(string json) {
+        try {
+            return new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }.DeserializeObject(json) as Dictionary<string, object>;
+        } catch {
+            return null;
+        }
     }
 
-    static int Main(string[] a) {
-        string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        string real = Path.Combine(dir, "claude-real.exe");
-        if (!File.Exists(real)) {
-            Console.Error.WriteLine("[fast-wrapper] claude-real.exe missing");
-            return 1;
+    internal static string MergeFast(string json) {
+        var t = (json ?? "").Trim();
+        if (t.Length == 0) return "{\"fastMode\":true}";
+        var settings = ParseSettings(t);
+        if (settings == null || settings.ContainsKey("fastMode")) return json;
+        settings["fastMode"] = true;
+        return new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 }.Serialize(settings);
+    }
+
+    internal static bool ManagedSettingsRestricted(string json) {
+        var settings = ParseSettings(json);
+        if (settings == null) return true;
+        object value;
+        if (settings.TryGetValue("fastMode", out value) && Object.Equals(value, false)) return true;
+        if (settings.TryGetValue("fastModePerSessionOptIn", out value) && Object.Equals(value, true)) return true;
+        if (settings.ContainsKey("processWrapper")) return true;
+        if (settings.TryGetValue("env", out value)) {
+            var env = value as Dictionary<string, object>;
+            if (env != null && (env.ContainsKey("CLAUDE_CODE_DISABLE_FAST_MODE") || env.ContainsKey("CLAUDE_CODE_PROCESS_WRAPPER"))) return true;
         }
+        return false;
+    }
+
+    internal static bool ManagedFileRestricted(string path) {
+        try { return ManagedSettingsRestricted(File.ReadAllText(path)); }
+        catch (FileNotFoundException) { return false; }
+        catch (DirectoryNotFoundException) { return false; }
+        catch { return true; }
+    }
+
+    internal static bool ManagedDirectoryRestricted(string path) {
+        try {
+            foreach (var file in Directory.GetFiles(path, "*.json")) {
+                if (!Path.GetFileName(file).StartsWith(".", StringComparison.Ordinal) && ManagedFileRestricted(file)) return true;
+            }
+            return false;
+        } catch (DirectoryNotFoundException) { return false; }
+        catch { return true; }
+    }
+
+    internal static bool ManagedRegistryValueRestricted(object value) {
+        return value != null && (!(value is string) || ManagedSettingsRestricted((string)value));
+    }
+
+    static bool ManagedRegistryRestricted(RegistryHive hive, RegistryView view) {
+        try {
+            using (var root = RegistryKey.OpenBaseKey(hive, view))
+            using (var key = root.OpenSubKey(@"SOFTWARE\Policies\ClaudeCode")) {
+                return key != null && ManagedRegistryValueRestricted(key.GetValue("Settings", null, RegistryValueOptions.DoNotExpandEnvironmentNames));
+            }
+        } catch { return true; }
+    }
+
+    static bool ManagedFastRestricted() {
+        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "ClaudeCode");
+        if (ManagedFileRestricted(Path.Combine(root, "managed-settings.json")) || ManagedDirectoryRestricted(Path.Combine(root, "managed-settings.d"))) return true;
+        foreach (var hive in new[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser }) {
+            if (ManagedRegistryRestricted(hive, RegistryView.Registry32)) return true;
+            if (Environment.Is64BitOperatingSystem && ManagedRegistryRestricted(hive, RegistryView.Registry64)) return true;
+        }
+        return false;
+    }
+
+    internal static bool DesktopFastOverride(Func<string, string> env, Func<bool> managedRestricted) {
+        return env("CLAUDE_CODE_ENTRYPOINT") == "claude-desktop-3p"
+            && env("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST") == "1"
+            && env("CLAUDE_CODE_DISABLE_FAST_MODE") == "1"
+            && env("CLAUDE_CODE_PROCESS_WRAPPER") == null
+            && env("CLAUDE_CODE_MANAGED_SETTINGS_PATH") == null
+            && !managedRestricted();
+    }
+
+    internal static void ApplyFastEnvironment(ProcessStartInfo command, Func<bool> managedRestricted) {
+        var env = command.EnvironmentVariables;
+        if (!DesktopFastOverride(key => env[key], managedRestricted)) return;
+        env.Remove("CLAUDE_CODE_DISABLE_FAST_MODE");
+        var token = env["ANTHROPIC_AUTH_TOKEN"];
+        if (String.IsNullOrEmpty(env["ANTHROPIC_API_KEY"]) && token != null && token.Length > 24
+            && Regex.IsMatch(token, @"\Ask-ant-api[A-Za-z0-9_-]+\z")) {
+            env["ANTHROPIC_API_KEY"] = token;
+        }
+    }
+
+    internal static string MergeArguments(string[] a) {
         var outArgs = new List<string>();
         bool merged = false;
         for (int i = 0; i < a.Length; i++) {
-            if (a[i] == "--settings" && i + 1 < a.Length) {
+            if (a[i] == "--settings") {
                 outArgs.Add("--settings");
-                outArgs.Add(MergeFast(a[i + 1]));
-                i++;
+                if (i + 1 < a.Length) outArgs.Add(MergeFast(a[++i]));
+                merged = true;
+            } else if (a[i].StartsWith("--settings=", StringComparison.Ordinal)) {
+                outArgs.Add("--settings=" + MergeFast(a[i].Substring("--settings=".Length)));
                 merged = true;
             } else {
                 outArgs.Add(a[i]);
@@ -103,8 +183,19 @@ class W {
         }
         var sb = new StringBuilder();
         foreach (var x in outArgs) { sb.Append(Q(x)); sb.Append(' '); }
+        return sb.ToString();
+    }
+
+    static int Main(string[] a) {
+        string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+        string real = Path.Combine(dir, "claude-real.exe");
+        if (!File.Exists(real)) {
+            Console.Error.WriteLine("[fast-wrapper] claude-real.exe missing");
+            return 1;
+        }
         // 不 redirect 标准流：子进程继承 stdin/stdout/stderr，透传 SDK 的 stream-json 管道
-        var psi = new ProcessStartInfo { FileName = real, Arguments = sb.ToString(), UseShellExecute = false };
+        var psi = new ProcessStartInfo { FileName = real, Arguments = MergeArguments(a), UseShellExecute = false };
+        ApplyFastEnvironment(psi, ManagedFastRestricted);
         var p = Process.Start(psi);
         BindToJob(p);
         p.WaitForExit();
