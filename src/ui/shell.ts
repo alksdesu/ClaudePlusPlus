@@ -15,7 +15,7 @@ function packageState(state: AppState): string {
   return state.nativeScanning ? "正在检测" : state.nativeError ? "检测失败" : values[state.native?.installation.state ?? ""] ?? "等待检测";
 }
 export function renderOverview(state: AppState): string {
-  const count = state.native ? selectedNames(state.native.selection).length : "—";
+  const count = state.native ? selectedNames(state.native.selection, state.native.platform).length : "—";
   const available = state.native?.supportedFeatures.length ?? "—";
   const s = state.native?.installation;
   return `<div class="view overview-view"><div class="page-head"><div><div class="eyebrow">YOUR DESKTOP, ORGANIZED</div><h1>把原生能力，放回你的工作流</h1><p class="lead">管理原生功能和会话存储。</p></div><button class="btn btn-secondary" data-action="refresh" ${state.busy ? "disabled" : ""}>重新扫描</button></div>
@@ -26,7 +26,7 @@ export function renderOverview(state: AppState): string {
 }
 export function renderBackups(state: AppState): string {
   const s = state.native?.installation;
-  const enabled = state.native ? selectedNames(state.native.selection) : [];
+  const enabled = state.native ? selectedNames(state.native.selection, state.native.platform) : [];
   return `<div class="view"><div class="page-head"><div><div class="eyebrow">RECOVERY</div><h1>每次更改，都有回来的路</h1><p class="lead">还原只动应用本身，不碰会话和 API 配置。</p></div></div>
     <section class="card"><div class="section-heading"><h2>当前原生增强</h2><span class="pill pill-pending">${esc(packageState(state))}</span></div><dl class="diagnostic-list"><dt>应用</dt><dd class="mono">${esc(s?.appPath ?? "尚未检测")}</dd><dt>原包备份</dt><dd class="mono">${esc(s?.backupPath ?? "首次安装时创建")}</dd><dt>功能组合</dt><dd>${esc(enabled.join("、") || "未安装")}</dd></dl><div class="computer-use-actions"><button class="btn btn-secondary" data-tab="features">调整功能组合</button><button class="btn btn-danger" data-action="native-restore-prepare" ${!s?.canRestore || state.busy ? "disabled" : ""}>还原官方应用…</button></div></section>
     <section class="card"><h2>还原前会检查</h2><ul class="notice-list"><li>备份是不是那份官方应用。</li><li>应用有没有被外部更新过，免得覆盖新版本。</li><li>Desktop 是否已退出。</li></ul></section><section class="card"><h2>其他恢复入口</h2><p>Fast Mode 的 wrapper 和会话存储在各自页面还原，这里不会动它们。</p><div class="computer-use-actions"><button class="btn btn-secondary" data-tab="fastmode">Fast Mode</button><button class="btn btn-secondary" data-tab="unify">会话存储</button></div></section></div>`;

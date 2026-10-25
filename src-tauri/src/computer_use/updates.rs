@@ -90,7 +90,8 @@ pub(crate) fn names(s: Selection) -> Vec<String> {
     [
         (s.computer_use, "Computer Use"),
         (s.chinese, "简体与繁体中文"),
-        (s.simulators, "iOS / Android 模拟器"),
+        // Windows 版 Desktop 不带 iOS 模拟器
+        (s.simulators, if cfg!(windows) { "Android 模拟器" } else { "iOS / Android 模拟器" }),
         (s.prewarm, "CLI 原生预热"),
         (s.fast_mode_status, "Fast Mode 原生开关"),
     ]

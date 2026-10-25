@@ -893,7 +893,8 @@ mod tests {
     }
 
     const RULES_MAIN: &str = concat!(
-        r#"var A=1,B=2,C=3,D=4;function fv(e){return{value:e,on:!!e,off:!e,source:"force","#,
+        r#"var A=1,B=2,C=3,D=4;Ky("1291166712",a);Ky("40173473",a);Zy("4272007212",!1);Zy("2784298314",!1);"#,
+        r#"function fv(e){return{value:e,on:!!e,off:!e,source:"force","#,
         r#"experiment:null,experimentResult:null}}"#,
         "function pick(e){return e.selfHostedSessions?e.builtinBrowserEnabled?A:B:",
         "e.builtinBrowserEnabled?C:D}",
@@ -913,6 +914,7 @@ mod tests {
         let platform = rules::Platform::Windows;
         let selection = super::super::native::Selection {
             computer_use: true,
+            simulators: true,
             prewarm: true,
             ..Default::default()
         };

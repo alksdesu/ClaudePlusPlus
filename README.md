@@ -21,7 +21,7 @@ Share sessions across Claude Desktop and Claude Code CLI on the same machine, im
 | **简体与繁体中文** | ✓ | ✓ | 装官方词典并打开语言选择器，未覆盖的键保留英文 |
 | **Fast Mode 原生开关** | ✓ | ✓ | 模型菜单里的 Fast 开关，状态跟随 CLI |
 | **CLI 原生预热**（实验） | ✓ | ✓ | 备用进程池，多占常驻内存 |
-| **iOS / Android 模拟器** | — | ✓ | Windows 构建里没有这部分代码 |
+| **iOS / Android 模拟器** | Android | ✓ | 需要本机装好 SDK；Windows 版 Desktop 不带 iOS 模拟器 |
 
 功能可以任意组合，每次都从官方基线重新生成，关掉一项不影响其他选中的。应用被外部更新或改过、备份损坏、有未完成事务时一律拒绝覆盖，可从「备份与恢复」还原。
 
@@ -54,7 +54,7 @@ Claude++ 针对这两层分别下手。
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
 | **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 wrapper 请求默认开启；原生开关可通过「原生增强 → Fast Mode 原生开关」的整包重签流程安装。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
-| **原生功能** | 在「功能增强」页勾选安装，「备份与恢复」页还原。Computer Use、中文、Fast 开关和预热两端都可用，模拟器仅 macOS。补丁由结构化规则现场生成，命中不唯一或校验不过就拒绝修改 |
+| **原生功能** | 在「功能增强」页勾选安装，「备份与恢复」页还原。Computer Use、中文、Fast 开关和预热两端都可用，模拟器在 Windows 上只有 Android。补丁由结构化规则现场生成，命中不唯一或校验不过就拒绝修改 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
 
 ### 存储结构
@@ -125,7 +125,7 @@ Fast Mode 支持单文件和主逻辑、模型菜单分布在多个 renderer 文
 
 面向 Windows x64 的 MSIX 包。完全退出 Desktop 后，在「功能增强」页勾选要装的功能，点「应用更改」并确认 UAC。装完重启 Desktop，在设置里打开对应开关。
 
-按勾选的功能决定动哪些文件：主进程开关改 `resources/app.asar`，并同步 exe 的 `INTEGRITY / ELECTRONASAR` 资源；中文和 Fast 开关改 `resources/ion-dist` 下的 renderer，中文另外写入官方词典。全部先在副本上改完校验再替换，带操作锁和恢复记录，中途失败可还原。ASAR 校验 fuse 保持开启；改过的 exe 不再带官方 Authenticode 签名，还原即恢复。
+按勾选的功能决定动哪些文件：主进程开关改 `resources/app.asar`，并同步 exe 的 `INTEGRITY / ELECTRONASAR` 资源；中文和 Fast 开关改 `resources/ion-dist` 下的 renderer，中文另外写入官方词典。Android 模拟器要求本机装好 Android SDK 和模拟器，Desktop 依次在 `ANDROID_HOME`、`ANDROID_SDK_ROOT`、`%LOCALAPPDATA%\Android\Sdk` 和 `PATH` 里找 `adb.exe` 与 `emulator.exe`；装好后在 Desktop 设置 → Claude Code → Mobile simulators 里能看到 Android Emulator 开关。全部先在副本上改完校验再替换，带操作锁和恢复记录，中途失败可还原。ASAR 校验 fuse 保持开启；改过的 exe 不再带官方 Authenticode 签名，还原即恢复。
 
 记录与备份存于 `<配置目录>/com.claudeplusplus.manager/computer-use/windows/`。发现 Desktop 被外部更新或改过就拒绝覆盖。MSIX 更新会整包替换，更新后需要重新扫描并再装一次。
 
@@ -217,7 +217,7 @@ Claude++ addresses both layers.
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
 | **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the native toggle is installed through the signed Native Features transaction, while the wrapper supplies a default only when the launch settings do not explicitly choose on or off. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
-| **Native features** | Pick features on the Native Features tab, restore from Backup & Restore. Computer Use, Chinese, the Fast toggle and prewarming work on both platforms; simulators are macOS-only. Patches come from structural rules applied to the current build — ambiguous matches or failed verification are refused |
+| **Native features** | Pick features on the Native Features tab, restore from Backup & Restore. Computer Use, Chinese, the Fast toggle and prewarming work on both platforms; on Windows the simulator feature covers the Android emulator only. Patches come from structural rules applied to the current build — ambiguous matches or failed verification are refused |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
 
 ### Storage layout
@@ -288,11 +288,11 @@ Fast Mode supports both a single renderer file and layouts with the main logic a
 
 Targets the MSIX package on Windows x64. Quit Desktop entirely, pick the features you want on the Native Features tab, select Apply changes, and approve the UAC prompt. Reopen Desktop and turn the matching switches on in its settings.
 
-Which files change depends on what you picked: main-process switches patch `resources/app.asar` and update the executable's `INTEGRITY / ELECTRONASAR` resource; Chinese and the Fast toggle patch renderer chunks under `resources/ion-dist`, and Chinese also writes the official catalogs. Everything is patched and verified on copies before replacement, under an operation lock with a recovery journal, so an interrupted run can be restored. ASAR validation fuses stay enabled; the patched executable no longer carries a valid official Authenticode signature, and restoring brings it back.
+Which files change depends on what you picked: main-process switches patch `resources/app.asar` and update the executable's `INTEGRITY / ELECTRONASAR` resource; Chinese and the Fast toggle patch renderer chunks under `resources/ion-dist`, and Chinese also writes the official catalogs. The Android emulator needs a local Android SDK with the emulator installed; Desktop looks for `adb.exe` and `emulator.exe` under `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `%LOCALAPPDATA%\Android\Sdk` and then `PATH`, and the Android Emulator switch shows up under Desktop Settings → Claude Code → Mobile simulators. Everything is patched and verified on copies before replacement, under an operation lock with a recovery journal, so an interrupted run can be restored. ASAR validation fuses stay enabled; the patched executable no longer carries a valid official Authenticode signature, and restoring brings it back.
 
 Records and backups live in `<config dir>/com.claudeplusplus.manager/computer-use/windows/`. Externally updated or modified Desktop files are never overwritten. An MSIX update replaces the whole package, so rescan and apply again afterwards.
 
-For development validation, run `cargo run --example computer_use_probe -- status` from `src-tauri` to inspect the installed app without modifying it. Test independent copies with `status|install|restore COPY/app STORE`, where `COPY/app` is a separate app copy and `STORE` is a separate record directory outside it. Windows needs no signing-identity argument; the probe refuses system installation directories.
+For development validation, run `cargo run --example computer_use_probe -- status` from `src-tauri` to inspect the installed app without modifying it. Test independent copies with `status|install|restore|apply COPY/app STORE [identity] [selection JSON]`, where `COPY/app` is a separate app copy and `STORE` is a separate record directory outside it. Windows needs no signing-identity argument; the probe refuses system installation directories.
 
 ### Native Computer Use (macOS)
 

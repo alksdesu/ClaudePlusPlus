@@ -36,7 +36,11 @@ pub struct NativeStatus {
     pub selection: Selection,
     pub supported_features: Vec<String>,
     pub update: super::updates::Status,
+    pub platform: &'static str,
 }
+
+#[cfg(any(windows, target_os = "macos"))]
+const EXTENDED: [&str; 4] = ["chinese", "simulators", "prewarm", "fastModeStatus"];
 
 pub fn status() -> Result<NativeStatus> {
     let installation = super::status()?;
@@ -59,17 +63,18 @@ pub fn status() -> Result<NativeStatus> {
         supported.push("computerUse".into());
         #[cfg(target_os = "macos")]
         if installation.desktop_version.as_deref().is_some_and(supports_extended) {
-            supported.extend(["chinese", "simulators", "prewarm", "fastModeStatus"].map(String::from));
+            supported.extend(EXTENDED.map(String::from));
         }
-        // 主进程没有模拟器开关的平台不列出它，避免给出装不上的选项
+        // Windows 不靠逐版本记录，结构认不出时上面的状态就已经是 unsupported
         #[cfg(windows)]
-        supported.extend(["chinese", "prewarm", "fastModeStatus"].map(String::from));
+        supported.extend(EXTENDED.map(String::from));
     }
     Ok(NativeStatus {
         installation,
         selection,
         supported_features: supported,
         update: super::updates::status(),
+        platform: std::env::consts::OS,
     })
 }
 

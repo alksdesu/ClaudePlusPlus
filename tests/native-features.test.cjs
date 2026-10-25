@@ -61,6 +61,18 @@ test('filters and pending-state presentation do not mutate the selection', () =>
   assert.equal(JSON.stringify(v), before);
 });
 
+test('Windows names the simulator feature after the Android emulator it actually installs', () => {
+  const v = fixture();v.status.platform = 'windows';v.status.installation.requiresSigning = false;v.draft = { ...ui.emptySelection(), simulators: true };
+  const html = ui.renderFeatures(v);
+  assert.ok(html.includes('<h2>Android 模拟器'));
+  assert.equal(html.includes('iOS / Android 模拟器'), false);
+  assert.deepEqual(ui.selectedNames(v.draft, 'windows'), ['Android 模拟器']);
+  assert.deepEqual(ui.selectedNames(v.draft, 'macos'), ['iOS / Android 模拟器']);
+  assert.equal(ui.canApply(v), true);
+  v.search = 'xcode';
+  assert.equal(ui.renderFeatures(v).includes('data-feature-id="simulators"'), false);
+});
+
 test('legacy native installation can upgrade without toggling features off', () => {
   const v = fixture();v.status.installation.state = 'upgradeAvailable';v.status.selection = { ...v.draft };
   assert.equal(ui.canApply(v), true);

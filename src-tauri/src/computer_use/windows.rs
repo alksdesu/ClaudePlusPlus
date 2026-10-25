@@ -1167,17 +1167,21 @@ mod tests {
             chinese: true,
             prewarm: true,
             fast_mode_status: true,
-            simulators: false,
+            simulators: true,
         };
         let chinese = Selection {
             chinese: true,
+            ..Default::default()
+        };
+        let android = Selection {
+            simulators: true,
             ..Default::default()
         };
         let fast = Selection {
             fast_mode_status: true,
             ..Default::default()
         };
-        for selection in [computer_use, full, chinese, fast] {
+        for selection in [computer_use, full, chinese, android, fast] {
             installation.apply(selection).unwrap();
             assert_eq!(verify_pair(&app, Scope::App).unwrap(), selection);
             assert_eq!(

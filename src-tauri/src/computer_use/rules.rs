@@ -37,6 +37,8 @@ const WINDOWS_FIELDS: &[FieldSet] = &[
         COMPUTER_USE,
         &[("1291166712", "{enabled:!0}"), ("40173473", "!0")],
     ),
+    // Windows 版不带 iOS 模拟器；Android 的 control 与 logs 工具各有一个开关
+    (SIMULATORS, &[("4272007212", "!0"), ("2784298314", "!0")]),
     (PREWARM, &[("4237076858", "!0")]),
 ];
 
@@ -48,7 +50,7 @@ impl Platform {
         }
     }
 
-    /// 支持的功能位；主进程没有模拟器开关的平台不会假装能装
+    /// Fast 状态不走配置函数字段，单独计入
     pub fn supported(self) -> u8 {
         self.fields().iter().fold(FAST_STATUS, |mask, (bit, _)| mask | bit)
     }
@@ -141,7 +143,6 @@ struct Config<'t> {
     expr: String,
     fields: Option<(usize, usize, &'t str)>,
     span: (usize, usize),
-    local: bool,
 }
 
 fn helper_name(text: &str) -> Result<String> {
@@ -180,7 +181,6 @@ fn config<'t>(text: &'t str) -> Result<Config<'t>> {
                 expr: caps["expr"].to_string(),
                 fields: caps.name("fields").map(|m| (m.start(), m.end(), m.as_str())),
                 span: (whole.start(), whole.end()),
-                local,
             });
         }
     }
@@ -240,17 +240,26 @@ fn patch_config(text: &str, platform: Platform, mask: u8) -> Result<String> {
     let helper = helper_name(text)?;
     let config = config(text)?;
     ensure!(config.fields.is_none(), "必须从官方配置函数生成补丁");
+    ensure!(
+        mask & !platform.supported() == 0,
+        "当前平台的主进程没有所选原生功能的开关"
+    );
     let mut fields = Vec::new();
     for (bit, entries) in platform.fields() {
         if mask & bit == 0 {
             continue;
         }
+        // Windows 没有逐版本记录兜底，主进程不读的开关注入了也是空操作；预热开关由 patch_prewarm 在它的模块里核对
+        if platform == Platform::Windows && *bit != PREWARM {
+            for (id, _) in entries.iter() {
+                ensure!(
+                    text.contains(&format!("\"{id}\"")),
+                    "主进程里没有读取开关 {id} 的代码，结构可能已变化"
+                );
+            }
+        }
         fields.extend(entries.iter().map(|(id, value)| format!("{id}:{helper}({value})")));
     }
-    ensure!(
-        mask & !platform.supported() == 0,
-        "当前平台的主进程没有所选原生功能的开关"
-    );
     if fields.is_empty() {
         return Ok(text.to_owned());
     }
@@ -267,7 +276,6 @@ fn patch_config(text: &str, platform: Platform, mask: u8) -> Result<String> {
             config.name, config.arg, config.expr
         )
     };
-    let _ = config.local;
     let mut edits = vec![(config.span.0, config.span.1, replacement)];
     Ok(splice(text, &mut edits))
 }
@@ -756,9 +764,11 @@ mod tests {
         "function pick(e){return e.selfHostedSessions?e.builtinBrowserEnabled?A:B:",
         "e.builtinBrowserEnabled?C:D}",
     );
+    /// Windows 主进程读取各开关的位置，规则要求被注入的开关确实有人读
+    const GATES: &str = r#"Ky("1291166712",a);Ky("40173473",a);Zy("4272007212",!1);Zy("2784298314",!1);"#;
 
     fn source() -> String {
-        format!("var A=1,B=2,C=3,D=4;{HELPER}{CONFIG}")
+        format!("var A=1,B=2,C=3,D=4;{GATES}{HELPER}{CONFIG}")
     }
 
     #[test]
@@ -775,8 +785,21 @@ mod tests {
                 assert_eq!(patch_config(&patched, platform, mask).is_err(), mask != 0);
             }
         }
-        assert_eq!(Platform::Windows.supported() & SIMULATORS, 0);
+        assert_ne!(Platform::Windows.supported() & SIMULATORS, 0);
         assert_ne!(Platform::Macos.supported() & SIMULATORS, 0);
+        let android = patch_config(&source(), Platform::Windows, SIMULATORS).unwrap();
+        assert!(android.contains("return{...(e.selfHostedSessions?e.builtinBrowserEnabled?A:B:e.builtinBrowserEnabled?C:D),4272007212:fv(!0),2784298314:fv(!0)}"));
+    }
+
+    #[test]
+    fn windows_refuses_switches_the_main_process_never_reads() {
+        for (id, mask) in [("4272007212", SIMULATORS), ("2784298314", SIMULATORS), ("40173473", COMPUTER_USE)] {
+            let unread = source().replace(&format!("\"{id}\""), "\"0\"");
+            assert!(patch_config(&unread, Platform::Windows, mask).is_err(), "{id}");
+            assert!(patch_config(&unread, Platform::Macos, mask).is_ok(), "{id}");
+        }
+        let prewarm_only = source().replace(GATES, "");
+        assert!(patch_config(&prewarm_only, Platform::Windows, PREWARM).is_ok());
     }
 
     #[test]
@@ -987,13 +1010,18 @@ mod tests {
     #[test]
     fn main_patch_combines_config_and_fast_mapping() {
         let source = format!("{}{}", source(), fast_source());
-        for mask in [0, COMPUTER_USE, FAST_STATUS, COMPUTER_USE | PREWARM | FAST_STATUS] {
+        for mask in [
+            0,
+            COMPUTER_USE,
+            SIMULATORS,
+            FAST_STATUS,
+            COMPUTER_USE | SIMULATORS | PREWARM | FAST_STATUS,
+        ] {
             let patched = patch_main(&source, Platform::Windows, mask).unwrap();
             assert_eq!(main_mask(&patched, Platform::Windows).unwrap(), mask);
             if mask != 0 {
                 assert!(patch_main(&patched, Platform::Windows, mask).is_err());
             }
         }
-        assert!(patch_main(&source, Platform::Windows, SIMULATORS).is_err());
     }
 }

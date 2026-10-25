@@ -14,10 +14,11 @@ export interface NativeStatus {
   selection: NativeSelection;
   supportedFeatures: string[];
   update?: DesktopUpdateStatus;
+  platform?: string;
 }
 export const emptySelection = (): NativeSelection => ({ computerUse: false, chinese: false, simulators: false, prewarm: false, fastModeStatus: false });
 export type FeatureGroup = "all" | "interaction" | "appearance" | "workflow";
-interface Feature {
+export interface Feature {
   id: string;
   name: string;
   group: Exclude<FeatureGroup, "all">;
@@ -26,10 +27,11 @@ interface Feature {
   key?: keyof NativeSelection;
   reason?: string;
   experimental?: boolean;
+  windows?: Partial<Pick<Feature, "name" | "description" | "detail">>;
 }
 export const features: Feature[] = [
   { id: "computer-use", key: "computerUse", name: "Computer Use", group: "interaction", description: "让 Claude 看屏幕、动鼠标和键盘。", detail: "装完去 Claude 设置里打开 Computer use，按提示授权屏幕录制和辅助功能。" },
-  { id: "simulators", key: "simulators", name: "iOS / Android 模拟器", group: "interaction", description: "在模拟器里实时看画面、点界面。", detail: "需要本机装好 Xcode 或 Android SDK，只能在本地 Code 会话里用。" },
+  { id: "simulators", key: "simulators", name: "iOS / Android 模拟器", group: "interaction", description: "在模拟器里实时看画面、点界面。", detail: "需要本机装好 Xcode 或 Android SDK，只能在本地 Code 会话里用。", windows: { name: "Android 模拟器", detail: "需要本机装好 Android SDK 和模拟器，只能在本地 Code 会话里用。Windows 版 Desktop 不带 iOS 模拟器。" } },
   { id: "chinese", key: "chinese", name: "简体与繁体中文", group: "appearance", description: "界面语言多出简体和繁體中文。", detail: "装完在 Claude 设置的语言里选。官方词典没覆盖到的地方仍是英文。" },
   { id: "prewarm", key: "prewarm", name: "CLI 原生预热", group: "workflow", description: "提前备好进程，新会话少等一会儿。", detail: "会多占一些常驻内存，模型回复本身不会变快。", experimental: true },
   { id: "fast-mode-status", key: "fastModeStatus", name: "Fast Mode 原生开关", group: "workflow", description: "模型菜单里直接开关 Fast。", detail: "开关跟着 CLI 的实际状态走。是否真的 fast 看转录里的 usage.speed。" },
@@ -43,8 +45,11 @@ export const features: Feature[] = [
   { id: "instruction-guide", name: "个性化指令引导", group: "appearance", description: "写个性化指令时给示例卡片。", detail: "指令本身已经能编辑，缺的是引导卡片的依赖。", reason: "组件移植待验证" },
 ];
 
-export function selectedNames(selection: NativeSelection): string[] {
-  return features.filter(f => f.key && selection[f.key]).map(f => f.name);
+export function presented(f: Feature, platform?: string): Feature {
+  return platform === "windows" && f.windows ? { ...f, ...f.windows } : f;
+}
+export function selectedNames(selection: NativeSelection, platform?: string): string[] {
+  return features.filter(f => f.key && selection[f.key]).map(f => presented(f, platform).name);
 }
 export function selectionChanged(a: NativeSelection, b: NativeSelection): boolean {
   return (Object.keys(a) as (keyof NativeSelection)[]).some(key => a[key] !== b[key]);
@@ -72,7 +77,8 @@ export function canApply(v: FeatureView): boolean {
   if (s.update?.enabled && ["waitingForExit", "restoring", "awaitingUpdate", "waitingForReapply", "applying"].includes(s.update.phase)) return false;
   return s.installation.canInstall && (s.installation.requiresSigning === false || s.installation.identities.some(i => i.fingerprint === v.identity));
 }
-function featureCard(f: Feature, v: FeatureView): string {
+function featureCard(feature: Feature, v: FeatureView): string {
+  const f = presented(feature, v.status?.platform);
   const installed = f.key ? v.status?.selection[f.key] === true : false;
   const supported = f.key ? v.status?.supportedFeatures.includes(f.key) === true : false;
   const pending = !!f.key && v.draft[f.key] !== installed;
@@ -87,10 +93,10 @@ function featureCard(f: Feature, v: FeatureView): string {
 }
 export function renderFeatures(v: FeatureView): string {
   const term = v.search.trim().toLocaleLowerCase();
-  const visible = features.filter(f => (v.group === "all" || f.group === v.group) && `${f.name} ${f.description} ${f.detail}`.toLocaleLowerCase().includes(term));
+  const visible = features.map(f => presented(f, v.status?.platform)).filter(f => (v.group === "all" || f.group === v.group) && `${f.name} ${f.description} ${f.detail}`.toLocaleLowerCase().includes(term));
   const native = v.status?.installation;
   const dirty = !!v.status && selectionChanged(v.draft, v.status.selection);
-  const chosen = selectedNames(v.draft);
+  const chosen = selectedNames(v.draft, v.status?.platform);
   return `<div class="view feature-view"><div class="page-head"><div><div class="eyebrow">NATIVE FEATURES</div><h1>原生能力，按需组合</h1><p class="lead">勾选要装的功能，一次应用。改动前会完整备份，随时能还原。</p></div><button class="btn btn-secondary" data-action="native-refresh" ${v.busy || v.scanning ? "disabled" : ""}>${v.scanning ? "正在检测…" : "重新检测"}</button></div>
     ${v.error ? `<div class="banner banner-error" role="alert">${esc(v.error)}</div>` : ""}
     ${v.result ? `<div class="banner" role="status">${esc(v.result)}</div>` : ""}
