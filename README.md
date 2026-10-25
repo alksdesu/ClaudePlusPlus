@@ -13,19 +13,21 @@ Share sessions across Claude Desktop and Claude Code CLI on the same machine, im
 
 ## 原生增强与工作台
 
-Claude++ 使用分组侧栏管理功能、会话、备份和诊断。Desktop 侧仅复用官方资源、界面和执行实现，不提供仿制功能或替代后端。
+开放 Desktop 里已有但对 API key 模式关着的原生功能。所有入口都是官方的，Claude++ 只负责把开关打开。
 
-- **官方简繁中文**：安装原始基础与动态词典，开放原生语言选择器，复用官方地区识别；未覆盖的键保留原文。
-- **iOS / Android 模拟器**：开放原生能力入口，保留官方面板、设备授权、画面与操作工具。需本机工具链，在本地 Code 会话使用。
-- **Computer Use**：保留原生开关、后台模式、授权卡片和每个应用的访问控制。
-- **Fast Mode 原生开关**：复用官方模型菜单、Fast 标记与实时控制接口；支持关闭与重新开启，并保留关闭选择。
-- **CLI 原生预热（实验）**：复用官方备用进程池。可能增加常驻内存，不保证每轮响应更快，默认不自动启用。
+| 功能 | Windows | macOS | 说明 |
+|---|:-:|:-:|---|
+| **Computer Use** | ✓ | ✓ | 看屏幕、动鼠标键盘；macOS 另有后台模式 |
+| **简体与繁体中文** | ✓ | ✓ | 装官方词典并打开语言选择器，未覆盖的键保留英文 |
+| **Fast Mode 原生开关** | ✓ | ✓ | 模型菜单里的 Fast 开关，状态跟随 CLI |
+| **CLI 原生预热**（实验） | ✓ | ✓ | 备用进程池，多占常驻内存 |
+| **iOS / Android 模拟器** | — | ✓ | Windows 构建里没有这部分代码 |
 
-功能可以组合安装。macOS 从同一份已验证的官方原包生成整个组合、重签并校验，再替换目标；关闭一个功能会保留其他选中项。旧 CU 安装记录兼容读取。应用被外部更新或修改、备份损坏、未知入口或未完成事务均会阻止覆盖；可从“备份与恢复”还原。
+功能可以任意组合，每次都从官方基线重新生成，关掉一项不影响其他选中的。应用被外部更新或改过、备份损坏、有未完成事务时一律拒绝覆盖，可从「备份与恢复」还原。
 
-macOS 的新原生组合经过副本验证；其他平台只提供已验证的功能，不据此宣称跨平台实测通过。Windows 保留现有 CU 流程，不显示签名身份设置。
+两端的补丁由同一套结构化规则生成：以属性名和字符串字面量为骨架，minify 后的变量名靠正则捕获再回填，命中必须唯一且改写后要通过回读校验。Desktop 更新只重命名符号时规则自动适应；结构真变了会停下报出未命中的锚点，而不是猜。
 
-姓名、照片头像、Artifacts 数据／弹窗、扩展安装、听写以及跨构建的主题和引导组件，在完整原生链路未验证前只展示依赖说明，不提供无效开关，不接入自制服务。安装成功表示补丁校验通过，不代替系统或设备授权。
+姓名、照片头像、Artifacts、扩展安装、听写和跨构建主题缺少可用的原生链路，卡片上写明缺什么，不提供装不上的开关。显示“已安装”只代表文件改好了，设备权限仍要你在系统里单独授权。
 
 ## 中文
 
@@ -52,7 +54,7 @@ Claude++ 针对这两层分别下手。
 | **彻底删除** | 两列各有删除入口：CLI 侧删转录并连带清掉它在 Desktop 的条目与墓碑，Desktop 侧删条目并带走对应转录。与注销的分工——注销只把会话退回 CLI 侧（`claude -r` 照常），删除是两边一起消失。勾组代表则整组分支文件一并删除，转录一律送系统回收站 |
 | **Fast Mode 解锁** | 让用 Console API key（3p 模式）登录的 Desktop 也能用 fast mode：wrapper 顶替 bundled CLI 把 `fastMode` 合并进启动参数。Windows 另有 renderer patch 亮出实时开关并按模型显隐（弹一次 UAC）；macOS 的 wrapper 请求默认开启；原生开关可通过「原生增强 → Fast Mode 原生开关」的整包重签流程安装。Desktop / CLI 更新后托盘守护自动补上。前提是 key 已开通 fast 资格——只解客户端封锁，不碰服务端计费与授权 |
 | **墓碑清理** | 一键清理 `deleted_*` 删除标记：仅清标记（解封会话、恢复可注册），或连 CLI 侧转录一并删除。删除一律送系统回收站，可反悔 |
-| **原生 Computer Use** | 在「Computer Use」页检测、安装或还原 API key 模式的原生电脑操作入口，沿用 Desktop 自身的开关、授权和执行器。Windows 自动识别配置函数并计算内容哈希，备份后修改 exe 与 ASAR；macOS 按已适配版本校验，备份整包并使用本机有效签名身份重签。匹配不唯一或校验失败时拒绝修改 |
+| **原生功能** | 在「功能增强」页勾选安装，「备份与恢复」页还原。Computer Use、中文、Fast 开关和预热两端都可用，模拟器仅 macOS。补丁由结构化规则现场生成，命中不唯一或校验不过就拒绝修改 |
 | **托盘守护** | 常驻监控两池，新渠道/新账号首次出现自动归一；Desktop 运行中则挂起，退出后自动执行 |
 
 ### 存储结构
@@ -80,11 +82,11 @@ Claude++ 针对这两层分别下手。
 1. 从 Release 下载或自行构建：Windows 运行 `claude-plus-plus.exe`，macOS 打开 `Claude++.app`（未签名，首次需右键 → 打开）。常驻托盘/菜单栏
 2. **完全退出 Claude Desktop**（所有写操作都有运行检测，运行中一律拒绝）
 3. 「存储归一」页 → 一键归一；此后切渠道/换账号列表不再变化
-4. 「会话迁移」页 → 勾选 CLI 会话 → 注册，打开 Desktop 对应项目即可见、可继续。多分支会话折叠显示，`⑂ N` 可展开挑选特定分支。两列头的「删除」可彻底移除选中会话（二次确认，转录进回收站）
-5. 「Codex 会话迁移」页 → 筛选「Claude 无」→ 一键迁移（需先退出 Codex），完成后回「会话迁移」页注册即可在 Desktop 打开
-6. 「会话迁移」或「Codex 会话迁移」页单击会话行即可预览对话；大会话保留末尾 300 条并提示截断
+4. 「Claude 会话」页 → 勾选 CLI 会话 → 注册，打开 Desktop 对应项目即可见、可继续。多分支会话折叠显示，`⑂ N` 可展开挑选特定分支。两列头的「删除」可彻底移除选中会话（二次确认，转录进回收站）
+5. 「Codex 导入」页 → 筛选「Claude 无」→ 一键迁移（需先退出 Codex），完成后回「Claude 会话」页注册即可在 Desktop 打开
+6. 「Claude 会话」或「Codex 导入」页单击会话行即可预览对话；大会话保留末尾 300 条并提示截断
 7. 「Fast Mode」页 → 安装（需先退出 Desktop；Windows 的 renderer 部分弹一次 UAC，macOS 全程用户态）→ 保持自动守护开启，Desktop 或 CLI 更新后会自动补上；页面底部按转录里的 `usage.speed` 验证是否真 fast
-8. 「Computer Use」页 → 重新扫描 → 安装原生入口（Windows 确认 UAC；macOS 先选择有效签名身份）。完成后打开 Desktop，在设置中自行启用 Computer use 并完成原生授权；需要撤销时退出 Desktop，再点「还原官方」
+8. 「功能增强」页 → 勾选 Computer Use → 应用更改 → 确认应用（Windows 确认 UAC；macOS 先选择有效签名身份）。完成后打开 Desktop，在设置中自行启用 Computer use 并完成原生授权；需要撤销时退出 Desktop，在「备份与恢复」页点「还原官方应用」
 
 ### Fast Mode 解锁
 
@@ -119,23 +121,19 @@ Desktop 更新会换掉 CLI 版本目录（Windows 还会换 renderer）。守�
 
 Fast Mode 支持单文件和主逻辑、模型菜单分布在多个 renderer 文件中的布局。Windows 修复会先校验全部目标，再分别保存 `.orig` 并写入；写入失败时回滚本次改动。状态卡只有在所有目标均已打补丁时才显示成功。排查拆分布局时，将探测参数换成 `assets/v1` 目录，并将第二个参数设为独立输出目录；逐个对导出的 `.mjs` 执行 `node --check`。
 
-### 原生 Computer Use（Windows）
+### 原生功能（Windows）
 
-面向 Windows x64 的 Claude Desktop MSIX 包，能否安装以页面检测结果为准。安装前核对原生模块、官方 exe 签名、主进程入口内容和 ASAR 完整性基准；安装沿用 Desktop 自身的开关、授权和原生执行器，不自动授予电脑控制权限。
+面向 Windows x64 的 MSIX 包。完全退出 Desktop 后，在「功能增强」页勾选要装的功能，点「应用更改」并确认 UAC。装完重启 Desktop，在设置里打开对应开关。
 
-完全退出 Desktop 后，在「Computer Use」页重新扫描，确认检测到目标版本，再点击「安装原生入口」并确认管理员操作。安装完成后重启 Desktop，在设置中启用 Computer use，按原生授权流程使用。「还原官方」同样要求先退出 Desktop。
+按勾选的功能决定动哪些文件：主进程开关改 `resources/app.asar`，并同步 exe 的 `INTEGRITY / ELECTRONASAR` 资源；中文和 Fast 开关改 `resources/ion-dist` 下的 renderer，中文另外写入官方词典。全部先在副本上改完校验再替换，带操作锁和恢复记录，中途失败可还原。ASAR 校验 fuse 保持开启；改过的 exe 不再带官方 Authenticode 签名，还原即恢复。
 
-安装与还原需要一次 UAC 确认。Claude++ 先备份 `claude.exe` 与 `resources/app.asar`，在副本里修改功能配置、重算 ASAR 条目和头部哈希，再同步 exe 的 `INTEGRITY / ELECTRONASAR` 资源。ASAR 校验 fuse 保持开启。修改后的 exe 不再具有有效的官方 Authenticode 签名；「还原官方」会恢复原始文件和签名。
+记录与备份存于 `<配置目录>/com.claudeplusplus.manager/computer-use/windows/`。发现 Desktop 被外部更新或改过就拒绝覆盖。MSIX 更新会整包替换，更新后需要重新扫描并再装一次。
 
-记录与备份存于 `<配置目录>/com.claudeplusplus.manager/computer-use/windows/`。两个文件的替换有操作锁和恢复记录；中途失败可以还原，发现 Desktop 被外部更新或修改则拒绝覆盖。Fast Mode 的 renderer 文件、会话、API 配置与授权设置不在本次修改范围内。
-
-Computer Use 不使用 Fast Mode 的自动修复守护。Desktop 更新后重新扫描，按当前代码结构自动提取配置函数、辅助函数及改写前后的内容哈希；结构无法唯一匹配或签名、完整性校验失败时拒绝修改。通过校验的更新包可重新安装并建立独立备份，旧版备份保留，不跨版本还原。
-
-开发验收在 `src-tauri` 目录执行 `cargo run --example computer_use_probe -- status`，只读探测当前安装。副本验收使用 `status|install|restore COPY/app STORE`，其中 `COPY/app` 是独立应用副本，`STORE` 是副本外的独立记录目录；Windows 不需要签名身份参数，探针拒绝直接修改系统安装目录。
+开发验收在 `src-tauri` 目录执行 `cargo run --example computer_use_probe -- status`，只读探测当前安装。副本验收用 `status|install|restore|apply COPY/app STORE [身份] [组合 JSON]`，其中 `COPY/app` 是独立应用副本，`STORE` 是副本外的记录目录；Windows 忽略身份参数，探针拒绝直接修改系统安装目录。
 
 ### 原生 Computer Use（macOS）
 
-「Computer Use」页提供检测、签名身份选择、安装和还原，能否安装以页面检测结果为准。在主进程 JS 文件中按配置函数内容定位唯一入口，不依赖带哈希的 chunk 文件名；再核对入口哈希与补丁输出哈希。未知版本、重复命中或内容变化均拒绝安装，不把相似代码当作已兼容。
+「功能增强」页提供检测、签名身份选择与安装，「备份与恢复」页负责还原，能否安装以页面检测结果为准。在主进程 JS 文件中按配置函数内容定位唯一入口，不依赖带哈希的 chunk 文件名；再核对入口哈希与补丁输出哈希。未知版本、重复命中或内容变化均拒绝安装，不把相似代码当作已兼容。
 
 安装为 API key 模式补上原生 Computer Use 功能配置，并在兼容的应用中提供后台模式入口，不修改 CLI 二进制，不另建 MCP 服务。安装后仍需在 Claude 设置中自行启用并授权。Background 在允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。HIPAA、会话授权、禁止控制的应用等检查保持原样。
 
@@ -144,10 +142,26 @@ Computer Use 不使用 Fast Mode 的自动修复守护。Desktop 更新后重新
 - 需要本机钥匙串中有效的代码签名证书及私钥；已验证 Apple Development 签名，**不支持 ad-hoc**，不内置或导出证书私钥。
 - 先退出目标 Desktop。Claude++ 保存完整官方备份，在临时副本更新 ASAR 条目与文件头哈希，逐个保留非身份类 entitlements 并重签嵌套组件，验证整包签名后才替换。
 - 重签会改变应用身份，可能需要重新登录或重新授予系统权限；不保证原钥匙串访问或所有 Cowork 场景保持兼容。会话、API key、用户配置和系统授权数据库不作修改。
-- 安装记录、原包备份和命令日志保存在 `<配置目录>/com.claudeplusplus.manager/computer-use/`。失败可用「还原官方」结束未完成事务；还原会比对整包哈希，不覆盖被外部更新或修改的应用，备份保留。
-- 不在后台重签，不关闭自动更新。Desktop 更新后重新扫描；适配新版本前不会自动修改，也不会用旧备份覆盖新版本。
+- 安装记录、原包备份和命令日志保存在 `<配置目录>/com.claudeplusplus.manager/computer-use/`。失败可用「还原官方应用」结束未完成事务；还原会比对整包哈希，不覆盖被外部更新或修改的应用，备份保留。
+- 默认不在后台重签，也不关闭自动更新；只有开启「自动维护 Desktop 更新」后，才会在 Desktop 退出后按原选择恢复补丁。适配新版本前不会自动修改，也不会用旧备份覆盖新版本。
 
 开发验收在 `src-tauri` 目录运行 `cargo run --example computer_use_probe -- status COPY/Claude.app STORE`；`install` 另接签名身份 SHA-1，`restore` 恢复备份。探针拒绝系统应用路径，使用独立副本与独立记录目录。运行时不依赖 Python、Node.js 或开发工具链。
+
+### macOS 原生增强适配
+
+主进程、后台模式、中文、模拟器、预热和 Fast 原生状态按同一份已验证适配记录检查。记录包含原始内容、功能组合和输出哈希；chunk 改名但内容未变时按内容发现，未知内容仍停止修改。旧版适配与独立备份保留。
+
+原生权限、管理员策略和 Fast 的模型／服务端资格检查不变。更新维护只恢复原先选择且已验证支持的功能，不会自动打开新增选项。
+
+### macOS 自动更新维护
+
+仅 macOS 的重签增强需要此流程；Windows 不需要，继续使用官方更新。可在“功能增强”中开启“自动维护 Desktop 更新”，Claude++ 会保存当前功能组合与签名身份，并在托盘中维护更新状态。
+
+检测到官方更新后，Desktop 运行中只排队，不强关会话。退出后验证备份、还原完整官方包，并在后台启动官方 Desktop，让官方更新器继续下载与安装；官方重启提示和正常退出流程保持原样。更新期间不会抢占官方安装器或覆盖新版本。
+
+更新后的应用在退出后接受官方签名和补丁兼容性校验，只恢复当前 Claude++ 已验证支持的功能。未知版本保持官方原样，原功能选择保留；后续 Claude++ 适配后会重新检测。网络离线、签名身份失效或文件校验失败会显示具体状态，不假报成功，也不关闭更新签名校验。
+
+流程记录持久化，重启 Claude++ 后继续处理未完成阶段。手动还原增强会关闭自动维护，避免自动装回；也可随时关闭维护或重新检测。此功能不修改 API 配置、会话内容、系统授权或管理员更新策略。
 
 ### 构建
 
@@ -203,7 +217,7 @@ Claude++ addresses both layers.
 | **Hard delete** | Both columns get a delete action: from the CLI side it removes the transcript plus that session's Desktop entry and tombstone; from the Desktop side it removes the entry along with the transcript it points at. Unlike unregister — which only sends a session back to the CLI side where `claude -r` still works — delete makes it vanish on both. Selecting a group representative deletes every branch file in that group; transcripts always go to the OS recycle bin |
 | **Fast Mode unlock** | Lets a Desktop signed in with a Console API key (3p mode) use fast mode: a wrapper replaces the bundled CLI and merges `fastMode` into its launch settings. Windows additionally patches the renderer to surface the live toggle gated by model (one UAC prompt); on macOS the native toggle is installed through the signed Native Features transaction, while the wrapper supplies a default only when the launch settings do not explicitly choose on or off. When Desktop or the CLI updates, the tray daemon repairs on its own. The key must already be entitled to fast — this removes the client-side block, never server-side billing or entitlement |
 | **Tombstone cleanup** | One-click cleanup of `deleted_*` markers: markers only (un-blocks re-registration), or markers plus CLI transcripts. All deletions go through the OS recycle bin |
-| **Native Computer Use** | Detects, installs, and restores native computer-control entry points for API-key deployments from the Computer Use tab, using Desktop's own switches, consent flow, and executor. Windows discovers the configuration function and computes content hashes before backing up and patching the executable and ASAR. macOS checks supported builds, backs up the whole bundle, and re-signs it with a valid local identity. Ambiguous matches and failed verification are refused |
+| **Native features** | Pick features on the Native Features tab, restore from Backup & Restore. Computer Use, Chinese, the Fast toggle and prewarming work on both platforms; simulators are macOS-only. Patches come from structural rules applied to the current build — ambiguous matches or failed verification are refused |
 | **Tray daemon** | Watches both pools; when a new channel/account combo first appears it auto-unifies — deferred while Desktop is running, executed once it exits |
 
 ### Storage layout
@@ -231,11 +245,11 @@ Claude++ addresses both layers.
 1. Download from Releases or build locally: run `claude-plus-plus.exe` on Windows, open `Claude++.app` on macOS (unsigned — right-click → Open on first launch). Lives in the tray / menu bar
 2. **Quit Claude Desktop entirely** (every write operation checks for running instances and refuses otherwise)
 3. Unify tab → one click; channel/account switches no longer change the session list
-4. Migrate tab → select CLI sessions → Register; open the matching project folder in Desktop to see and resume them. Multi-branch sessions fold into one row — `⑂ N` expands them to pick a specific branch. Either column's Delete button wipes the selected sessions for good (confirmation required; transcripts go to the recycle bin)
-5. Codex tab → filter "not in Claude" → migrate in one click (quit Codex first), then register the results on the Migrate tab to open them in Desktop
-6. Click a session row on the Migrate or Codex tab to preview the conversation; large sessions show the last 300 messages with a truncation notice
+4. Claude Sessions tab → select CLI sessions → Register; open the matching project folder in Desktop to see and resume them. Multi-branch sessions fold into one row — `⑂ N` expands them to pick a specific branch. Either column's Delete button wipes the selected sessions for good (confirmation required; transcripts go to the recycle bin)
+5. Codex Import tab → filter "not in Claude" → migrate in one click (quit Codex first), then register the results on the Claude Sessions tab to open them in Desktop
+6. Click a session row on the Claude Sessions or Codex Import tab to preview the conversation; large sessions show the last 300 messages with a truncation notice
 7. Fast Mode tab → Install (quit Desktop first; on Windows the renderer step prompts UAC once, macOS stays entirely in user space) → leave auto-guard on and updates to Desktop or the CLI get repaired on their own; the bottom card verifies real fast via `usage.speed` in the transcripts
-8. Computer Use tab → Rescan → Install native entry (approve UAC on Windows; select a valid signing identity first on macOS). Then open Desktop, enable Computer use in settings, and complete its consent flow. To undo the change, quit Desktop and select Restore official
+8. Native Features tab → select Computer Use → Apply changes → confirm (approve UAC on Windows; select a valid signing identity first on macOS). Then open Desktop, enable Computer use in settings, and complete its consent flow. To undo the change, quit Desktop and choose Restore official app on the Backup & Restore tab
 
 ### Fast Mode unlock
 
@@ -270,23 +284,19 @@ A Desktop update replaces the CLI version directory (and on Windows the renderer
 
 Fast Mode supports both a single renderer file and layouts with the main logic and model menu spread across multiple files. On Windows, repair validates every target before saving individual `.orig` backups and writing changes; a failed write rolls back the changes from that attempt. Status reports success only when all targets are patched. To inspect a split layout, pass the `assets/v1` directory to the probe and a separate output directory as the second argument, then run `node --check` on each exported `.mjs` file.
 
-### Native Computer Use (Windows)
+### Native features (Windows)
 
-Targets the Claude Desktop MSIX package on Windows x64; the tab's detection result determines whether installation is available. Before installation, Claude++ verifies the native module, official executable signature, main-process content, and ASAR integrity baseline. Installation uses Desktop's existing switches, consent flow, and native executor; computer-control permission is never granted automatically.
+Targets the MSIX package on Windows x64. Quit Desktop entirely, pick the features you want on the Native Features tab, select Apply changes, and approve the UAC prompt. Reopen Desktop and turn the matching switches on in its settings.
 
-Quit Desktop entirely, rescan on the Computer Use tab, and confirm the detected version. Select Install native entry and approve the administrator prompt. Reopen Desktop, enable Computer use in settings, and complete its native consent flow. Restore official also requires Desktop to be closed.
+Which files change depends on what you picked: main-process switches patch `resources/app.asar` and update the executable's `INTEGRITY / ELECTRONASAR` resource; Chinese and the Fast toggle patch renderer chunks under `resources/ion-dist`, and Chinese also writes the official catalogs. Everything is patched and verified on copies before replacement, under an operation lock with a recovery journal, so an interrupted run can be restored. ASAR validation fuses stay enabled; the patched executable no longer carries a valid official Authenticode signature, and restoring brings it back.
 
-Installation and restoration request UAC elevation. Claude++ backs up `claude.exe` and `resources/app.asar`, patches temporary copies, recalculates ASAR entry and header integrity, and updates the executable's `INTEGRITY / ELECTRONASAR` resource. The ASAR validation fuses remain enabled. The modified executable no longer has a valid official Authenticode signature; Restore official restores the original files and signature.
-
-Records and backups live in `<config dir>/com.claudeplusplus.manager/computer-use/windows/`. File replacement uses an operation lock and recovery journal. Interrupted operations can be restored; externally updated or modified Desktop files are never overwritten. Fast Mode renderer files, conversations, API configuration, and consent settings are outside this change.
-
-Computer Use does not use Fast Mode's automatic repair daemon. Rescanning after a Desktop update discovers the configuration and helper functions from the current code structure and computes the original and patched content hashes. Ambiguous structures or failed signature and integrity checks are refused. A verified update can be patched with its own backup; earlier backups are retained and cannot be restored over a different version.
+Records and backups live in `<config dir>/com.claudeplusplus.manager/computer-use/windows/`. Externally updated or modified Desktop files are never overwritten. An MSIX update replaces the whole package, so rescan and apply again afterwards.
 
 For development validation, run `cargo run --example computer_use_probe -- status` from `src-tauri` to inspect the installed app without modifying it. Test independent copies with `status|install|restore COPY/app STORE`, where `COPY/app` is a separate app copy and `STORE` is a separate record directory outside it. Windows needs no signing-identity argument; the probe refuses system installation directories.
 
 ### Native Computer Use (macOS)
 
-The Computer Use tab provides status detection, signing-identity selection, installation, and restoration; its detection result determines whether installation is available. The configuration function is located by content across main-process JavaScript files, without depending on a content-hashed chunk filename. Both the original entry hash and patched output hash must match the compatibility record. Unknown versions, ambiguous matches, and changed content are rejected rather than assumed compatible.
+The Native Features tab provides status detection, signing-identity selection, and installation, while the Backup & Restore tab handles restoration; the detection result determines whether installation is available. The configuration function is located by content across main-process JavaScript files, without depending on a content-hashed chunk filename. Both the original entry hash and patched output hash must match the compatibility record. Unknown versions, ambiguous matches, and changed content are rejected rather than assumed compatible.
 
 Installation supplies the native Computer Use configuration for API-key deployments, including the background-mode entry point in compatible apps. The CLI binary is unchanged and no separate MCP server is introduced. Enable Computer use in Claude settings and complete the consent flow. Background works inside allowed apps and asks before taking over the screen; Full control takes over the screen, mouse, and keyboard by default. HIPAA, session authorization, and denied-app checks remain intact.
 
@@ -295,10 +305,24 @@ Older managed patches show an upgrade action: verify the backup, restore the off
 - A valid local code-signing certificate and private key are required. Apple Development signing has been verified; **ad-hoc signing is not supported**. No signing private key is bundled or exported.
 - Quit the target Desktop first. Claude++ backs up the entire original bundle, patches a temporary copy, updates ASAR entry and header integrity, preserves non-identity entitlements per component, and re-signs nested code. Replacement happens only after strict signature verification.
 - Re-signing changes application identity. Login or system permissions may need renewal; existing Keychain access and all Cowork scenarios are not guaranteed. Conversations, API keys, user configuration, and the system permissions database are not edited.
-- Records, original bundles, and command logs live under `<config dir>/com.claudeplusplus.manager/computer-use/`. Restore official can finish an interrupted transaction. Restoration verifies full-bundle hashes and refuses to overwrite an externally updated or modified app; backups are retained.
-- No background re-signing or disabling of automatic updates. Rescan after a Desktop update. Unsupported versions are not modified, and old backups do not overwrite newer versions.
+- Records, original bundles, and command logs live under `<config dir>/com.claudeplusplus.manager/computer-use/`. Restore official app can finish an interrupted transaction. Restoration verifies full-bundle hashes and refuses to overwrite an externally updated or modified app; backups are retained.
+- No background re-signing by default, and automatic updates stay enabled; only the opt-in automatic update maintenance reapplies the previous selection after Desktop exits. Unsupported versions are not modified, and old backups do not overwrite newer versions.
 
 For development validation, run `cargo run --example computer_use_probe -- status COPY/Claude.app STORE` from `src-tauri`; `install` additionally takes a signing-identity SHA-1, and `restore` restores the backup. The probe rejects system application paths and uses a separate app copy and state directory. The installed feature needs no Python, Node.js, or development toolchain.
+
+### macOS native compatibility
+
+Main-process patches, background controls, Chinese catalogs, simulators, prewarming, and native Fast state share verified build metadata. Original and output hashes cover every feature combination; content-based renderer discovery tolerates renamed chunks, while unknown content remains untouched. Existing build support and independent backups are retained.
+
+System permissions, administrator policies, and native Fast eligibility checks remain intact. Update maintenance restores previously selected compatible features without enabling newly added options.
+
+### Automatic update maintenance on macOS
+
+Only macOS needs the restore-and-reapply flow because native enhancements re-sign the app. Windows continues to use its official updater and does not expose these controls.
+
+Enable automatic maintenance under Native Features. Claude++ saves the feature selection and signing identity, queues work while Desktop is running, restores the verified official bundle after Desktop exits, and opens the official app in the background so its own updater can proceed. It never force-quits sessions or competes with the official installer.
+
+After an update, compatible enhancements are reapplied when Desktop is stopped. Unknown builds remain official with the requested selection retained for a future compatible Claude++ release. The journal survives restarts; manual restoration disables automatic reapplication. Signature verification, credentials, conversations, permissions, and administrator policies are preserved.
 
 ### Build
 
@@ -330,34 +354,3 @@ Unofficial tool. Relies on Claude Desktop's internal storage layout; future vers
 ## License
 
 AGPL-3.0-only
-
-
-### macOS 原生增强适配
-
-主进程、后台模式、中文、模拟器、预热和 Fast 原生状态按同一份已验证适配记录检查。记录包含原始内容、功能组合和输出哈希；chunk 改名但内容未变时按内容发现，未知内容仍停止修改。旧版适配与独立备份保留。
-
-原生权限、管理员策略和 Fast 的模型／服务端资格检查不变。更新维护只恢复原先选择且已验证支持的功能，不会自动打开新增选项。
-
-### macOS native compatibility
-
-Main-process patches, background controls, Chinese catalogs, simulators, prewarming, and native Fast state share verified build metadata. Original and output hashes cover every feature combination; content-based renderer discovery tolerates renamed chunks, while unknown content remains untouched. Existing build support and independent backups are retained.
-
-System permissions, administrator policies, and native Fast eligibility checks remain intact. Update maintenance restores previously selected compatible features without enabling newly added options.
-
-### macOS 自动更新维护
-
-仅 macOS 的重签增强需要此流程；Windows 不需要，继续使用官方更新。可在“功能增强”中开启“自动维护 Desktop 更新”，Claude++ 会保存当前功能组合与签名身份，并在托盘中维护更新状态。
-
-检测到官方更新后，Desktop 运行中只排队，不强关会话。退出后验证备份、还原完整官方包，并在后台启动官方 Desktop，让官方更新器继续下载与安装；官方重启提示和正常退出流程保持原样。更新期间不会抢占官方安装器或覆盖新版本。
-
-更新后的应用在退出后接受官方签名和补丁兼容性校验，只恢复当前 Claude++ 已验证支持的功能。未知版本保持官方原样，原功能选择保留；后续 Claude++ 适配后会重新检测。网络离线、签名身份失效或文件校验失败会显示具体状态，不假报成功，也不关闭更新签名校验。
-
-流程记录持久化，重启 Claude++ 后继续处理未完成阶段。手动还原增强会关闭自动维护，避免自动装回；也可随时关闭维护或重新检测。此功能不修改 API 配置、会话内容、系统授权或管理员更新策略。
-
-### Automatic update maintenance on macOS
-
-Only macOS needs the restore-and-reapply flow because native enhancements re-sign the app. Windows continues to use its official updater and does not expose these controls.
-
-Enable automatic maintenance under Native Features. Claude++ saves the feature selection and signing identity, queues work while Desktop is running, restores the verified official bundle after Desktop exits, and opens the official app in the background so its own updater can proceed. It never force-quits sessions or competes with the official installer.
-
-After an update, compatible enhancements are reapplied when Desktop is stopped. Unknown builds remain official with the requested selection retained for a future compatible Claude++ release. The journal survives restarts; manual restoration disables automatic reapplication. Signature verification, credentials, conversations, permissions, and administrator policies are preserved.

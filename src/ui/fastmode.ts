@@ -12,7 +12,7 @@ const rendererStates: Record<RendererState, { label: string; cls: string }> = {
 
 export function rendererPresentation(renderer: FastModeStatus["renderer"]): { label: string; cls: string } {
   const state = rendererStates[renderer.state];
-  if (!renderer.requiresSigning) return state;
+  if (!renderer.native) return state;
   if (renderer.state === "patched") return { ...state, label: "原生开关已安装" };
   if (renderer.state === "pristine") return { ...state, label: "可安装 · 需重签" };
   return state;

@@ -81,6 +81,11 @@ fn change_source(source: &str, changes: &[Change]) -> Result<String> {
 }
 
 impl Main {
+    #[cfg(test)]
+    pub fn profile(&self, mask: u8) -> Option<&str> {
+        self.profiles.get(usize::from(mask)).map(String::as_str)
+    }
+
     pub fn mask(&self, source: &str) -> Result<u8> {
         let digest = hash(source.as_bytes());
         self.profiles

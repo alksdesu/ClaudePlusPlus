@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::Status;
-use anyhow::{ensure, Result};
+use anyhow::Result;
+// Windows 的非测试构建只走 windows.rs 的校验，这里用不到
+#[cfg(any(test, not(windows)))]
+use anyhow::ensure;
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
@@ -22,7 +25,7 @@ impl Selection {
     }
 
     pub fn is_empty(self) -> bool {
-        self.mask() == 0 && !self.chinese && !self.fast_mode_status
+        self.mask() == 0 && !self.chinese
     }
 }
 
@@ -43,8 +46,8 @@ pub fn status() -> Result<NativeStatus> {
         selection = super::macos::selection_at(std::path::Path::new(&installation.app_path))?;
     }
     #[cfg(windows)]
-    {
-        selection.computer_use = installation.state == "installed";
+    if matches!(installation.state.as_str(), "installed" | "available") {
+        selection = super::windows::selection_at()?;
     }
     let mut supported = Vec::new();
     if installation.supported
@@ -58,6 +61,9 @@ pub fn status() -> Result<NativeStatus> {
         if installation.desktop_version.as_deref().is_some_and(supports_extended) {
             supported.extend(["chinese", "simulators", "prewarm", "fastModeStatus"].map(String::from));
         }
+        // 主进程没有模拟器开关的平台不列出它，避免给出装不上的选项
+        #[cfg(windows)]
+        supported.extend(["chinese", "prewarm", "fastModeStatus"].map(String::from));
     }
     Ok(NativeStatus {
         installation,
@@ -72,17 +78,15 @@ pub fn apply(identity: &str, selection: Selection) -> Result<String> {
     {
         super::macos::apply(identity, selection)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
     {
-        ensure!(
-            !selection.chinese && !selection.simulators && !selection.prewarm && !selection.fast_mode_status,
-            "当前平台未验证这些原生功能补丁"
-        );
-        if selection.computer_use {
-            super::install(identity)
-        } else {
-            super::restore()
-        }
+        super::windows::apply(identity, selection)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = identity;
+        ensure!(selection.is_empty(), "当前平台未验证这些原生功能补丁");
+        super::restore()
     }
 }
 
@@ -101,17 +105,15 @@ pub(super) fn check_selection(version: &str, selection: Selection) -> Result<()>
     Ok(())
 }
 
-#[cfg(any(test, target_os = "macos"))]
-pub(super) mod language {
+/// 官方中文词典，两端共用：renderer 资源逐字节相同，缺的只是这几个文件
+#[cfg(any(test, windows, target_os = "macos"))]
+pub(super) mod catalogs {
     use super::super::asar::hash;
     use anyhow::{ensure, Context, Result};
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
-    const ORIGINAL: &str = "c73bdcdea4f25a67315e2c25da403a410f1fcbe4b31edc1ccba149a9e59c8f54";
-    const MODIFIED: &str = "c22da6602d1295ae78666765b478a0988296a76349fc68af1a4cc6ca6b5f7615";
-    const LIST: &str = r#"["en-US","de-DE","fr-FR","ko-KR","ja-JP","es-419","es-ES","it-IT","hi-IN","pt-BR","id-ID"]"#;
-    const RESOURCES: &[(&str, &[u8], &str)] = &[
+    pub(in crate::computer_use) const RESOURCES: &[(&str, &[u8], &str)] = &[
         (
             "zh-Hans.json",
             include_bytes!("resources/zh-Hans.json"),
@@ -133,6 +135,53 @@ pub(super) mod language {
             "761fe8c8c0bdf03c1aeb1c8c8eca17f8323bdb7dbd45a18dd22479ae4fd8ea5b",
         ),
     ];
+
+    pub(in crate::computer_use) fn present(root: &Path) -> Result<bool> {
+        let mut found = 0;
+        for (relative, _, expected) in RESOURCES {
+            let path = root.join(relative);
+            if !path.try_exists()? {
+                continue;
+            }
+            ensure!(!fs::symlink_metadata(&path)?.is_symlink(), "语言包不允许是符号链接");
+            ensure!(hash(&fs::read(path)?) == *expected, "官方语言资源校验失败：{relative}");
+            found += 1;
+        }
+        ensure!(
+            found == 0 || found == RESOURCES.len(),
+            "中文词典只安装了一部分"
+        );
+        Ok(found > 0)
+    }
+
+    pub(in crate::computer_use) fn install(root: &Path, boundary: &Path) -> Result<()> {
+        for (relative, bytes, expected) in RESOURCES {
+            ensure!(hash(bytes) == *expected, "内置官方语言包校验失败");
+            let path = root.join(relative);
+            ensure!(!path.try_exists()? && !path.is_symlink(), "中文资源已存在，拒绝覆盖");
+            let parent = path.parent().context("资源缺少父目录")?;
+            fs::create_dir_all(parent)?;
+            ensure!(
+                parent.canonicalize()?.starts_with(boundary.canonicalize()?),
+                "中文资源目录越界"
+            );
+            fs::write(path, bytes)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) mod language {
+    use super::super::asar::hash;
+    use anyhow::{ensure, Context, Result};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    const ORIGINAL: &str = "c73bdcdea4f25a67315e2c25da403a410f1fcbe4b31edc1ccba149a9e59c8f54";
+    const MODIFIED: &str = "c22da6602d1295ae78666765b478a0988296a76349fc68af1a4cc6ca6b5f7615";
+    const LIST: &str = r#"["en-US","de-DE","fr-FR","ko-KR","ja-JP","es-419","es-ES","it-IT","hi-IN","pt-BR","id-ID"]"#;
+    use super::catalogs::RESOURCES;
 
     fn locate(app: &Path) -> Result<(PathBuf, String)> {
         let root = app.join("Contents/Resources/ion-dist/assets/v1");

@@ -34,9 +34,10 @@ fn main() -> anyhow::Result<()> {
             anyhow::ensure!(!identity.is_empty(), "缺少签名身份");
             println!("{}", computer_use::install_copy(app, store, identity)?);
         }
-        #[cfg(target_os = "macos")]
         "apply" => {
-            let identity = args.get(3).context("缺少签名身份")?;
+            let identity = args.get(3).map(String::as_str).unwrap_or("");
+            #[cfg(target_os = "macos")]
+            anyhow::ensure!(!identity.is_empty(), "缺少签名身份");
             let selection = serde_json::from_str(args.get(4).context("缺少功能组合 JSON")?)?;
             println!(
                 "{}",

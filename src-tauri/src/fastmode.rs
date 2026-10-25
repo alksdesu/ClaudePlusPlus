@@ -42,7 +42,8 @@ pub enum RendererState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RendererInfo {
-    pub requires_signing: bool,
+    /// renderer 由「功能增强」页的原生开关接管，这里只管 wrapper
+    pub native: bool,
     pub file: Option<String>,
     pub state: RendererState,
     pub missing_anchors: Vec<String>,
@@ -408,7 +409,7 @@ fn adopt_existing(status: &FastModeStatus, settings: &mut FastModeSettings) -> b
         return false;
     }
     if status.wrapper != WrapperState::Deployed
-        && (status.renderer.requires_signing
+        && (status.renderer.native
             || !matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated))
     {
         return false;
@@ -558,7 +559,7 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use anyhow::{bail, Context, Result};
+    use anyhow::{bail, ensure, Context, Result};
 
     use super::*;
     use crate::procs;
@@ -570,6 +571,7 @@ mod imp {
     const WRAPPER_MAX_BYTES: u64 = 1024 * 1024;
     const CLI_EXE: &str = "claude.exe";
     const REAL_EXE: &str = "claude-real.exe";
+    const NATIVE_NOTE: &str = "已装原生开关，renderer 由「功能增强」页管理";
 
     fn slot_occupant(exe: &Path) -> SlotOccupant {
         match fs::metadata(exe).map(|m| m.len()) {
@@ -1231,13 +1233,25 @@ mod imp {
 
     fn renderer_info(msix_root: Option<&Path>) -> RendererInfo {
         let not_found = RendererInfo {
-            requires_signing: false,
+            native: false,
             file: None,
             state: RendererState::NotFound,
             missing_anchors: Vec::new(),
         };
         let Some(root) = msix_root else { return not_found };
-        renderer_info_in(&renderer_dir(root))
+        let v1 = renderer_dir(root);
+        native_renderer(&v1).unwrap_or_else(|| renderer_info_in(&v1))
+    }
+
+    // 原生 Fast 开关改的就是旧补丁那个 chunk，两者不能叠加
+    fn native_renderer(v1: &Path) -> Option<RendererInfo> {
+        let path = crate::computer_use::installed_fast_state(v1)?;
+        Some(RendererInfo {
+            native: true,
+            file: Some(dir_label(&path)),
+            state: RendererState::Patched,
+            missing_anchors: Vec::new(),
+        })
     }
 
     fn renderer_info_in(v1: &Path) -> RendererInfo {
@@ -1245,10 +1259,10 @@ mod imp {
             Ok(assets) => {
                 let file = Some(assets.iter().map(|a| dir_label(&a.path)).collect::<Vec<_>>().join(" · "));
                 let (state, missing_anchors) = classify_assets(&assets);
-                RendererInfo { requires_signing: false, file, state, missing_anchors }
+                RendererInfo { native: false, file, state, missing_anchors }
             }
             Err(error) => RendererInfo {
-                requires_signing: false,
+                native: false,
                 file: None,
                 state: if !v1.is_dir() {
                     RendererState::NotFound
@@ -1409,6 +1423,10 @@ mod imp {
     }
 
     fn patch_renderer(v1: &Path) -> Result<String> {
+        ensure!(
+            crate::computer_use::installed_fast_state(v1).is_none(),
+            "已装原生 Fast 开关，不能再叠加 renderer 补丁"
+        );
         patch_renderer_in(v1, grant_write)
     }
 
@@ -1535,6 +1553,7 @@ mod imp {
             .context("未找到 Desktop 装好的 bundled CLI（Claude-3p\\claude-code）")
             .and_then(deploy_cli);
         let renderer = match before.renderer.state {
+            _ if before.renderer.native => Ok(NATIVE_NOTE.to_string()),
             RendererState::Patched => Ok("renderer 已是 patch 状态".to_string()),
             RendererState::Pristine | RendererState::Outdated => run_with_elevation("apply"),
             RendererState::Mismatch => Ok(format!(
@@ -1558,7 +1577,9 @@ mod imp {
         }
         let wrapper = restore_all_cli().map(|n| format!("已还原 {n} 个版本目录的官方 CLI"));
         let status = status_light();
-        let renderer = if matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated)
+        let renderer = if status.renderer.native {
+            Ok(NATIVE_NOTE.to_string())
+        } else if matches!(status.renderer.state, RendererState::Patched | RendererState::Outdated)
             || status.msix_path.as_deref().is_some_and(has_renderer_backups)
         {
             run_with_elevation("restore")
@@ -2451,7 +2472,7 @@ mod imp {
     fn snapshot(cli: Option<&CliInstall>) -> FastModeStatus {
         let version = desktop_version();
         let mut renderer = RendererInfo {
-            requires_signing: true,
+            native: true,
             file: None,
             state: RendererState::Unsupported,
             missing_anchors: Vec::new(),
@@ -3190,7 +3211,7 @@ mod imp {
             cli_dir: None,
             wrapper: WrapperState::NoCli,
             renderer: RendererInfo {
-                requires_signing: false,
+                native: false,
                 file: None,
                 state: RendererState::NotFound,
                 missing_anchors: Vec::new(),
@@ -3241,16 +3262,16 @@ mod shared_tests {
             cli_version: Some("2.1.260".into()),
             cli_dir: None,
             wrapper,
-            renderer: RendererInfo { requires_signing: false, file: None, state: renderer, missing_anchors: Vec::new() },
+            renderer: RendererInfo { native: false, file: None, state: renderer, missing_anchors: Vec::new() },
             settings: FastModeSettings::default(),
             speed: SpeedStats::default(),
         }
     }
 
     #[test]
-    fn signed_display_patch_does_not_enable_the_wrapper_guardian() {
+    fn native_display_patch_does_not_enable_the_wrapper_guardian() {
         let mut status = status_with(WrapperState::Absent, RendererState::Patched);
-        status.renderer.requires_signing = true;
+        status.renderer.native = true;
         let mut settings = FastModeSettings::default();
         assert!(!adopt_existing(&status, &mut settings));
         assert!(!settings.installed);

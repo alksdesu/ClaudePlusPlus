@@ -16,6 +16,7 @@ pub enum Phase {
     Failed,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Cursor {
@@ -24,6 +25,7 @@ pub(crate) struct Cursor {
     pub offset: u64,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Journal {
@@ -98,6 +100,7 @@ pub(crate) fn names(s: Selection) -> Vec<String> {
     .collect()
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn pending(phase: Phase) -> bool {
     matches!(
         phase,
@@ -109,6 +112,7 @@ pub(crate) fn pending(phase: Phase) -> bool {
     )
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EventKind {
     Available,
@@ -119,12 +123,14 @@ pub(crate) enum EventKind {
     Offline,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Event {
     pub time: i64,
     pub kind: EventKind,
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn parse_event(line: &str) -> Option<Event> {
     use chrono::{Local, NaiveDateTime, TimeZone};
     let time = NaiveDateTime::parse_from_str(line.get(..19)?, "%Y-%m-%d %H:%M:%S").ok()?;
@@ -156,6 +162,7 @@ pub(crate) fn parse_event(line: &str) -> Option<Event> {
     })
 }
 
+#[cfg(any(test, target_os = "macos"))]
 pub(crate) fn consume_event(j: &mut Journal, e: Event) {
     if e.time < j.last_event {
         return;

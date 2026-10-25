@@ -43,7 +43,7 @@ const uiSource = fs.readFileSync(path.join(__dirname, '../src/ui/fastmode.ts'), 
 const compiled = ts.transpileModule(uiSource, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText;
 const context = { exports: {} };
 vm.runInNewContext(compiled, context);
-const label = (state, requiresSigning) => context.exports.rendererPresentation({ state, requiresSigning }).label;
+const label = (state, native) => context.exports.rendererPresentation({ state, native }).label;
 
 test('macOS distinguishes signed status installation from unsupported platforms', () => {
   assert.equal(label('pristine', true), '可安装 · 需重签');
@@ -63,7 +63,7 @@ test('native rescans also refresh Fast status after install, removal and errors'
   const context = { state, render() {}, invoke: async command => {
     if (command === 'fastmode_status') {
       if (failFast) throw Error('unreadable');
-      return { renderer: { state: rendererState, requiresSigning: true } };
+      return { renderer: { state: rendererState, native: true } };
     }
     if (failNative) throw Error('native scan failed');
     return { selection: { fastModeStatus: rendererState === 'patched' }, installation: { identities: [] } };

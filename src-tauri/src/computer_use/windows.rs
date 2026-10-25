@@ -9,11 +9,24 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::{asar, pe, Status};
+use super::native::Selection;
+use super::{asar, pe, rules, Status};
 
 const FILES: [&str; 2] = ["claude.exe", "resources/app.asar"];
+const RENDERER: &str = "resources/ion-dist/assets/v1";
+const CATALOGS: &str = "resources/ion-dist/i18n";
 const FLAG: &str = "--computer-use-elevated";
 const NO_WINDOW: u32 = 0x0800_0000;
+const PLATFORM: rules::Platform = rules::Platform::Windows;
+
+/// 事务里的一个文件：baseline 为 None 表示原本不存在（中文新增的词典）
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileRecord {
+    path: String,
+    baseline: Option<String>,
+    modified: Option<String>,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct Record {
@@ -24,6 +37,50 @@ struct Record {
     baseline: [String; 2],
     modified: [String; 2],
     phase: String,
+    /// schema 1 的记录只装过 Computer Use，读出来补成等价的组合
+    #[serde(default)]
+    selection: Option<Selection>,
+    #[serde(default)]
+    files: Option<Vec<FileRecord>>,
+}
+
+impl FileRecord {
+    fn target(&self, restore: bool) -> Option<&String> {
+        if restore {
+            self.baseline.as_ref()
+        } else {
+            self.modified.as_ref()
+        }
+    }
+
+    /// exe 与 ASAR 每次都入账，只装中文时它们内容不变，不该被替换
+    fn unchanged(&self) -> bool {
+        self.baseline == self.modified
+    }
+}
+
+impl Record {
+    fn selected(&self) -> Selection {
+        self.selection.unwrap_or(Selection {
+            computer_use: true,
+            ..Default::default()
+        })
+    }
+
+    /// schema 1 只记两个固定文件的哈希，转成统一的清单形式
+    fn entries(&self) -> Vec<FileRecord> {
+        self.files.clone().unwrap_or_else(|| {
+            FILES
+                .iter()
+                .enumerate()
+                .map(|(i, path)| FileRecord {
+                    path: (*path).into(),
+                    baseline: Some(self.baseline[i].clone()),
+                    modified: Some(self.modified[i].clone()),
+                })
+                .collect()
+        })
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -114,23 +171,72 @@ fn hashes(app: &Path) -> Result<[String; 2]> {
     Ok([digest(&app.join(FILES[0]))?, digest(&app.join(FILES[1]))?])
 }
 
-fn verify_pair(app: &Path, version: &str) -> Result<asar::PatchState> {
+/// 备份与暂存目录只放本次事务涉及的文件，那里缺 renderer 资源不算结构变化
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    App,
+    Transaction,
+}
+
+fn required(found: Option<(PathBuf, String)>, scope: Scope, label: &str) -> Result<Option<String>> {
+    match found {
+        Some((_, text)) => Ok(Some(text)),
+        None if scope == Scope::Transaction => Ok(None),
+        None => bail!("未找到{label}入口"),
+    }
+}
+
+/// 主进程开关与 renderer、词典必须讲同一个故事，半装状态一律拒绝
+fn verify_pair(app: &Path, scope: Scope) -> Result<Selection> {
     plain(app, true)?;
     plain(&app.join("resources"), true)?;
     for file in FILES {
         plain(&app.join(file), false)?;
     }
-    let (state, hash) = asar::inspect_windows(&app.join(FILES[1]), version)?;
+    let mut selection = asar::rules_selection(&app.join(FILES[1]), PLATFORM)?;
     ensure!(
-        pe::inspect(&app.join(FILES[0]))? == hash,
+        pe::inspect(&app.join(FILES[0]))? == asar::header_hash(&app.join(FILES[1]))?,
         "exe 与 ASAR 的完整性记录不一致"
     );
-    Ok(state)
+    let renderer = app.join(RENDERER);
+    let (fast, language) = if scope == Scope::Transaction && !renderer.is_dir() {
+        (None, None)
+    } else {
+        (
+            required(rules::fast_state_asset(&renderer)?, scope, "Fast 状态")?,
+            required(rules::language_asset(&renderer)?, scope, "语言")?,
+        )
+    };
+    let fast = fast.as_deref().map(rules::fast_state_installed).transpose()?;
+    ensure!(
+        fast.unwrap_or(false) == selection.fast_mode_status,
+        "Fast 原生开关与主进程映射不一致"
+    );
+    let chinese = language.as_deref().map(rules::language_installed).transpose()?;
+    selection.chinese = chinese.unwrap_or(false);
+    ensure!(
+        selection.chinese == super::native::catalogs::present(&app.join(CATALOGS))?,
+        "中文词典与语言入口状态不一致"
+    );
+    Ok(selection)
 }
 
-fn verify_original(app: &Path, version: &str) -> Result<()> {
+/// Fast Mode 页的 renderer 补丁按 .orig 还原、原生开关按哈希记账，同一文件叠两份后谁都还原不了
+fn legacy_fast_patch(renderer: &Path) -> Result<bool> {
+    if !renderer.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(renderer)? {
+        if entry?.file_name().to_string_lossy().ends_with(".js.orig") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn verify_original(app: &Path, scope: Scope) -> Result<()> {
     ensure!(
-        verify_pair(app, version)? == asar::PatchState::Pristine,
+        verify_pair(app, scope)?.is_empty(),
         "需要原始 Windows 主进程入口"
     );
     let script = format!(
@@ -293,7 +399,7 @@ impl Installation {
         plain(&path, false)?;
         let record: Record = serde_json::from_slice(&fs::read(path)?).context("安装记录损坏")?;
         ensure!(
-            record.schema == 1
+            matches!(record.schema, 1 | 2)
                 && matches!(
                     record.phase.as_str(),
                     "ready" | "installing" | "installed" | "restoring" | "restored"
@@ -334,9 +440,9 @@ impl Installation {
         write_json(&self.store.join("installation.json"), record)
     }
 
-    fn sibling(&self, record: &Record, index: usize, suffix: &str) -> PathBuf {
+    fn sibling(&self, record: &Record, path: &str, suffix: &str) -> PathBuf {
         self.app
-            .join(FILES[index])
+            .join(path)
             .with_extension(format!("cpp-cu-{}.{suffix}", record.id))
     }
 
@@ -344,18 +450,22 @@ impl Installation {
         if record.target != self.app || record.version != self.version {
             return Ok(false);
         }
-        for (i, file) in FILES.iter().enumerate() {
-            let live = self.app.join(file);
+        for entry in record.entries() {
+            let live = self.app.join(&entry.path);
             let path = if live.try_exists()? {
                 live
             } else {
-                self.sibling(record, i, "previous")
+                self.sibling(record, &entry.path, "previous")
             };
             if !path.try_exists()? {
+                // 中文词典原本就不存在，缺席本身就是已知状态之一
+                if entry.baseline.is_none() {
+                    continue;
+                }
                 return Ok(false);
             }
-            let current = digest(&path)?;
-            if current != record.baseline[i] && current != record.modified[i] {
+            let current = Some(digest(&path)?);
+            if current != entry.baseline && current != entry.modified {
                 return Ok(false);
             }
         }
@@ -368,7 +478,7 @@ impl Installation {
             hashes(&self.baseline(record))? == record.baseline,
             "原始备份哈希不一致"
         );
-        verify_original(&self.baseline(record), &record.version)
+        verify_original(&self.baseline(record), Scope::Transaction)
     }
 
     fn grant(&self, path: &Path) -> Result<()> {
@@ -398,19 +508,19 @@ impl Installation {
     }
 
     fn clear_siblings(&self, record: &Record) -> Result<()> {
-        for (i, file) in FILES.iter().enumerate() {
+        for entry in record.entries() {
             for suffix in ["new", "previous"] {
-                let path = self.sibling(record, i, suffix);
+                let path = self.sibling(record, &entry.path, suffix);
                 if !path.try_exists()? {
                     continue;
                 }
-                let value = digest(&path)?;
+                let value = Some(digest(&path)?);
                 // 未提交的 new 文件可能因中断只复制了一半；previous 必须仍是已知的完整版本。
                 ensure!(
-                    suffix == "new" || value == record.baseline[i] || value == record.modified[i],
+                    suffix == "new" || value == entry.baseline || value == entry.modified,
                     "替换暂存文件已被外部修改"
                 );
-                let live = self.app.join(file);
+                let live = self.app.join(&entry.path);
                 if suffix == "previous" && !live.try_exists()? {
                     fs::rename(path, live)?;
                 } else {
@@ -421,28 +531,50 @@ impl Installation {
         Ok(())
     }
 
-    fn replace(&self, record: &Record, source: &Path, expected: &[String; 2]) -> Result<()> {
+    /// restore 为真时目标是 baseline，否则是 modified；目标为 None 表示该文件应消失
+    fn replace(&self, record: &Record, source: &Path, restore: bool) -> Result<()> {
         ensure!(!running(&self.app)?, "Claude Desktop 正在运行，请先退出");
         ensure!(self.owned(record)?, "Desktop 已被外部更新或修改，拒绝替换");
         self.clear_siblings(record)?;
-        for (i, file) in FILES.iter().enumerate() {
-            let live = self.app.join(file);
-            self.grant(live.parent().context("文件缺少父目录")?)?;
-            self.grant(&live)?;
-            let new = self.sibling(record, i, "new");
+        let entries = record.entries();
+        for entry in entries.iter().filter(|e| !e.unchanged()) {
+            let live = self.app.join(&entry.path);
+            let parent = live.parent().context("文件缺少父目录")?;
+            self.grant(parent)?;
+            if live.try_exists()? {
+                self.grant(&live)?;
+            }
+            let Some(expected) = entry.target(restore) else {
+                continue;
+            };
+            let new = self.sibling(record, &entry.path, "new");
             ensure!(!new.try_exists()?, "替换暂存文件已存在");
-            fs::copy(source.join(file), &new)?;
-            ensure!(digest(&new)? == expected[i], "替换副本哈希不一致");
+            fs::copy(source.join(&entry.path), &new)
+                .with_context(|| format!("准备 {}", entry.path))?;
+            ensure!(digest(&new)? == *expected, "替换副本哈希不一致");
         }
         ensure!(
             !running(&self.app)? && self.owned(record)?,
             "替换前应用状态发生变化"
         );
         self.commit_files(record, |from, to| fs::rename(from, to))?;
-        ensure!(
-            &hashes(&self.app)? == expected,
-            "替换结果回读不一致，原始备份仍保留"
-        );
+        for entry in &entries {
+            let live = self.app.join(&entry.path);
+            match entry.target(restore) {
+                Some(expected) => ensure!(
+                    digest(&live)? == *expected,
+                    "替换结果回读不一致，原始备份仍保留"
+                ),
+                None => {
+                    ensure!(!live.try_exists()?, "应移除的文件仍然存在");
+                    // 该文件本就不该存在，留着暂存会被中断恢复逻辑挪回原位
+                    let previous = self.sibling(record, &entry.path, "previous");
+                    if previous.try_exists()? {
+                        fs::remove_file(previous)?;
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -451,22 +583,32 @@ impl Installation {
         record: &Record,
         mut rename: impl FnMut(&Path, &Path) -> std::io::Result<()>,
     ) -> Result<()> {
-        for (i, file) in FILES.iter().enumerate() {
-            let live = self.app.join(file);
-            let previous = self.sibling(record, i, "previous");
-            let result = rename(&live, &previous)
-                .and_then(|_| rename(&self.sibling(record, i, "new"), &live));
+        let entries: Vec<_> = record.entries().into_iter().filter(|e| !e.unchanged()).collect();
+        for (index, entry) in entries.iter().enumerate() {
+            let live = self.app.join(&entry.path);
+            let previous = self.sibling(record, &entry.path, "previous");
+            let new = self.sibling(record, &entry.path, "new");
+            let result = (|| -> std::io::Result<()> {
+                if live.try_exists()? {
+                    rename(&live, &previous)?;
+                }
+                if new.try_exists()? {
+                    rename(&new, &live)?;
+                }
+                Ok(())
+            })();
             if let Err(error) = result {
-                for (j, file) in FILES[..=i].iter().enumerate().rev() {
-                    let previous = self.sibling(record, j, "previous");
-                    if !previous.exists() {
-                        continue;
-                    }
-                    let target = self.app.join(file);
-                    if target.exists() {
+                for done in entries[..=index].iter().rev() {
+                    let previous = self.sibling(record, &done.path, "previous");
+                    let target = self.app.join(&done.path);
+                    if target.exists() && previous.exists() {
                         fs::remove_file(&target).context("回滚时移除修改文件失败")?;
                     }
-                    fs::rename(previous, target).context("自动回滚失败，请使用原始备份还原")?;
+                    if previous.exists() {
+                        fs::rename(previous, target).context("自动回滚失败，请使用原始备份还原")?;
+                    } else if target.exists() && done.baseline.is_none() {
+                        fs::remove_file(&target).context("回滚时移除新增文件失败")?;
+                    }
                 }
                 return Err(error).context("替换失败，已回滚已替换文件");
             }
@@ -492,47 +634,51 @@ impl Installation {
             if record.phase != "restored" {
                 if !self.owned(&record)? {
                     s.state = "changed".into();
-                    s.message = "Desktop 已被外部更新或修改；保留备份，不覆盖其他版本".into();
+                    s.message = "Desktop 被外部更新或改动过，不会覆盖；备份仍保留".into();
                     return Ok(s);
                 }
                 self.verify_backup(&record)?;
                 s.can_restore = !s.running;
                 if record.phase != "installed" {
                     s.state = "recovery".into();
-                    s.message = "上次操作未完成，可先还原官方文件".into();
+                    s.message = "上次操作没完成，请先还原".into();
                     return Ok(s);
                 }
-                if hashes(&self.app)? == record.modified {
-                    ensure!(
-                        verify_pair(&self.app, &self.version)? == asar::PatchState::Patched,
-                        "补丁状态异常"
-                    );
+                let current = verify_pair(&self.app, Scope::App)?;
+                if current == record.selected() && !current.is_empty() {
                     s.state = "installed".into();
-                    s.message = "Windows 原生电脑操作已安装；请在 Desktop 中自行启用并授权".into();
+                    s.message = format!(
+                        "{} 已安装，去 Desktop 设置里打开",
+                        super::updates::names(current).join("、")
+                    );
+                    // 换组合会在同一次提权里先还原再重装
+                    s.can_install = !s.running;
                     return Ok(s);
                 }
             }
         }
-        match verify_pair(&self.app, &self.version) {
-            Ok(asar::PatchState::Pristine) => match verify_original(&self.app, &self.version) {
-                Ok(()) => {
-                    s.state = "available".into();
-                    s.message = if package_update {
-                        "检测到 Desktop 更新，可为当前应用安装原生电脑操作；旧版备份保留"
-                    } else {
-                        "可安装 Windows 原生电脑操作；安装和还原需要管理员确认"
+        match verify_pair(&self.app, Scope::App) {
+            Ok(selection) if selection.is_empty() => {
+                match verify_original(&self.app, Scope::App) {
+                    Ok(()) => {
+                        s.state = "available".into();
+                        s.message = if package_update {
+                            "Desktop 已更新，可以重新安装"
+                        } else {
+                            "可以安装，需要管理员确认"
+                        }
+                        .into();
+                        s.can_install = !s.running;
                     }
-                    .into();
-                    s.can_install = !s.running;
+                    Err(e) => {
+                        s.state = "unsupported".into();
+                        s.message = format!("{e:#}");
+                    }
                 }
-                Err(e) => {
-                    s.state = "unsupported".into();
-                    s.message = format!("{e:#}");
-                }
-            },
+            }
             Ok(_) => {
                 s.state = "unmanaged".into();
-                s.message = "检测到修改版，但没有匹配的原始备份记录".into();
+                s.message = "检测到别处装的补丁，没有对应的备份记录".into();
             }
             Err(e) => {
                 s.state = "unsupported".into();
@@ -542,76 +688,150 @@ impl Installation {
         Ok(s)
     }
 
-    fn install(&self) -> Result<String> {
+    /// 本次事务要动的文件；renderer 的 chunk 名带哈希，只能按内容现场定位。
+    /// exe 与 ASAR 始终入账：备份和校验都以它们为基准，内容没变的不会被替换
+    fn plan(&self, selection: Selection) -> Result<Vec<String>> {
+        let mut files: Vec<String> = FILES.iter().map(|f| (*f).to_string()).collect();
+        let renderer = self.app.join(RENDERER);
+        let relative = |path: &Path| -> Result<String> {
+            Ok(path
+                .strip_prefix(&self.app)?
+                .to_string_lossy()
+                .replace('\\', "/"))
+        };
+        if selection.fast_mode_status {
+            let (path, _) = rules::fast_state_asset(&renderer)?.context("未找到 Fast 状态入口")?;
+            files.push(relative(&path)?);
+        }
+        if selection.chinese {
+            let (path, _) = rules::language_asset(&renderer)?.context("未找到语言入口")?;
+            files.push(relative(&path)?);
+            files.extend(
+                super::native::catalogs::RESOURCES
+                    .iter()
+                    .map(|(name, _, _)| format!("{CATALOGS}/{name}")),
+            );
+        }
+        Ok(files)
+    }
+
+    fn stage_patch(&self, stage: &Path, selection: Selection) -> Result<()> {
+        if selection.mask() != 0 {
+            let original = pe::inspect(&stage.join(FILES[0]))?;
+            let header = asar::patch_with_rules(&stage.join(FILES[1]), PLATFORM, selection)?;
+            pe::update(&stage.join(FILES[0]), &original, &header)?;
+        }
+        let renderer = stage.join(RENDERER);
+        if selection.fast_mode_status {
+            let (path, text) = rules::fast_state_asset(&renderer)?.context("未找到 Fast 状态入口")?;
+            fs::write(path, rules::patch_fast_state(&text)?)?;
+        }
+        if selection.chinese {
+            let (path, text) = rules::language_asset(&renderer)?.context("未找到语言入口")?;
+            fs::write(path, rules::patch_language(&text)?)?;
+            super::native::catalogs::install(&stage.join(CATALOGS), stage)?;
+        }
+        Ok(())
+    }
+
+    fn apply(&self, selection: Selection) -> Result<String> {
         let _lock = self.lock()?;
         ensure!(!running(&self.app)?, "Claude Desktop 正在运行，请先退出");
-        if let Some(record) = self.record()? {
-            if record.phase == "installed"
-                && self.owned(&record)?
-                && hashes(&self.app)? == record.modified
-            {
-                self.verify_backup(&record)?;
-                ensure!(
-                    verify_pair(&self.app, &self.version)? == asar::PatchState::Patched,
-                    "补丁状态异常"
-                );
-                return Ok("Windows 原生 Computer Use 已安装".into());
-            }
+        ensure!(
+            selection.mask() & !PLATFORM.supported() == 0,
+            "当前平台尚未提供所选原生功能"
+        );
+        if selection.is_empty() {
+            return self.restore_locked();
+        }
+        if selection.fast_mode_status {
             ensure!(
-                record.phase == "restored" || self.is_package_update(&record),
-                "请先还原以结束已有安装记录"
+                !legacy_fast_patch(&self.app.join(RENDERER))?,
+                "Fast Mode 页的 renderer 补丁还在。先在 Fast Mode 页还原，装好原生开关后再回去装 wrapper"
             );
+        }
+        if let Some(record) = self.record()? {
             if self.is_package_update(&record) {
                 self.verify_backup(&record)?;
+            } else if record.phase == "installed" && self.owned(&record)? {
+                if verify_pair(&self.app, Scope::App)? == selection {
+                    self.verify_backup(&record)?;
+                    return Ok("这些功能已经装好了".into());
+                }
+                // 组合必须从官方基线重新生成：先还原，再按新组合安装，同一次提权里完成
+                self.restore_locked()?;
+            } else {
+                ensure!(record.phase == "restored", "请先还原以结束已有安装记录");
             }
         }
-        verify_original(&self.app, &self.version)?;
+        verify_original(&self.app, Scope::App)?;
         plain(&self.app.join("resources/app.asar.unpacked/node_modules/@ant/claude-native/claude-native-binding.node"), false)?;
         let mut record = Record {
-            schema: 1,
+            schema: 2,
             id: Uuid::new_v4(),
             target: self.app.clone(),
             version: self.version.clone(),
             baseline: hashes(&self.app)?,
             modified: Default::default(),
             phase: "ready".into(),
+            selection: Some(selection),
+            files: None,
         };
         let baseline = self.baseline(&record);
         let stage = self.stage(&record);
-        for destination in [&baseline, &stage] {
-            safe_directory(&destination.join("resources"))?;
-            for file in FILES {
-                fs::copy(self.app.join(file), destination.join(file))?;
+        let planned = self.plan(selection)?;
+        let mut entries = Vec::new();
+        for file in &planned {
+            let live = self.app.join(file);
+            let present = live.try_exists()?;
+            for destination in [&baseline, &stage] {
+                let target = destination.join(file);
+                safe_directory(target.parent().context("暂存文件缺少父目录")?)?;
+                if present {
+                    fs::copy(&live, &target).with_context(|| format!("备份 {file}"))?;
+                }
             }
-            ensure!(
-                hashes(destination)? == record.baseline,
-                "备份或暂存副本校验失败"
-            );
+            entries.push(FileRecord {
+                path: file.clone(),
+                baseline: present.then(|| digest(&live)).transpose()?,
+                modified: None,
+            });
         }
-        verify_original(&baseline, &self.version)?;
-        let original = pe::inspect(&stage.join(FILES[0]))?;
-        let modified = asar::patch_windows(&stage.join(FILES[1]), &self.version)?;
-        pe::update(&stage.join(FILES[0]), &original, &modified)?;
+        record.files = Some(entries.clone());
+        verify_original(&baseline, Scope::Transaction)?;
+        self.stage_patch(&stage, selection)?;
         ensure!(
-            verify_pair(&stage, &self.version)? == asar::PatchState::Patched,
-            "补丁副本完整性校验失败"
+            verify_pair(&stage, Scope::Transaction)? == selection,
+            "补丁副本校验失败"
         );
+        for entry in entries.iter_mut() {
+            let staged = stage.join(&entry.path);
+            entry.modified = staged.try_exists()?.then(|| digest(&staged)).transpose()?;
+        }
+        record.files = Some(entries);
         record.modified = hashes(&stage)?;
         self.save(&record)?;
         record.phase = "installing".into();
         self.save(&record)?;
-        self.replace(&record, &stage, &record.modified)?;
+        self.replace(&record, &stage, false)?;
         record.phase = "installed".into();
         self.save(&record)?;
         self.clear_siblings(&record)?;
-        for file in FILES {
-            let _ = fs::remove_file(stage.join(file));
+        for entry in record.entries() {
+            let _ = fs::remove_file(stage.join(&entry.path));
         }
-        Ok("Windows 原生 Computer Use 已安装；请打开 Desktop 设置，自行启用并完成原生授权".into())
+        Ok(format!(
+            "{} 已安装，去 Desktop 设置里打开",
+            super::updates::names(selection).join("、")
+        ))
     }
 
     fn restore(&self) -> Result<String> {
         let _lock = self.lock()?;
+        self.restore_locked()
+    }
+
+    fn restore_locked(&self) -> Result<String> {
         ensure!(!running(&self.app)?, "Claude Desktop 正在运行，请先退出");
         let mut record = self.record()?.context("没有可还原的 Windows 安装记录")?;
         ensure!(self.owned(&record)?, "Desktop 已被外部更新或修改，拒绝覆盖");
@@ -619,12 +839,12 @@ impl Installation {
         self.clear_siblings(&record)?;
         record.phase = "restoring".into();
         self.save(&record)?;
-        self.replace(&record, &self.baseline(&record), &record.baseline)?;
-        verify_original(&self.app, &record.version)?;
+        self.replace(&record, &self.baseline(&record), true)?;
+        verify_original(&self.app, Scope::App)?;
         record.phase = "restored".into();
         self.save(&record)?;
         self.clear_siblings(&record)?;
-        Ok("已还原官方 exe 与 ASAR，签名和完整性校验通过；会话、配置和授权设置未修改".into())
+        Ok("已还原官方文件".into())
     }
 }
 
@@ -651,6 +871,28 @@ pub fn status() -> Result<Status> {
     }
 }
 
+pub(super) fn selection_at() -> Result<Selection> {
+    match Installation::standard()? {
+        Some(i) => verify_pair(&i.app, Scope::App),
+        None => Ok(Selection::default()),
+    }
+}
+
+/// 提权进程只收功能位和请求号，不接受任何路径参数
+fn encode(selection: Selection) -> u8 {
+    selection.mask() | (u8::from(selection.chinese) << 4)
+}
+
+fn decode(bits: u8) -> Selection {
+    Selection {
+        computer_use: bits & rules::COMPUTER_USE != 0,
+        simulators: bits & rules::SIMULATORS != 0,
+        prewarm: bits & rules::PREWARM != 0,
+        fast_mode_status: bits & rules::FAST_STATUS != 0,
+        chinese: bits & 16 != 0,
+    }
+}
+
 fn elevate(mode: &str) -> Result<String> {
     let install = Installation::standard()?.context("未找到 Claude Desktop")?;
     ensure!(!running(&install.app)?, "Claude Desktop 正在运行，请先退出");
@@ -672,9 +914,24 @@ fn elevate(mode: &str) -> Result<String> {
     Ok(result.message)
 }
 
+// 电脑操作页的安装只加这一项，已装的其他功能保留
 pub fn install(_identity: &str) -> Result<String> {
-    elevate("install")
+    apply(
+        "",
+        Selection {
+            computer_use: true,
+            ..selection_at()?
+        },
+    )
 }
+
+pub fn apply(_identity: &str, selection: Selection) -> Result<String> {
+    if selection.is_empty() {
+        return elevate("restore");
+    }
+    elevate(&format!("apply-{}", encode(selection)))
+}
+
 pub fn restore() -> Result<String> {
     elevate("restore")
 }
@@ -691,9 +948,16 @@ pub fn elevated_entry() -> Option<i32> {
             let operation = (|| -> Result<String> {
                 let install = Installation::standard()?.context("未找到 Claude Desktop")?;
                 match args[1].as_str() {
-                    "install" => install.install(),
                     "restore" => install.restore(),
-                    _ => bail!("未知操作"),
+                    mode => {
+                        let bits: u8 = mode
+                            .strip_prefix("apply-")
+                            .context("未知操作")?
+                            .parse()
+                            .context("功能位无效")?;
+                        ensure!(bits > 0 && bits <= 31, "功能位超出范围");
+                        install.apply(decode(bits))
+                    }
                 }
             })();
             let result = match operation {
@@ -721,7 +985,20 @@ pub fn status_copy(app: &Path, store: &Path) -> Result<Status> {
     Installation::copy(app, store)?.status()
 }
 pub fn install_copy(app: &Path, store: &Path, _identity: &str) -> Result<String> {
-    Installation::copy(app, store)?.install()
+    let install = Installation::copy(app, store)?;
+    install.apply(Selection {
+        computer_use: true,
+        ..verify_pair(&install.app, Scope::App)?
+    })
+}
+
+pub fn apply_copy(
+    app: &Path,
+    store: &Path,
+    _identity: &str,
+    selection: Selection,
+) -> Result<String> {
+    Installation::copy(app, store)?.apply(selection)
 }
 pub fn restore_copy(app: &Path, store: &Path) -> Result<String> {
     Installation::copy(app, store)?.restore()
@@ -767,6 +1044,8 @@ mod tests {
             baseline: [asar::hash(b"original"), asar::hash(b"original")],
             modified: [asar::hash(b"patched"), asar::hash(b"patched")],
             phase: "installed".into(),
+            selection: None,
+            files: None,
         };
         for (app, version, expected) in [
             (&new_app, "3.10.0", true),
@@ -809,13 +1088,15 @@ mod tests {
             baseline: original,
             modified: [asar::hash(b"modified"), asar::hash(b"modified")],
             phase: "installing".into(),
+            selection: None,
+            files: None,
         };
         fs::rename(
             app.join(FILES[0]),
-            installation.sibling(&record, 0, "previous"),
+            installation.sibling(&record, FILES[0], "previous"),
         )
         .unwrap();
-        fs::write(installation.sibling(&record, 0, "new"), b"partial").unwrap();
+        fs::write(installation.sibling(&record, FILES[0], "new"), b"partial").unwrap();
         assert!(installation.owned(&record).unwrap());
         installation.clear_siblings(&record).unwrap();
         assert_eq!(fs::read(app.join(FILES[0])).unwrap(), b"original");
@@ -845,9 +1126,11 @@ mod tests {
             baseline: hashes(&app).unwrap(),
             modified: [asar::hash(b"modified"), asar::hash(b"modified")],
             phase: "installing".into(),
+            selection: None,
+            files: None,
         };
         for i in 0..2 {
-            fs::write(installation.sibling(&record, i, "new"), b"modified").unwrap();
+            fs::write(installation.sibling(&record, FILES[i], "new"), b"modified").unwrap();
         }
         let mut calls = 0;
         let result = installation.commit_files(&record, |from, to| {
@@ -864,6 +1147,156 @@ mod tests {
         assert_eq!(hashes(&app).unwrap(), record.baseline);
         assert!(installation.owned(&record).unwrap());
         installation.clear_siblings(&record).unwrap();
+    }
+
+    /// 副本上跑完整事务：CLAUDEPP_WINDOWS_FIXTURE 指向官方 app 目录的独立副本
+    #[test]
+    #[ignore = "需要官方应用副本"]
+    fn combinations_switch_and_restore_every_file() {
+        let app = PathBuf::from(std::env::var_os("CLAUDEPP_WINDOWS_FIXTURE").expect("缺少副本路径"));
+        let store = app.parent().unwrap().join("probe-store");
+        let _ = fs::remove_dir_all(&store);
+        let before: Vec<_> = FILES.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
+        let installation = Installation::copy(&app, &store).unwrap();
+        let computer_use = Selection {
+            computer_use: true,
+            ..Default::default()
+        };
+        let full = Selection {
+            computer_use: true,
+            chinese: true,
+            prewarm: true,
+            fast_mode_status: true,
+            simulators: false,
+        };
+        let chinese = Selection {
+            chinese: true,
+            ..Default::default()
+        };
+        let fast = Selection {
+            fast_mode_status: true,
+            ..Default::default()
+        };
+        for selection in [computer_use, full, chinese, fast] {
+            installation.apply(selection).unwrap();
+            assert_eq!(verify_pair(&app, Scope::App).unwrap(), selection);
+            assert_eq!(
+                super::super::native::catalogs::present(&app.join(CATALOGS)).unwrap(),
+                selection.chinese
+            );
+            if selection.mask() == 0 {
+                let current: Vec<_> = FILES.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
+                assert_eq!(before, current, "只装 renderer 功能时 exe 与 ASAR 不该变");
+            }
+            let status = installation.status().unwrap();
+            assert_eq!(status.state, "installed");
+            assert!(status.can_install, "已装状态必须允许换组合");
+        }
+
+        installation.restore().unwrap();
+        assert!(verify_pair(&app, Scope::App).unwrap().is_empty());
+        assert!(!super::super::native::catalogs::present(&app.join(CATALOGS)).unwrap());
+        let after: Vec<_> = FILES.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
+        assert_eq!(before, after, "还原后文件未回到原始内容");
+        assert_eq!(
+            walkdir_count(&app, "cpp-cu-"),
+            0,
+            "还原后仍有替换暂存文件"
+        );
+    }
+
+    #[cfg(test)]
+    fn walkdir_count(root: &Path, needle: &str) -> usize {
+        let mut count = 0;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.to_string_lossy().contains(needle) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn legacy_fast_patch_is_detected_by_its_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!legacy_fast_patch(&dir.path().join("missing")).unwrap());
+        fs::write(dir.path().join("chunk.js"), b"patched").unwrap();
+        assert!(!legacy_fast_patch(dir.path()).unwrap());
+        fs::write(dir.path().join("chunk.js.orig"), b"original").unwrap();
+        assert!(legacy_fast_patch(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn unchanged_entries_are_left_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("app");
+        fs::create_dir_all(app.join("resources")).unwrap();
+        let installation = Installation {
+            app: app.clone(),
+            store: dir.path().join("store"),
+            version: "3.1623.4".into(),
+            elevated: false,
+        };
+        for file in FILES {
+            fs::write(app.join(file), b"original").unwrap();
+        }
+        let original = digest(&app.join(FILES[0])).unwrap();
+        let record = Record {
+            schema: 2,
+            id: Uuid::new_v4(),
+            target: app.clone(),
+            version: installation.version.clone(),
+            baseline: hashes(&app).unwrap(),
+            modified: hashes(&app).unwrap(),
+            phase: "installing".into(),
+            selection: Some(Selection {
+                chinese: true,
+                ..Default::default()
+            }),
+            files: Some(vec![
+                FileRecord {
+                    path: FILES[0].into(),
+                    baseline: Some(original.clone()),
+                    modified: Some(original.clone()),
+                },
+                FileRecord {
+                    path: FILES[1].into(),
+                    baseline: Some(original.clone()),
+                    modified: Some(asar::hash(b"modified")),
+                },
+                FileRecord {
+                    path: "resources/added.json".into(),
+                    baseline: None,
+                    modified: Some(asar::hash(b"added")),
+                },
+            ]),
+        };
+        fs::write(installation.sibling(&record, FILES[1], "new"), b"modified").unwrap();
+        fs::write(installation.sibling(&record, "resources/added.json", "new"), b"added").unwrap();
+        let mut moved = Vec::new();
+        installation
+            .commit_files(&record, |from, to| {
+                moved.push(to.to_path_buf());
+                fs::rename(from, to)
+            })
+            .unwrap();
+        let skipped = [
+            app.join(FILES[0]),
+            installation.sibling(&record, FILES[0], "previous"),
+        ];
+        assert!(moved.iter().all(|path| !skipped.contains(path)));
+        assert!(!skipped[1].exists());
+        assert_eq!(fs::read(app.join(FILES[0])).unwrap(), b"original");
+        assert_eq!(fs::read(app.join(FILES[1])).unwrap(), b"modified");
+        assert_eq!(fs::read(app.join("resources/added.json")).unwrap(), b"added");
+        assert!(installation.owned(&record).unwrap());
     }
 
     #[test]

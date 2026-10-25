@@ -106,7 +106,7 @@ export interface FastModeStatus {
   cliVersion: string | null;
   cliDir: string | null;
   wrapper: WrapperState;
-  renderer: { requiresSigning: boolean; file: string | null; state: RendererState; missingAnchors: string[] };
+  renderer: { native: boolean; file: string | null; state: RendererState; missingAnchors: string[] };
   settings: FastModeSettings;
   speed: { sessions: number; fast: number; standard: number };
 }

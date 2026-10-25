@@ -2,8 +2,7 @@ use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-#[cfg(any(test, windows))]
-use super::windows_recipe::WindowsRecipe;
+use super::rules;
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -60,10 +59,11 @@ const FAST_3_AFTER: &str = r#"let o=o9t(t.thinking);return o&&(n.thinking=o),ww(
 const MAX_HEADER: u64 = 32 * 1024 * 1024;
 const MAX_ENTRY: u64 = 64 * 1024 * 1024;
 
+/// macOS 逐版本记录用它区分官方、旧补丁与新补丁
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum PatchState {
     Pristine,
-    #[cfg(any(test, target_os = "macos"))]
     Legacy,
     Patched,
 }
@@ -161,7 +161,8 @@ impl Archive {
         })
     }
 
-    fn source(&mut self, path: &[&str]) -> Result<Vec<u8>> {
+    /// 只读不校验；调用方必须在使用内容前调 verify_entry
+    fn read(&mut self, path: &[&str]) -> Result<Vec<u8>> {
         let entry = entry_mut(&mut self.header, path)?;
         ensure!(
             entry.get("link").is_none() && entry.get("unpacked").is_none(),
@@ -183,10 +184,18 @@ impl Archive {
             .seek(SeekFrom::Start(self.payload_start + offset))?;
         let mut source = vec![0; size as usize];
         self.file.read_exact(&mut source)?;
-        verify_integrity(
-            entry.get("integrity").context("入口没有完整性信息")?,
-            &source,
-        )?;
+        Ok(source)
+    }
+
+    fn verify_entry(&mut self, path: &[&str], source: &[u8]) -> Result<()> {
+        let entry = entry_mut(&mut self.header, path)?;
+        verify_integrity(entry.get("integrity").context("入口没有完整性信息")?, source)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    fn source(&mut self, path: &[&str]) -> Result<Vec<u8>> {
+        let source = self.read(path)?;
+        self.verify_entry(path, &source)?;
         Ok(source)
     }
 
@@ -234,19 +243,82 @@ impl Archive {
         found.context("未找到 Computer Use 配置函数，主进程结构可能已变化")
     }
 
-    #[cfg(any(test, windows))]
-    fn locate_windows(&mut self) -> Result<(String, Vec<u8>, WindowsRecipe)> {
+    /// 规则路径按字面标记预筛再交给规则精确判定，不依赖带哈希的 chunk 名。
+    /// 几百个入口只有命中的那个参与后续逻辑，完整性校验也只对它做
+    fn locate_marker(&mut self, marker: &str, label: &str) -> Result<(String, String)> {
         let mut found = None;
         for name in self.main_entries()? {
-            let source = self.source(&[".vite", "build", &name])?;
-            let text = std::str::from_utf8(&source).context("主进程入口不是 UTF-8")?;
-            if let Some(recipe) = WindowsRecipe::detect(text)? {
-                ensure!(found.is_none(), "多个主进程文件含有 Computer Use 配置函数");
-                found = Some((name, source, recipe));
+            let path = [".vite", "build", name.as_str()];
+            let source = self.read(&path)?;
+            if memchr::memmem::find(&source, marker.as_bytes()).is_none() {
+                continue;
             }
+            ensure!(found.is_none(), "{label}入口不唯一，拒绝修改");
+            self.verify_entry(&path, &source)?;
+            let text = String::from_utf8(source).context("主进程入口不是 UTF-8")?;
+            found = Some((name, text));
         }
-        found.context("未找到兼容的 Windows Computer Use 配置结构")
+        found.with_context(|| format!("未找到{label}入口"))
     }
+}
+
+pub(super) fn header_hash(path: &Path) -> Result<String> {
+    Ok(hash(&Archive::open(path)?.raw_header))
+}
+
+const MAIN_MARKER: &str = ".selfHostedSessions?";
+const PREWARM_MARKER: &str = "async sparePrewarmSupport(){";
+
+/// 规则路径：结构化锚点现场识别，不需要逐版本记录
+pub(super) fn rules_selection(
+    path: &Path,
+    platform: rules::Platform,
+) -> Result<super::native::Selection> {
+    let mut archive = Archive::open(path)?;
+    let (_, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
+    let mask = rules::main_mask(&main, platform)?;
+    let (_, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+    ensure!(
+        rules::prewarm_installed(&prewarm)? == (mask & rules::PREWARM != 0),
+        "原生预热模块与配置开关状态不一致"
+    );
+    Ok(super::native::Selection {
+        computer_use: mask & rules::COMPUTER_USE != 0,
+        simulators: mask & rules::SIMULATORS != 0,
+        prewarm: mask & rules::PREWARM != 0,
+        fast_mode_status: mask & rules::FAST_STATUS != 0,
+        chinese: false,
+    })
+}
+
+pub(super) fn patch_with_rules(
+    path: &Path,
+    platform: rules::Platform,
+    selection: super::native::Selection,
+) -> Result<String> {
+    let mask = selection.mask();
+    ensure!(
+        rules_selection(path, platform)?.mask() == 0,
+        "必须从官方基线组合原生补丁"
+    );
+    // 预热的开关字段也在主进程配置函数里，只改独立模块不会生效
+    if mask != 0 {
+        let mut archive = Archive::open(path)?;
+        let (name, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
+        let modified = rules::patch_main(&main, platform, mask)?;
+        replace_entry(path, archive, &name, modified.as_bytes())?;
+    }
+    if mask & rules::PREWARM != 0 {
+        let mut archive = Archive::open(path)?;
+        let (name, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+        let modified = rules::patch_prewarm(&prewarm)?;
+        replace_entry(path, archive, &name, modified.as_bytes())?;
+    }
+    ensure!(
+        rules_selection(path, platform)?.mask() == mask,
+        "原生组合补丁回读不一致"
+    );
+    Ok(hash(&Archive::open(path)?.raw_header))
 }
 
 fn integrity(source: &[u8], block_size: u64) -> Result<Value> {
@@ -364,24 +436,7 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
     Ok(hash(&header))
 }
 
-#[cfg(any(test, windows))]
-pub fn inspect_windows(path: &Path, version: &str) -> Result<(PatchState, String)> {
-    let mut archive = Archive::open(path)?;
-    let (_, _, recipe) = archive
-        .locate_windows()
-        .with_context(|| format!("检测 Windows Desktop {version} 的主进程"))?;
-    Ok((recipe.state, hash(&archive.raw_header)))
-}
 
-#[cfg(any(test, windows))]
-pub fn patch_windows(path: &Path, version: &str) -> Result<String> {
-    let mut archive = Archive::open(path)?;
-    let (name, source, recipe) = archive
-        .locate_windows()
-        .with_context(|| format!("检测 Windows Desktop {version} 的主进程"))?;
-    let modified = recipe.patch(std::str::from_utf8(&source)?)?;
-    replace_entry(path, archive, &name, modified.as_bytes())
-}
 
 #[cfg(any(test, target_os = "macos"))]
 const NATIVE_PREFIX: &str = "function Fen(e){let t=e.selfHostedSessions?e.builtinBrowserEnabled?Pen:Nen:e.builtinBrowserEnabled?Aen:Den;return{...t,";
@@ -837,41 +892,87 @@ mod tests {
         assert!(inspect(&path, version).is_err());
     }
 
+    const RULES_MAIN: &str = concat!(
+        r#"var A=1,B=2,C=3,D=4;function fv(e){return{value:e,on:!!e,off:!e,source:"force","#,
+        r#"experiment:null,experimentResult:null}}"#,
+        "function pick(e){return e.selfHostedSessions?e.builtinBrowserEnabled?A:B:",
+        "e.builtinBrowserEnabled?C:D}",
+    );
+    const RULES_PREWARM: &str = concat!(
+        r#"async sparePrewarmSupport(){if(!t.x0("4237076858"))return{unsupported:"gate_off"};"#,
+        r#"if(t.Ret().type!=="1p")return{unsupported:"third_party"};let e;}"#,
+    );
+
     #[test]
-    fn windows_discovery_patches_only_the_unique_entry_and_updates_integrity() {
-        let source = super::super::windows_recipe::TEST_SOURCE;
+    fn rules_patch_only_the_unique_entries_and_update_integrity() {
         let (_dir, path) = fixture(&[
-            ("index.chunk-renamed.js", source),
+            ("index.chunk-renamed.js", RULES_MAIN),
+            ("index.pre.js", RULES_PREWARM),
             ("index.other.js", "unchanged"),
         ]);
-        assert_eq!(
-            inspect_windows(&path, "future-build").unwrap().0,
-            PatchState::Pristine
-        );
-        let header_hash = patch_windows(&path, "future-build").unwrap();
-        assert_eq!(
-            inspect_windows(&path, "future-build").unwrap(),
-            (PatchState::Patched, header_hash)
-        );
+        let platform = rules::Platform::Windows;
+        let selection = super::super::native::Selection {
+            computer_use: true,
+            prewarm: true,
+            ..Default::default()
+        };
+        assert!(rules_selection(&path, platform).unwrap().is_empty());
+        let header = patch_with_rules(&path, platform, selection).unwrap();
+        assert_eq!(rules_selection(&path, platform).unwrap(), selection);
+        assert_eq!(header_hash(&path).unwrap(), header);
         let mut archive = Archive::open(&path).unwrap();
         assert_eq!(
-            archive
-                .source(&[".vite", "build", "index.other.js"])
-                .unwrap(),
+            archive.source(&[".vite", "build", "index.other.js"]).unwrap(),
             b"unchanged"
         );
         let bytes = fs::read(&path).unwrap();
-        assert!(patch_windows(&path, "future-build").is_err());
+        assert!(patch_with_rules(&path, platform, selection).is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
-    fn windows_discovery_refuses_ambiguous_archives_without_writing() {
-        let source = super::super::windows_recipe::TEST_SOURCE;
-        let (_dir, path) = fixture(&[("index.one.js", source), ("index.two.js", source)]);
+    fn rules_refuse_ambiguous_archives_without_writing() {
+        let (_dir, path) = fixture(&[
+            ("index.one.js", RULES_MAIN),
+            ("index.two.js", RULES_MAIN),
+            ("index.pre.js", RULES_PREWARM),
+        ]);
+        let platform = rules::Platform::Windows;
         let bytes = fs::read(&path).unwrap();
-        assert!(inspect_windows(&path, "future-build").is_err());
-        assert!(patch_windows(&path, "future-build").is_err());
+        assert!(rules_selection(&path, platform).is_err());
+        assert!(patch_with_rules(
+            &path,
+            platform,
+            super::super::native::Selection {
+                computer_use: true,
+                ..Default::default()
+            }
+        )
+        .is_err());
         assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    /// 主进程开关与独立预热模块必须同进同出，否则选了预热却没生效
+    #[test]
+    fn prewarm_module_and_switch_must_agree() {
+        let (_dir, path) = fixture(&[
+            ("index.chunk-renamed.js", RULES_MAIN),
+            ("index.pre.js", RULES_PREWARM),
+        ]);
+        let platform = rules::Platform::Windows;
+        patch_with_rules(
+            &path,
+            platform,
+            super::super::native::Selection {
+                computer_use: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut archive = Archive::open(&path).unwrap();
+        let (name, source) = archive.locate_marker(PREWARM_MARKER, "原生预热").unwrap();
+        let stripped = rules::patch_prewarm(&source).unwrap();
+        replace_entry(&path, archive, &name, stripped.as_bytes()).unwrap();
+        assert!(rules_selection(&path, platform).is_err());
     }
 }

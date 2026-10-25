@@ -1018,7 +1018,7 @@ const WRAPPER_META: Record<WrapperState, { label: string; cls: string }> = {
 
 function renderFastMode(): string {
   const fm = state.fastmode;
-  const rendererNative = fm?.renderer.requiresSigning === true;
+  const rendererNative = fm?.renderer.native === true;
   const head = `
       <div class="page-head">
         <div>
