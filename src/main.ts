@@ -612,7 +612,7 @@ function renderCodex(): string {
         <div>
           <div class="eyebrow">Codex 导入</div>
           <h1>把 Codex 原生对话带进 Claude</h1>
-          <p class="lead">把 Codex 的对话转成 Claude 转录，不改 Codex 自己的数据，重复迁移也不会多出副本。迁完到「Claude 会话」页注册就能在 Desktop 打开，CLI 用 claude -r 续聊。</p>
+          <p class="lead">把 Codex 的对话转成 Claude 转录，Codex 的会话本身不动，重复迁移也不会多出副本。迁完到「Claude 会话」页注册就能在 Desktop 打开，CLI 用 claude -r 续聊。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
