@@ -74,40 +74,6 @@ label:has(input:focus-visible) {
   height: 20px;
 }
 
-.brand-sub {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-detail-xs);
-  color: var(--theme-foreground-tertiary);
-  letter-spacing: var(--letter-spacing-caps);
-  text-transform: uppercase;
-}
-
-.tabs {
-  display: flex;
-  gap: var(--sp-4);
-  min-width: 0;
-  overflow-x: auto;
-  flex-shrink: 1;
-}
-
-.tab {
-  flex-shrink: 0;
-  padding: var(--sp-6) var(--sp-12);
-  border-radius: var(--br-8);
-  color: var(--theme-foreground-tertiary);
-  font-weight: var(--font-weight-medium);
-  transition: var(--transition-color), var(--transition-surface);
-}
-
-.tab:hover {
-  color: var(--theme-foreground-primary);
-}
-
-.tab.active {
-  color: var(--theme-foreground-primary);
-  background: var(--theme-background-tertiary);
-}
-
 .watch-chip {
   display: flex;
   flex-shrink: 0;

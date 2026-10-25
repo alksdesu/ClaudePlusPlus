@@ -164,7 +164,7 @@ pub(crate) fn consume_event(j: &mut Journal, e: Event) {
     match e.kind {
         EventKind::PolicyDisabled => {
             j.policy_blocked = true;
-            j.message = "官方策略已关闭自动更新；不会绕过策略启动更新维护".into();
+            j.message = "组织策略关闭了自动更新，更新维护暂停".into();
         }
         EventKind::Checking => j.policy_blocked = false,
         EventKind::Available | EventKind::SignatureRejected
@@ -174,13 +174,13 @@ pub(crate) fn consume_event(j: &mut Journal, e: Event) {
                 && !j.applied.is_empty() =>
         {
             j.phase = Phase::WaitingForExit;
-            j.message = "发现官方更新；等待 Desktop 正常退出后还原官方包".into();
+            j.message = "发现更新，等 Desktop 退出后还原官方包".into();
         }
         EventKind::Ready if j.phase == Phase::AwaitingUpdate => {
-            j.message = "官方更新已下载；等待官方安装器完成更新".into()
+            j.message = "更新已下载，等官方安装器装完".into()
         }
         EventKind::Offline if j.phase == Phase::AwaitingUpdate => {
-            j.message = "官方更新暂时离线；保留官方包，联网后继续等待更新".into()
+            j.message = "离线中，联网后继续等更新".into()
         }
         _ => {}
     }

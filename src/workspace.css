@@ -10,9 +10,6 @@
 .nav-item:disabled { opacity: var(--theme-disabled-opacity); cursor: wait; }
 .nav-icon { width: var(--sp-20); text-align: center; font-size: var(--font-size-detail-m); }
 .nav-dot { margin-left: auto; width: var(--sp-6); height: var(--sp-6); border-radius: var(--br-round); background: currentColor; }
-.sidebar-footer { margin-top: auto; padding: var(--sp-12); border-top: var(--border-width) solid var(--theme-border-tertiary); }
-.sidebar-footer p { margin-top: var(--sp-8); font-size: var(--font-size-detail-xs); color: var(--theme-foreground-tertiary); line-height: var(--line-height-prose); }
-.native-label { font-size: var(--font-size-detail-xs); color: var(--theme-foreground-secondary); }
 .workspace .view { max-width: var(--container-main); padding: var(--sp-32); margin-inline: auto; }
 .workspace h1 { font-size: var(--font-size-page-title); line-height: var(--line-height-heading); }
 .workspace h2 { font-size: var(--font-size-section-title); font-weight: var(--font-weight-semibold); line-height: var(--line-height-subhead); }

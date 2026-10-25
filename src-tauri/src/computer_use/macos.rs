@@ -542,7 +542,7 @@ impl Installation {
         if !self.app.try_exists()? {
             if let Some(r) = &record {
                 status.state = "recovery".into();
-                status.message = "应用路径缺失；可从已记录的原包备份恢复".into();
+                status.message = "找不到应用，可以从备份恢复".into();
                 status.can_restore = self.baseline(r).is_dir() && !status.running;
             }
             return Ok(status);
@@ -570,12 +570,12 @@ impl Installation {
                     && !status.running;
                 if !baseline && !modified && !previous {
                     status.state = "changed".into();
-                    status.message = "Desktop 已被外部更新或修改；为避免覆盖新版本，停止安装和还原，原包备份仍保留".into();
+                    status.message = "Desktop 被外部更新或改动过，为免覆盖新版本已停止操作，备份仍保留".into();
                     return Ok(status);
                 }
                 if r.phase != "installed" {
                     status.state = "recovery".into();
-                    status.message = "上次安装未完成，请先还原以结束未完成事务".into();
+                    status.message = "上次安装没完成，请先还原".into();
                     return Ok(status);
                 }
                 if modified {
@@ -583,12 +583,12 @@ impl Installation {
                     verify_signature(&self.app, None)?;
                     if patch_state == asar::PatchState::Legacy {
                         status.state = "upgradeAvailable".into();
-                        status.message = "已安装旧版原生入口；升级将先验证备份并还原官方，再安装包含后台模式的补丁".into();
+                        status.message = "装的是旧版补丁，升级会先还原官方再装新版（含后台模式）".into();
                         status.can_install = !status.running && !status.identities.is_empty();
                     } else {
                         status.state = "installed".into();
                         status.message =
-                            "原生增强已安装；功能开关与设备授权仍由 Claude 原生界面管理".into();
+                            "已安装，去 Claude 设置里打开开关并授权".into();
                         status.can_install = !status.running && !status.identities.is_empty();
                     }
                     return Ok(status);
@@ -599,13 +599,13 @@ impl Installation {
             Ok((_, asar::PatchState::Pristine)) => {
                 verify_original(&self.app, None)?;
                 status.state = "available".into();
-                status.message = "可安装原生电脑操作；安装后仍需自行启用并授权".into();
+                status.message = "可以安装".into();
                 status.can_install = !status.running && !status.identities.is_empty();
             }
             Ok((_, asar::PatchState::Patched | asar::PatchState::Legacy)) => {
                 status.state = "unmanaged".into();
                 status.message =
-                    "检测到已有补丁，但没有匹配的安装记录；不会将修改版当成官方备份".into();
+                    "检测到别处装的补丁，没有对应的安装记录，不会把它当成官方备份".into();
             }
             Err(error) => {
                 status.state = "unsupported".into();
@@ -650,7 +650,7 @@ impl Installation {
                     && inspect(&self.app)?.1 != asar::PatchState::Legacy
                 {
                     verify_signature(&self.app, None)?;
-                    return Ok("所选原生功能已安装，无需重复修改".into());
+                    return Ok("这些功能已经装好了".into());
                 }
             }
         }
@@ -751,7 +751,7 @@ impl Installation {
             }
             return Err(error);
         }
-        Ok("所选原生功能已安装并通过完整性验证。请在 Claude 原生设置中选择语言或授权设备；未自动授予任何权限".into())
+        Ok("已安装。去 Claude 设置里打开对应开关或切换语言".into())
     }
 
     fn restore(&self) -> Result<String> {
@@ -774,7 +774,7 @@ impl Installation {
                 self.clear_staging(&record)?;
                 record.phase = "restored".into();
                 self.save(&record)?;
-                return Ok("应用已经是备份中的原版；安装记录已结束，原包备份保留".into());
+                return Ok("应用已经是官方原版，备份保留".into());
             }
             ensure!(
                 record.modified_hash.as_deref() == Some(current.as_str())
@@ -819,7 +819,7 @@ impl Installation {
         if retired.exists() {
             let _ = fs::remove_dir_all(retired);
         }
-        Ok("已还原完整官方应用，原包哈希验证通过；会话、API 配置和用户授权设置未修改".into())
+        Ok("已还原官方应用".into())
     }
 }
 

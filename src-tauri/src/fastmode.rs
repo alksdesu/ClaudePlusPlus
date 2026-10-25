@@ -2281,8 +2281,7 @@ mod imp {
     use crate::procs;
 
     const DESKTOP_APP: &str = "/Applications/Claude.app";
-    const RENDERER_NOTE: &str = "macOS wrapper 已单独处理；原生开关请在功能增强中选择，\
-         由备份、完整性校验与整包重签流程安装或还原";
+    const RENDERER_NOTE: &str = "原生开关在「功能增强」页安装";
     const WRAPPER_NAME: &str = "claude";
     const REAL_NAME: &str = "claude-real";
     const CLI_BUNDLE: &str = "claude.app";

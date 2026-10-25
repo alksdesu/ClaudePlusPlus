@@ -144,7 +144,7 @@ function renderUnify(): string {
   const report = state.report!;
   const pending = state.plans.reduce((n, p) => n + p.toMerge.length, 0);
   const runningNote = anyDesktopRunning()
-    ? `<div class="banner banner-error">Claude Desktop 正在运行 —— 写操作已禁用，请先从托盘退出 Desktop（${state.running
+    ? `<div class="banner banner-error">Desktop 开着，写操作已禁用，请先从托盘退出（${state.running
         .filter((r) => r.running)
         .map((r) => esc(r.rootLabel))
         .join("、")}）</div>`
@@ -191,7 +191,7 @@ function renderUnify(): string {
         <div>
           <div class="eyebrow">存储归一</div>
           <h1>渠道与账号共享同一会话池</h1>
-          <p class="lead">把每个账号/组织组合合并进主池，原目录备份后以链接指回 —— 切渠道、换账号、官方版与第三方版看到同一份列表。</p>
+          <p class="lead">把各账号、各组织的会话合到一个池里，切渠道或换账号后列表不再变。原目录会先备份。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
@@ -203,7 +203,7 @@ function renderUnify(): string {
       ${runningNote}
       ${
         pending === 0
-          ? '<div class="banner">所有组合均已归一，新渠道/新账号首次出现时托盘守护会自动处理。</div>'
+          ? '<div class="banner">都已归一。以后出现新渠道或新账号，托盘守护会自动合并。</div>'
           : ""
       }
       ${poolCards}
@@ -430,7 +430,7 @@ function purgeBanner(): string {
   const disabled = anyDesktopRunning() || state.busy;
   return `
     <div class="banner">
-      <span>共 ${total} 个墓碑标记，其中 ${withTranscript.length} 个在 CLI 侧仍有转录（${sizeOf(bytes)}）。删除会送入系统回收站，可从回收站找回。</span>
+      <span>共 ${total} 个墓碑，其中 ${withTranscript.length} 个还有 CLI 转录（${sizeOf(bytes)}）。删掉的文件进回收站，能找回。</span>
       <button class="btn btn-secondary btn-small" data-action="purge-markers" ${disabled ? "disabled" : ""}>仅清标记（解封 ${total} 个）</button>
       <button class="btn btn-secondary btn-small btn-danger" data-action="purge-all" ${disabled ? "disabled" : ""}>标记 + 转录一起删</button>
       <button class="btn btn-tertiary btn-small" data-action="purge-cancel">取消</button>
@@ -460,7 +460,7 @@ function deleteBanner(): string {
   }
   return `
     <div class="banner">
-      <span>${note}转录送系统回收站，可从回收站找回；Desktop 元数据不留墓碑，直接消失。</span>
+      <span>${note}转录进回收站，能找回；Desktop 里的条目直接删除。</span>
       <button class="btn btn-secondary btn-small btn-danger" data-action="delete-confirm" ${
         disabled ? "disabled" : ""
       }>确认删除</button>
@@ -470,7 +470,7 @@ function deleteBanner(): string {
 
 function renderMigrate(): string {
   const runningNote = anyDesktopRunning()
-    ? '<div class="banner banner-error">Claude Desktop 正在运行 —— 迁移已禁用，请先退出 Desktop</div>'
+    ? '<div class="banner banner-error">Desktop 开着，迁移已禁用，请先退出</div>'
     : "";
   const cliCount = state.selectedCli.size;
   const deskCount = state.selectedDesktop.size;
@@ -480,9 +480,9 @@ function renderMigrate(): string {
     <div class="view view-wide">
       <div class="page-head">
         <div>
-          <div class="eyebrow">会话迁移</div>
+          <div class="eyebrow">Claude 会话</div>
           <h1>CLI 与 Desktop 互认会话</h1>
-          <p class="lead">注册 = 为 CLI 会话生成 Desktop 元数据（转录零拷贝，两边同源）；注销 = 只移除 Desktop 元数据（转录保留，CLI 照常 resume）；删除 = 两侧痕迹一并抹掉，转录进回收站。</p>
+          <p class="lead">注册：让 CLI 会话出现在 Desktop 里。注销：从 Desktop 移走，CLI 仍能续聊。删除：两边一起删，转录进回收站。</p>
         </div>
         <div class="head-actions">
           ${
@@ -567,7 +567,7 @@ function renderCodex(): string {
   };
   const disabled = state.codexRunning || state.busy;
   const runningNote = state.codexRunning
-    ? '<div class="banner banner-error">Codex 正在运行 —— 迁移会写入 Codex 的导入记录（防止它把迁移产物同步回去），请先完全退出 Codex</div>'
+    ? '<div class="banner banner-error">Codex 开着，请先完全退出。迁移要改它的导入记录，免得它把结果再同步回来</div>'
     : "";
   const filters: { key: CodexFilter; label: string }[] = [
     { key: "all", label: `全部 ${all.length}` },
@@ -610,9 +610,9 @@ function renderCodex(): string {
     <div class="view view-wide">
       <div class="page-head">
         <div>
-          <div class="eyebrow">Codex 会话迁移</div>
+          <div class="eyebrow">Codex 导入</div>
           <h1>把 Codex 原生对话带进 Claude</h1>
-          <p class="lead">Codex 会把 Claude 转录同步为自己的会话；反向则由这里完成 —— 原生对话转为 Claude 转录（零破坏、幂等），迁移后可在「会话迁移」页注册进 Desktop，CLI 侧 claude -r 直接续聊。</p>
+          <p class="lead">把 Codex 的对话转成 Claude 转录，不改 Codex 自己的数据，重复迁移也不会多出副本。迁完到「Claude 会话」页注册就能在 Desktop 打开，CLI 用 claude -r 续聊。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
@@ -626,7 +626,7 @@ function renderCodex(): string {
       ${runningNote}
       ${
         counts.nativeOnly === 0
-          ? '<div class="banner">没有待迁移的 Codex 原生会话 —— 全部会话在 Claude 侧均有对应。</div>'
+          ? '<div class="banner">没有要迁移的会话，Codex 的对话在 Claude 里都有了。</div>'
           : ""
       }
       <div class="filter-row">${chips}</div>
@@ -656,7 +656,7 @@ async function doMigrateCodex() {
         toast(`${shortId(r.threadId)}: ${r.outcome.reason ?? "跳过"}`, true);
       }
     }
-    if (ok) toast(`已迁移 ${ok} 个会话（共 ${turns} 轮对话）—— 去「会话迁移」页注册即可在 Desktop 打开`);
+    if (ok) toast(`已迁移 ${ok} 个会话（${turns} 轮对话），去「Claude 会话」页注册后就能在 Desktop 打开`);
     state.selectedCodex.clear();
   } catch (error) {
     toast(String(error), true);
@@ -840,7 +840,6 @@ let renderedTab: AppState["tab"] | null = null;
 function render() {
   const scrollTops = new Map<string, number>();
   const mainScrollTop = renderedTab === state.tab ? app.querySelector("main")?.scrollTop ?? 0 : 0;
-  const tabsScrollLeft = app.querySelector(".tabs")?.scrollLeft ?? 0;
   for (const column of app.querySelectorAll<HTMLElement>(".column-scroll")) {
     scrollTops.set(column.id, column.scrollTop);
   }
@@ -867,9 +866,6 @@ function render() {
   }
   const main = app.querySelector("main");
   if (main) main.scrollTop = mainScrollTop;
-  const tabs = app.querySelector(".tabs");
-  if (tabs) tabs.scrollLeft = tabsScrollLeft;
-  app.querySelector(".tab.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   renderedTab = state.tab;
 }
 
@@ -907,7 +903,7 @@ async function doRegister() {
       } else if (r.outcome?.status === "registered") {
         ok += 1;
       } else if (r.outcome?.status === "tombstoneBlocked") {
-        toast(`${shortId(r.sessionId)}: 曾在 Desktop 删除过（墓碑），再次注册将复活它`, true);
+        toast(`${shortId(r.sessionId)}: 在 Desktop 里删过，注册会让它重新出现`, true);
       } else if (r.outcome?.status === "alreadyRegistered") {
         toast(`${shortId(r.sessionId)}: 已注册，跳过`);
       } else if (r.outcome?.status === "siblingRegistered") {
@@ -1000,7 +996,7 @@ async function doUnregister() {
       if (r.error) toast(`${r.metadataFile}: ${r.error}`, true);
       else ok += 1;
     }
-    if (ok) toast(`已注销 ${ok} 个会话（转录保留，CLI 侧 claude -r 可继续）`);
+    if (ok) toast(`已注销 ${ok} 个会话，CLI 里 claude -r 仍可继续`);
     state.selectedDesktop.clear();
   } catch (error) {
     toast(String(error), true);
@@ -1028,9 +1024,7 @@ function renderFastMode(): string {
         <div>
           <div class="eyebrow">Fast Mode</div>
           <h1>让 API key 登录的 Desktop 也能 fast</h1>
-          <p class="lead">wrapper 为有资格的 API key 会话请求 Fast Mode，实际结果以服务端 usage.speed 为准。${
-            rendererNative ? "原生开关通过功能增强的整包重签安装" : "renderer patch 亮出实时开关"
-          }。CLI wrapper 由托盘守护维护；原生开关补丁在 Desktop 更新后重新检测并应用。</p>
+          <p class="lead">wrapper 让 API key 会话默认请求 Fast，是否真的 fast 看转录里的 usage.speed。</p>
         </div>
         <div class="head-actions">
           <button class="btn btn-secondary" data-action="refresh">重新扫描</button>
@@ -1054,32 +1048,32 @@ function renderFastMode(): string {
     return `<div class="view">${head}<div class="empty-note">Fast Mode 状态读取失败，请重新扫描</div></div>`;
   }
   if (!fm.supported) {
-    return `<div class="view">${head}<div class="banner">当前系统尚未提供 Fast Mode 安装器。</div></div>`;
+    return `<div class="view">${head}<div class="banner">当前系统不支持。</div></div>`;
   }
   const runningNote = anyDesktopRunning()
-    ? '<div class="banner banner-error">Claude Desktop 正在运行 —— 安装与还原需要替换它加载的文件，请先退出 Desktop</div>'
+    ? '<div class="banner banner-error">Desktop 开着，请先退出再安装或还原</div>'
     : "";
   const pendingNote = state.watch?.pendingFastmode
-    ? `<div class="banner">检测到 Desktop 或 CLI 已更新，守护会在 Desktop 退出后自动${
-        rendererNative ? "重新部署 wrapper" : "重新 patch（renderer 部分会弹一次 UAC）"
+    ? `<div class="banner">需要更新，Desktop 退出后会自动${
+        rendererNative ? "重新部署 wrapper" : "补上（会弹一次 UAC）"
       }</div>`
     : "";
   const failureNote = fm.settings.lastFailure
-    ? `<div class="banner banner-error">上次修复失败：${esc(fm.settings.lastFailure)}。同一版本不再自动重试，点「修复」手动执行</div>`
+    ? `<div class="banner banner-error">上次修复失败：${esc(fm.settings.lastFailure)}。同一版本不会再自动重试，可以手动点「修复」</div>`
     : "";
   const wrapper = WRAPPER_META[fm.wrapper];
   const renderer = rendererPresentation(fm.renderer);
   const anchorsNote =
     fm.renderer.state === "mismatch"
-      ? `<span>未命中：${fm.renderer.missingAnchors.map(esc).join("、")}（Desktop 大版本变化，需重新适配锚点；wrapper 仍让 Opus 会话默认 fast）</span>`
+      ? `<span>未命中：${fm.renderer.missingAnchors.map(esc).join("、")} —— Desktop 代码结构变了，要等适配。wrapper 不受影响，会话仍默认 fast</span>`
       : fm.renderer.state === "outdated"
-        ? "<span>检测到旧版补丁，请退出 Desktop 后点击修复以补齐模型菜单开关</span>"
+        ? "<span>这是旧版补丁，退出 Desktop 后点「修复」补上模型菜单里的开关</span>"
         : "";
   const total = fm.speed.fast + fm.speed.standard;
   const speedNote =
     total === 0
-      ? "最近的 3p 会话里还没有 Opus 5 / 4.8 的回复"
-      : `最近 ${fm.speed.sessions} 个 3p 会话中 Opus 5 / 4.8 的回复：<strong>fast ${fm.speed.fast}</strong> · standard ${fm.speed.standard}`;
+      ? "最近的 API key 会话里还没有 Opus 5 / 4.8 的回复"
+      : `最近 ${fm.speed.sessions} 个 API key 会话里 Opus 5 / 4.8 的回复：<strong>fast ${fm.speed.fast}</strong> · standard ${fm.speed.standard}`;
   const settings = fm.settings;
   // 只列后端已确认生效的组件。
   const patchedParts = [
@@ -1103,9 +1097,8 @@ function renderFastMode(): string {
             <span>版本 <span class="mono">${esc(fm.desktopVersion ?? "—")}</span></span>
             ${
               rendererNative
-                ? `<span>macOS 可以安装官方 Fast 开关；签名资源通过原生增强统一备份、校验和整包重签。</span>
-                   <span>复用官方模型菜单和实时控制接口，尊重关闭选择及原生限制；wrapper 的安装与还原单独管理。</span>
-                   ${anchorsNote}<button class="btn btn-secondary" data-tab="features">配置原生开关</button>`
+                ? `<span>模型菜单里的 Fast 开关在「功能增强」页安装。</span>
+                   ${anchorsNote}<button class="btn btn-secondary" data-tab="features">去功能增强</button>`
                 : `${fm.renderer.file ? `<span>文件 <span class="mono">${esc(fm.renderer.file)}</span></span>` : ""}
                    ${fm.msixPath ? `<span class="mono">${esc(fm.msixPath)}</span>` : ""}
                    ${anchorsNote}`
@@ -1122,10 +1115,10 @@ function renderFastMode(): string {
             ${fm.cliDir ? `<span class="mono">${esc(fm.cliDir)}</span>` : ""}
             ${
               fm.wrapper === "deployed"
-                ? `<span>wrapper 转发到保留的官方 CLI：<span class="mono">${rendererNative ? "claude-real.app" : "claude-real.exe"}</span>；官方二进制内容不变</span>
+                ? `<span>官方 CLI 改名为 <span class="mono">${rendererNative ? "claude-real.app" : "claude-real.exe"}</span> 留在原处，内容没动</span>
                    ${
                      rendererNative
-                       ? '<span>顶替物是指向 Claude++ 自身的软链 —— Desktop 每次启动会读前 8 字节验 Mach-O 魔数，脚本会被判定失效并重下整个 bundle。移动或删除 Claude++ 会让软链断掉，届时 Desktop 自动重下官方 CLI，回到原样</span>'
+                       ? '<span>移走或删掉 Claude++ 后软链会断，Desktop 会自动重新下载官方 CLI</span>'
                        : ""
                    }`
                 : ""
@@ -1144,7 +1137,7 @@ function renderFastMode(): string {
             <span class="pill ${settings.installed ? "pill-registered" : "pill-pending"}">${settings.installed ? "已安装" : "未安装"}</span>
           </div>
           <div class="card-meta">
-            <span>${settings.installed ? "守护只对已安装的机器生效；还原官方即停止" : "安装后生效"}</span>
+            <span>${settings.installed ? "还原官方后自动停止" : "安装后生效"}</span>
             ${settings.lastRepair ? `<span>上次修复 ${esc(settings.lastRepair)}</span>` : ""}
             ${patchedParts.length ? `<span>已 patch：${patchedParts.join(" · ")}</span>` : ""}
           </div>
@@ -1157,8 +1150,8 @@ function renderFastMode(): string {
             <span>${speedNote}</span>
             <span>${
               rendererNative
-                ? "以转录里的 usage.speed 为准。macOS 原生开关在功能增强中安装，模型菜单和 Fast 标记跟随 CLI 实际状态。"
-                : "以转录里的 usage.speed 为准 —— Desktop 状态栏的 Fast 标签有官方显示 bug。Opus 4.6 服务端已不再提供 fast，按钮对它不显示"
+                ? "以转录里的 usage.speed 为准，状态栏的 Fast 标记不一定准。"
+                : "以转录里的 usage.speed 为准，状态栏的 Fast 标记有官方显示 bug。Opus 4.6 服务端已不给 fast，按钮对它不显示"
             }</span>
           </div>
         </div>
@@ -1212,7 +1205,7 @@ function renderComputerUse(): string {
   const confirmation = state.computerUseConfirm;
   const header = `<div class="page-head">
     <div><div class="eyebrow">Computer Use</div><h1>原生增强安装与恢复</h1>
-      <p class="lead">开放 API key 模式的原生电脑操作入口，沿用官方开关、授权卡片和会话 UI；不替换为另一套 MCP 服务。</p></div>
+      <p class="lead">给 API key 模式打开 Desktop 自带的电脑操作。</p></div>
     <div class="head-actions"><button class="btn btn-secondary" data-action="refresh" ${state.busy || state.computerUseScanning ? "disabled" : ""}>重新扫描</button></div>
   </div>`;
   if (!cu) {
@@ -1221,13 +1214,13 @@ function renderComputerUse(): string {
   if (!cu.supported) return `<div class="view">${header}<div class="banner">${esc(cu.message)}</div></div>`;
   return `<div class="view computer-use-view">${header}
     ${state.computerUseScanning ? `<div class="banner" role="status">${requiresSigning ? "正在核对应用签名与安装记录…" : "正在核对应用与安装记录…"}</div>` : ""}
-    ${cu.running ? '<div class="banner banner-error">目标 Claude Desktop 正在运行。请先退出，再安装或还原；不会自动结束你的会话。</div>' : ""}
-    ${state.busy ? `<div class="banner" role="status">正在执行，请勿关闭 Claude++ 或启动 Desktop。${requiresSigning ? "整包备份和重签需要一些时间；若出现钥匙串提示，请自行决定是否授权签名。" : "正在备份并校验应用，请稍候。"}</div>` : ""}
+    ${cu.running ? '<div class="banner banner-error">Desktop 开着，请先退出再操作。</div>' : ""}
+    ${state.busy ? `<div class="banner" role="status">正在执行，别关 Claude++，也别打开 Desktop。${requiresSigning ? "备份和重签要几分钟，钥匙串弹窗需要你确认。" : "正在备份和校验。"}</div>` : ""}
     ${state.computerUseResult ? `<div class="banner" role="status">${esc(state.computerUseResult)}</div>` : ""}
     <section class="card">
       <div class="card-title"><span>Claude Desktop</span><span class="pill ${cu.state === "installed" ? "pill-registered" : "pill-pending"}">${esc(labels[cu.state] ?? cu.state)}</span></div>
       <div class="card-meta computer-use-details">
-        <span>版本：${esc(cu.desktopVersion ?? "—")} · 安装前核对版本与入口内容</span>
+        <span>版本：${esc(cu.desktopVersion ?? "—")}</span>
         <span class="mono">${esc(cu.appPath)}</span><span>${esc(cu.message)}</span>
         ${cu.backupPath ? `<span>原包备份：<span class="mono">${esc(cu.backupPath)}</span></span>` : ""}
       </div>
@@ -1240,11 +1233,11 @@ function renderComputerUse(): string {
           <option value="">${cu.identities.length ? "请选择本机签名身份" : "未找到有效签名身份"}</option>
           ${cu.identities.map((i) => `<option value="${esc(i.fingerprint)}" ${state.signingIdentity === i.fingerprint ? "selected" : ""}>${esc(i.name)}</option>`).join("")}
         </select>
-        <p>需要本机钥匙串中的有效代码签名证书及私钥；已验证开发签名可行，不支持 ad-hoc 签名。Claude++ 不导出私钥。</p>
-        <p>安装会重签整个应用，可能需要重新登录或重新授予系统权限。</p>` : ""}
-        <p>${requiresSigning ? "先保存原包，再在副本处理并校验，最后替换" : "备份此次涉及的 exe 与 ASAR，在副本校验后替换；需要管理员确认。exe 修改后原官方签名失效，还原时恢复原始文件和签名"}；会话和 API 配置不作修改。</p>
+        <p>需要钥匙串里有效的代码签名证书和私钥，ad-hoc 签名不行。</p>
+        <p>重签后应用身份会变，可能要重新登录、重新授权。</p>` : ""}
+        <p>${requiresSigning ? "先备份原包，在副本上改完并校验再替换。" : "先备份要改的文件，在副本上改完并校验再替换，需要管理员确认。改过的 exe 不再带官方签名，还原后恢复。"}</p>
         <div class="computer-use-actions">
-          <button class="btn btn-primary" data-action="cu-install" ${installDisabled ? "disabled" : ""}>${cu.state === "upgradeAvailable" ? "升级原生入口与后台模式" : "安装原生入口"}</button>
+          <button class="btn btn-primary" data-action="cu-install" ${installDisabled ? "disabled" : ""}>${cu.state === "upgradeAvailable" ? "升级（含后台模式）" : "安装"}</button>
           <button class="btn btn-secondary" data-action="cu-restore" ${restoreDisabled ? "disabled" : ""}>还原官方</button>
         </div>
       </div>
@@ -1252,15 +1245,15 @@ function renderComputerUse(): string {
     ${confirmation ? `<section class="card computer-use-confirm" role="region" aria-label="确认 Computer Use 操作">
       <div class="card-title">${confirmation === "install" ? requiresSigning ? "确认备份并重签 Claude Desktop？" : "确认备份并修改 Claude Desktop？" : requiresSigning ? "确认还原完整官方应用？" : "确认还原此次修改的官方文件？"}</div>
       <div class="computer-use-details"><p>${confirmation === "install"
-        ? `目标：${esc(cu.appPath)}。${requiresSigning ? `签名身份：${esc(cu.identities.find((i) => i.fingerprint === state.signingIdentity)?.name ?? "未选择")}。` : ""}${cu.state === "upgradeAvailable" ? "升级会先还原已验证的官方备份，再安装新版；中途失败可还原后重试。" : ""}安装不等于授予电脑控制权限，原生开关仍由你自行打开。`
-        : "仅还原本次安装记录对应的应用；保留会话、配置和用户授权设置。如果 Desktop 已被更新或修改，将拒绝覆盖。"}</p>
+        ? `目标：${esc(cu.appPath)}。${requiresSigning ? `签名身份：${esc(cu.identities.find((i) => i.fingerprint === state.signingIdentity)?.name ?? "未选择")}。` : ""}${cu.state === "upgradeAvailable" ? "升级会先还原官方备份再装新版，失败可还原后重试。" : ""}装完还要你自己在 Claude 设置里打开。`
+        : "只还原这次安装改过的文件。Desktop 被更新或改动过时会拒绝覆盖。"}</p>
         <div class="computer-use-actions"><button class="btn btn-primary" data-action="cu-confirm" ${(confirmation === "install" ? installDisabled : restoreDisabled) ? "disabled" : ""}>${confirmation === "install" ? "确认安装" : "确认还原"}</button>
           <button class="btn btn-secondary" data-action="cu-cancel" ${state.busy ? "disabled" : ""}>取消</button></div>
       </div></section>` : ""}
     <section class="card"><div class="card-title">安装后</div><div class="computer-use-details">
-      <p>打开 Claude → 设置 → Computer use，自行启用并按官方提示授权。安装不会自动授予屏幕录制、辅助功能或其他应用的控制权限。</p>
-      <p>Background 在已允许的应用中后台操作，需要接管屏幕时先询问；Full control 默认接管屏幕、鼠标和键盘。</p>
-      <p>HIPAA、会话授权与禁止控制的应用检查保持原样。Desktop 更新后请重新扫描；${requiresSigning ? "未知版本不自动打补丁，也不会在后台重签" : "按当前应用结构自动识别，无法唯一匹配或完整性校验失败时停止修改"}。</p>
+      <p>打开 Claude → 设置 → Computer use，按提示授权屏幕录制和辅助功能。</p>
+      <p>Background 只在你允许的应用里后台操作，要接管屏幕时会先问；Full control 直接接管屏幕、鼠标和键盘。</p>
+      <p>Desktop 更新后要重新扫描再装一次。</p>
     </div></section>
   </div>`;
 }
@@ -1278,7 +1271,7 @@ async function doComputerUse() {
       action === "install" ? { identity: computerUseRequiresSigning(state.computerUse) ? state.signingIdentity : "" } : undefined);
     if (action === "restore") state.nativeDirty = false;
   } catch (error) {
-    state.computerUseResult = `操作未完成：${String(error)}。原包备份不会删除；请重新扫描查看是否需要还原。`;
+    state.computerUseResult = `操作未完成：${String(error)}。备份还在，重新扫描看看是否需要还原。`;
   } finally {
     state.busy = false;
     await refresh();
@@ -1330,7 +1323,7 @@ async function applyNative() {
   try {
     state.nativeResult = await invoke<string>("native_features_apply", { identity: state.signingIdentity, selection: { ...state.nativeDraft } });
     state.nativeDirty = false;
-  } catch (error) { state.nativeActionError = `操作未完成：${String(error)}。原包备份保留，请检查状态后重试。`; }
+  } catch (error) { state.nativeActionError = `操作未完成：${String(error)}。备份还在，检查状态后重试。`; }
   finally { state.busy = false; await refreshNative(); }
 }
 

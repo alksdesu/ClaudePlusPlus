@@ -172,7 +172,7 @@ impl Controller {
                 supported: true,
                 enabled: false,
                 phase: Phase::Watching,
-                message: "自动维护已关闭；启用后无需手动还原和重装兼容补丁".into(),
+                message: "自动维护已关闭".into(),
                 desired_features: vec![],
                 pending_features: vec![],
                 error: None,
@@ -205,7 +205,7 @@ impl Controller {
                 j.error = None;
                 j.launch_pending = false;
                 j.resume_phase = None;
-                j.message = "自动维护已关闭；不会自动还原或重新应用补丁".into();
+                j.message = "自动维护已关闭".into();
                 self.save(&j)?;
                 return Ok(self.view(Some(&j)));
             }
@@ -227,7 +227,7 @@ impl Controller {
                 j.error = None;
                 j.resume_phase = None;
                 j.attempted_stamp = None;
-                j.message = "已恢复更新维护，继续检测官方更新和兼容补丁".into();
+                j.message = "自动维护已恢复".into();
                 self.save(&j)?;
                 return Ok(self.view(Some(&j)));
             }
@@ -274,7 +274,7 @@ impl Controller {
             launch_pending: false,
             attempted_stamp: None,
             adapter_version: env!("CARGO_PKG_VERSION").into(),
-            message: "自动维护已开启；发现更新后等待 Desktop 正常退出".into(),
+            message: "自动维护已开启，有更新时会等 Desktop 退出再处理".into(),
             error: None,
             resume_phase: None,
         };
@@ -368,7 +368,7 @@ impl Controller {
         let stamp = match bundle_stamp(app) {
             Ok(s) => s,
             Err(_error) if !app.exists() => {
-                j.message = "等待官方安装器完成应用替换；不会用旧备份覆盖缺失的新版本".into();
+                j.message = "等官方安装器替换完应用".into();
                 return Ok(());
             }
             Err(error) => return Err(error),
@@ -376,7 +376,7 @@ impl Controller {
         let active = running(app)? || self.production && installer_running()?;
         if j.phase == Phase::Watching && stamp != j.observed_stamp {
             j.phase = Phase::WaitingForReapply;
-            j.message = "检测到 Desktop 文件变化，等待退出后验证官方签名与兼容性".into();
+            j.message = "Desktop 文件有变化，等它退出后检查".into();
         }
         if j.phase == Phase::Unsupported
             && (j.attempted_stamp.as_deref() != Some(stamp.as_str())
@@ -395,7 +395,7 @@ impl Controller {
         match j.phase {
             Phase::WaitingForExit | Phase::Restoring => {
                 if active {
-                    j.message = "等待 Desktop 和官方安装器退出，不会强行结束会话".into();
+                    j.message = "等 Desktop 和官方安装器退出".into();
                     return Ok(());
                 }
                 if j.phase == Phase::Restoring && verify_vendor(app).is_ok() {
@@ -418,7 +418,7 @@ impl Controller {
                     return self.advance(j);
                 }
                 j.phase = Phase::Restoring;
-                j.message = "正在验证备份并还原完整官方包".into();
+                j.message = "正在还原官方包".into();
                 self.save(j)?;
                 self.installation.restore()?;
                 verify_vendor(app)?;
@@ -426,14 +426,14 @@ impl Controller {
                 j.applied = Selection::default();
                 j.phase = Phase::AwaitingUpdate;
                 j.launch_pending = self.production;
-                j.message = "官方包已还原，等待官方更新器完成更新".into();
+                j.message = "官方包已还原，等官方更新装完".into();
                 self.save(j)?;
                 self.launch(j)?;
             }
             Phase::AwaitingUpdate => {
                 if j.restored_stamp.as_deref() != Some(stamp.as_str()) {
                     j.phase = Phase::WaitingForReapply;
-                    j.message = "发现更新后的应用，等待退出后恢复兼容补丁".into();
+                    j.message = "更新已装好，等 Desktop 退出后把功能装回去".into();
                     self.save(j)?;
                     if !active {
                         return self.advance(j);
@@ -444,7 +444,7 @@ impl Controller {
             }
             Phase::WaitingForReapply | Phase::Applying => {
                 if active {
-                    j.message = "更新后补丁恢复已排队；等待 Desktop 和官方安装器退出".into();
+                    j.message = "已排队，等 Desktop 和官方安装器退出后装回功能".into();
                     return Ok(());
                 }
                 let record = self.installation.record()?;
@@ -483,11 +483,11 @@ impl Controller {
                     } else {
                         Selection::default()
                     };
-                    j.message = "当前 Desktop 尚未验证兼容；保留官方更新结果和原功能选择，等待适配后自动重试".into();
+                    j.message = "新版还没适配，先保持官方原样，适配后自动重试".into();
                     return Ok(());
                 }
                 j.phase = Phase::Applying;
-                j.message = "正在从更新后的官方包重新安装兼容补丁".into();
+                j.message = "正在把功能装回新版".into();
                 self.save(j)?;
                 self.installation.apply(&j.identity, selection)?;
                 verify_signature(app, None)?;
@@ -505,9 +505,9 @@ impl Controller {
                     Phase::Unsupported
                 };
                 j.message = if selection == j.desired {
-                    "官方更新与兼容补丁恢复已完成；继续自动维护"
+                    "更新完成，功能已装回"
                 } else {
-                    "兼容功能已恢复，其余选择保留并等待适配"
+                    "能装的功能已装回，其余等适配"
                 }
                 .into();
             }
@@ -546,7 +546,7 @@ impl Controller {
             });
             j.phase = Phase::Failed;
             j.error = Some(format!("{error:#}"));
-            j.message = "更新维护已安全停止，应用与备份保留；解决原因后可重新检测".into();
+            j.message = "更新维护已停止，应用和备份都在；处理好后点「重新检测」".into();
         }
         self.save(&j)?;
         Ok(Tick {
@@ -584,7 +584,7 @@ pub(crate) fn retry() -> Result<Status> {
     if j.phase == Phase::AwaitingUpdate {
         j.launch_pending = true;
     }
-    j.message = "已安排重新检测，等待托盘守护处理".into();
+    j.message = "已安排重新检测".into();
     c.save(&j)?;
     Ok(c.view(Some(&j)))
 }
@@ -605,7 +605,7 @@ impl Controller {
                 j.phase = Phase::Watching;
                 j.desired = Selection::default();
                 j.applied = Selection::default();
-                j.message = "手动还原已关闭自动维护，不会重新安装增强".into();
+                j.message = "手动还原后自动维护已关闭".into();
                 j.error = None;
                 c.save(j)?;
             } else {
@@ -626,7 +626,7 @@ impl Controller {
                 j.source_version = r.version;
                 j.phase = Phase::Watching;
                 j.error = None;
-                j.message = "功能选择已同步到自动更新维护".into();
+                j.message = "自动维护已同步新的功能组合".into();
                 c.save(j)?;
             }
         }

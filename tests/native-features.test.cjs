@@ -87,7 +87,7 @@ test('only macOS renders automatic restore and reapply controls', () => {
   assert.ok(windows.includes('Windows 不需要'));
   assert.equal(windows.includes('data-action="desktop-update-toggle"'), false);
   const mac = updates.renderDesktopUpdate({ ...base, supported: true, enabled: true }, false);
-  assert.ok(mac.includes('仅 macOS 需要'));
+  assert.ok(mac.includes('还原官方包'));
   assert.ok(mac.includes('data-action="desktop-update-toggle" checked'));
 });
 test('maintenance status and errors are escaped and busy operations cannot be toggled', () => {

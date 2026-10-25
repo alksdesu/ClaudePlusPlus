@@ -28,19 +28,19 @@ interface Feature {
   experimental?: boolean;
 }
 export const features: Feature[] = [
-  { id: "computer-use", key: "computerUse", name: "Computer Use", group: "interaction", description: "官方电脑操作、后台模式与授权卡片。", detail: "安装后在 Claude 的 Computer use 设置中启用。屏幕录制、辅助功能和每个应用的授权保持原样。" },
-  { id: "simulators", key: "simulators", name: "iOS / Android 模拟器", group: "interaction", description: "原生实时画面、设备面板和模拟器工具。", detail: "沿用官方设备枚举、画面传输和操作实现。用于本地 Code 会话，需要 Xcode 或 Android SDK，并由你批准设备访问。" },
-  { id: "chinese", key: "chinese", name: "简体与繁体中文", group: "appearance", description: "官方语言包、语言选择器和地区识别。", detail: "在 Claude 原生设置中选择简体中文或繁體中文。沿用官方翻译与地区解析；当前词典未覆盖的内容保留原文，不机器补译。" },
-  { id: "prewarm", key: "prewarm", name: "CLI 原生预热", group: "workflow", description: "复用官方备用进程池，减少新会话冷启动等待。", detail: "实验性：可能增加常驻内存。仅移除部署限制并启用官方预热路径，不修改推理请求、凭据处理或权限判断；不承诺降低每轮模型等待时间。", experimental: true },
-  { id: "fast-mode-status", key: "fastModeStatus", name: "Fast Mode 原生开关", group: "workflow", description: "官方模型菜单开关与 Fast 标记，跟随本地 CLI 状态。", detail: "复用官方模型菜单开关、Fast 标记和实时控制接口；关闭选择会保留到下次启动。模型支持、组织策略、额度与冷却限制仍由原生逻辑处理，实际速度以 usage.speed 为准。" },
-  { id: "name", name: "姓名与昵称", group: "appearance", description: "官方个人资料和称呼设置。", detail: "已追踪到原生账户数据与本地存储，但尚未验证完整的姓名输入界面；不以自制表单替代。", reason: "原生编辑界面待验证" },
-  { id: "photo", name: "照片头像", group: "appearance", description: "官方照片上传、裁剪与头像显示。", detail: "裁剪组件存在，但照片存储与回填依赖官方服务。普通图案头像不受此限制。", reason: "缺少原生照片服务" },
-  { id: "artifact-pane", name: "Artifacts 原生侧栏", group: "workflow", description: "使用官方产物浏览与管理面板。", detail: "入口可见不等于产物可读取。没有完整的本地原生数据链路前，不只打开空面板。", reason: "原生数据链路待验证" },
-  { id: "artifact-popout", name: "Artifacts 独立窗口", group: "workflow", description: "官方产物弹窗和独立预览。", detail: "需要原生资源路由、窗口来源验证与产物数据共同成立；不以自制预览器替代。", reason: "原生窗口链路待验证" },
-  { id: "extensions", name: "本地扩展安装", group: "workflow", description: "官方 MCPB / DXT 扩展安装流程。", detail: "当前安装流程依赖组织策略后端。不会移除签名、安装授权或策略检查；已有本地 MCP 与插件仍可使用。", reason: "缺少原生安装策略服务" },
-  { id: "dictation", name: "快速输入听写", group: "interaction", description: "官方录音界面、快捷键和转写链路。", detail: "需要官方支持的语音服务配置。不会接入第三方转写、自建识别服务或自动发送录音。", reason: "原生转写服务待配置" },
-  { id: "contrast", name: "近黑高对比主题", group: "appearance", description: "缓存中已有的官方主题样式。", detail: "来自不同构建的官方组件，尚未证明能与当前原生设置和样式链兼容；不注入自制 Desktop 主题。", reason: "官方组件移植待验证" },
-  { id: "instruction-guide", name: "个性化指令引导", group: "appearance", description: "官方示例卡片与指令设置引导。", detail: "原生指令编辑已可用。新增引导组件的依赖尚未验证，不以自行编写的卡片冒充官方内容。", reason: "官方组件移植待验证" },
+  { id: "computer-use", key: "computerUse", name: "Computer Use", group: "interaction", description: "让 Claude 看屏幕、动鼠标和键盘。", detail: "装完去 Claude 设置里打开 Computer use，按提示授权屏幕录制和辅助功能。" },
+  { id: "simulators", key: "simulators", name: "iOS / Android 模拟器", group: "interaction", description: "在模拟器里实时看画面、点界面。", detail: "需要本机装好 Xcode 或 Android SDK，只能在本地 Code 会话里用。" },
+  { id: "chinese", key: "chinese", name: "简体与繁体中文", group: "appearance", description: "界面语言多出简体和繁體中文。", detail: "装完在 Claude 设置的语言里选。官方词典没覆盖到的地方仍是英文。" },
+  { id: "prewarm", key: "prewarm", name: "CLI 原生预热", group: "workflow", description: "提前备好进程，新会话少等一会儿。", detail: "会多占一些常驻内存，模型回复本身不会变快。", experimental: true },
+  { id: "fast-mode-status", key: "fastModeStatus", name: "Fast Mode 原生开关", group: "workflow", description: "模型菜单里直接开关 Fast。", detail: "开关跟着 CLI 的实际状态走。是否真的 fast 看转录里的 usage.speed。" },
+  { id: "name", name: "姓名与昵称", group: "appearance", description: "改个人资料里的名字和称呼。", detail: "账户数据的位置找到了，但输入界面还没验证通过。", reason: "编辑界面待验证" },
+  { id: "photo", name: "照片头像", group: "appearance", description: "上传照片当头像。", detail: "裁剪界面是现成的，但照片存哪、怎么读回来要靠官方服务。图案头像不受影响。", reason: "缺少照片服务" },
+  { id: "artifact-pane", name: "Artifacts 原生侧栏", group: "workflow", description: "在侧栏里浏览和管理产物。", detail: "入口能打开，但产物读不出来，开了也是空面板。", reason: "数据链路待验证" },
+  { id: "artifact-popout", name: "Artifacts 独立窗口", group: "workflow", description: "把产物弹成单独的窗口预览。", detail: "要资源路由、窗口校验和产物数据三样都成立才能用。", reason: "窗口链路待验证" },
+  { id: "extensions", name: "本地扩展安装", group: "workflow", description: "装 MCPB / DXT 扩展。", detail: "安装流程要连组织策略后端。已有的本地 MCP 和插件照常能用。", reason: "缺少策略服务" },
+  { id: "dictation", name: "快速输入听写", group: "interaction", description: "说话转成文字。", detail: "要配好官方的语音服务。", reason: "语音服务待配置" },
+  { id: "contrast", name: "近黑高对比主题", group: "appearance", description: "更深的高对比配色。", detail: "样式来自另一个构建，和当前版本能不能对上还没验证。", reason: "组件移植待验证" },
+  { id: "instruction-guide", name: "个性化指令引导", group: "appearance", description: "写个性化指令时给示例卡片。", detail: "指令本身已经能编辑，缺的是引导卡片的依赖。", reason: "组件移植待验证" },
 ];
 
 export function selectedNames(selection: NativeSelection): string[] {
@@ -91,14 +91,14 @@ export function renderFeatures(v: FeatureView): string {
   const native = v.status?.installation;
   const dirty = !!v.status && selectionChanged(v.draft, v.status.selection);
   const chosen = selectedNames(v.draft);
-  return `<div class="view feature-view"><div class="page-head"><div><div class="eyebrow">NATIVE FEATURES</div><h1>原生能力，按需组合</h1><p class="lead">只使用官方界面与执行实现。选择功能后统一备份、校验并应用，不自动授予权限。</p></div><button class="btn btn-secondary" data-action="native-refresh" ${v.busy || v.scanning ? "disabled" : ""}>${v.scanning ? "正在检测…" : "重新检测"}</button></div>
+  return `<div class="view feature-view"><div class="page-head"><div><div class="eyebrow">NATIVE FEATURES</div><h1>原生能力，按需组合</h1><p class="lead">勾选要装的功能，一次应用。改动前会完整备份，随时能还原。</p></div><button class="btn btn-secondary" data-action="native-refresh" ${v.busy || v.scanning ? "disabled" : ""}>${v.scanning ? "正在检测…" : "重新检测"}</button></div>
     ${v.error ? `<div class="banner banner-error" role="alert">${esc(v.error)}</div>` : ""}
     ${v.result ? `<div class="banner" role="status">${esc(v.result)}</div>` : ""}
-    ${native?.running ? '<div class="banner">Desktop 正在运行。可以选择功能；应用前请先退出，不会自动结束会话。</div>' : ""}
+    ${native?.running ? '<div class="banner">Desktop 开着，应用前请先退出。</div>' : ""}
     ${renderDesktopUpdate(v.status?.update ?? null, v.busy || v.scanning)}
     <div class="feature-toolbar"><div class="filter-group" aria-label="功能分类">${([["all", "全部"], ["interaction", "交互与控制"], ["appearance", "语言与个性化"], ["workflow", "工作流"]] as const).map(([id, name]) => `<button class="filter-button ${v.group === id ? "active" : ""}" data-feature-group="${id}" aria-pressed="${v.group === id}">${name}</button>`).join("")}</div><input id="feature-search" class="search-input" type="search" placeholder="搜索功能与说明" aria-label="搜索功能" value="${esc(v.search)}"/></div>
     <div class="feature-grid">${visible.map(f => featureCard(f, v)).join("") || '<div class="empty-note">没有匹配的功能，试试其他关键词。</div>'}</div>
     <div class="apply-panel"><div><strong>${dirty ? "有未应用的更改" : "功能组合"}</strong><p>${chosen.length ? esc(chosen.join(" · ")) : "未选择增强功能"}</p></div><div class="apply-controls">${native && native.requiresSigning !== false ? `<label class="signing-control">签名身份<select id="native-signing-identity" ${v.busy ? "disabled" : ""}><option value="">请选择</option>${native.identities.map(i => `<option value="${esc(i.fingerprint)}" ${v.identity === i.fingerprint ? "selected" : ""}>${esc(i.name)}</option>`).join("")}</select></label>` : ""}<button class="btn btn-secondary" data-action="native-reset" ${!dirty || v.busy ? "disabled" : ""}>撤销选择</button><button class="btn btn-primary" data-action="native-prepare" ${canApply(v) ? "" : "disabled"}>应用更改</button></div></div>
-    ${v.confirm ? `<section class="card confirmation-card" role="region" aria-label="确认原生功能变更"><h2>确认${chosen.length ? "应用功能组合" : "还原官方应用"}？</h2><p>目标：<span class="mono">${esc(native?.appPath ?? "")}</span></p><p>从已验证的官方备份生成完整组合，关闭一项不会误删其他选中功能。${native?.requiresSigning ? "应用会重新签名，系统可能要求重新登录或授权。" : ""}会话与 API 配置不作修改。</p>${v.draft.prewarm ? '<p>已选择实验性原生预热，可能增加常驻内存；不会保证每轮模型响应更快。</p>' : ""}<div class="computer-use-actions"><button class="btn btn-primary" data-action="native-confirm" ${canApply(v) ? "" : "disabled"}>确认应用</button><button class="btn btn-secondary" data-action="native-cancel">取消</button></div></section>` : ""}
-    <p class="feature-footnote">“已安装”表示补丁校验通过，不代表已经授予设备权限或验证所有使用场景。缺少原生服务的项目不会提供无效开关。</p></div>`;
+    ${v.confirm ? `<section class="card confirmation-card" role="region" aria-label="确认原生功能变更"><h2>确认${chosen.length ? "应用功能组合" : "还原官方应用"}？</h2><p>目标：<span class="mono">${esc(native?.appPath ?? "")}</span></p><p>从官方备份重新生成，关掉某一项不会影响其他选中的。${native?.requiresSigning ? "应用会重新签名，之后可能要重新登录。" : "修改后的 exe 不再带官方签名，还原即恢复。"}</p>${v.draft.prewarm ? '<p>预热是实验功能，会多占常驻内存。</p>' : ""}<div class="computer-use-actions"><button class="btn btn-primary" data-action="native-confirm" ${canApply(v) ? "" : "disabled"}>确认应用</button><button class="btn btn-secondary" data-action="native-cancel">取消</button></div></section>` : ""}
+    <p class="feature-footnote">“已安装”只代表文件改好了，设备权限还要你在系统里单独授权。</p></div>`;
 }
