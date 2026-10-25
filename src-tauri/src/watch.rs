@@ -169,6 +169,7 @@ pub fn spawn(state: Arc<WatchState>, on_event: impl Fn(&str, String) + Send + 's
             if state.paused.load(Ordering::Relaxed) {
                 continue;
             }
+            // only an in-flight update defers the other guards; an unreadable journal must not starve them
             match crate::computer_use::updates::tick() {
                 Ok(result) => {
                     state.update_pending.store(result.pending, Ordering::Relaxed);
@@ -187,7 +188,6 @@ pub fn spawn(state: Arc<WatchState>, on_event: impl Fn(&str, String) + Send + 's
                         on_event("desktop-update-error", message.clone());
                         *last = Some(message);
                     }
-                    continue;
                 }
             }
             match fastmode::auto_repair() {
