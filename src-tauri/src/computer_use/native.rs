@@ -57,12 +57,12 @@ pub fn status() -> Result<NativeStatus> {
     if installation.supported
         && !matches!(
             installation.state.as_str(),
-            "notFound" | "unsupported" | "unmanaged" | "changed"
+            "notFound" | "unsupported" | "unmanaged" | "changed" | "recovery"
         )
     {
         supported.push("computerUse".into());
         #[cfg(target_os = "macos")]
-        if installation.desktop_version.as_deref().is_some_and(supports_extended) {
+        if super::macos::supported_selection_at(std::path::Path::new(&installation.app_path))?.fast_mode_status {
             supported.extend(EXTENDED.map(String::from));
         }
         // Windows 不靠逐版本记录，结构认不出时上面的状态就已经是 unsupported

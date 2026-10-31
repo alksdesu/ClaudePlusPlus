@@ -40,6 +40,7 @@ Desktop keeps Code session metadata separately for every account and organizatio
 - After installing, turn the matching switches on in Desktop's settings and complete the permission prompts yourself.
 - Windows: applying and restoring need administrator approval; the patched exe loses its official signature until you restore; apply again after each Desktop update. The Android emulator needs a local Android SDK with the emulator installed.
 - macOS: needs a valid code-signing identity in your keychain; ad-hoc signing does not work. Re-signing changes the app's identity, so you may have to sign in or grant permissions again. With 自动维护 Desktop 更新 (automatic update maintenance) on, features are reapplied once an update finishes; builds not yet supported stay official.
+- macOS identifies newer entry points by code structure and supports both directory and ASAR resource layouts. If structure or integrity checks fail, installation stops and the official build is kept.
 - If Desktop was modified elsewhere or a new build is not recognized, Claude++ refuses to change anything rather than guess.
 
 ## Getting started

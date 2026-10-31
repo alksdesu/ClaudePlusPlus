@@ -196,10 +196,14 @@ fn config_mask(text: &str, platform: Platform) -> Result<u8> {
         return Ok(0);
     };
     let mut present: Vec<(String, String)> = Vec::new();
+    let mut matched = Vec::new();
     for caps in field_entry().captures_iter(raw) {
+        matched.push(caps.get(0).context("配置字段范围缺失")?.as_str());
         ensure!(caps["helper"] == *helper, "配置字段引用了其他辅助函数");
+        ensure!(!present.iter().any(|(id, _)| id == &caps["id"]), "配置字段重复");
         present.push((caps["id"].to_string(), caps["value"].to_string()));
     }
+    ensure!(matched.join(",") == raw, "配置函数包含无法识别的字段");
     let mut mask = 0;
     for (bit, fields) in platform.fields() {
         let hits = fields
@@ -249,8 +253,8 @@ fn patch_config(text: &str, platform: Platform, mask: u8) -> Result<String> {
         if mask & bit == 0 {
             continue;
         }
-        // Windows 没有逐版本记录兜底，主进程不读的开关注入了也是空操作；预热开关由 patch_prewarm 在它的模块里核对
-        if platform == Platform::Windows && *bit != PREWARM {
+        // 预热开关在独立模块中校验。
+        if *bit != PREWARM {
             for (id, _) in entries.iter() {
                 ensure!(
                     text.contains(&format!("\"{id}\"")),
@@ -765,7 +769,7 @@ mod tests {
         "e.builtinBrowserEnabled?C:D}",
     );
     /// Windows 主进程读取各开关的位置，规则要求被注入的开关确实有人读
-    const GATES: &str = r#"Ky("1291166712",a);Ky("40173473",a);Zy("4272007212",!1);Zy("2784298314",!1);"#;
+    const GATES: &str = r#"Ky("1291166712",a);Ky("40173473",a);Zy("4272007212",!1);Zy("2784298314",!1);Ky("1346958739",a);Zy("3577536076",!1);Zy("1403324732",!1);"#;
 
     fn source() -> String {
         format!("var A=1,B=2,C=3,D=4;{GATES}{HELPER}{CONFIG}")
@@ -789,6 +793,18 @@ mod tests {
         assert_ne!(Platform::Macos.supported() & SIMULATORS, 0);
         let android = patch_config(&source(), Platform::Windows, SIMULATORS).unwrap();
         assert!(android.contains("return{...(e.selfHostedSessions?e.builtinBrowserEnabled?A:B:e.builtinBrowserEnabled?C:D),4272007212:fv(!0),2784298314:fv(!0)}"));
+    }
+
+    #[test]
+    fn config_rejects_unparsed_expressions_and_duplicate_fields() {
+        for platform in [Platform::Macos, Platform::Windows] {
+            let patched = patch_config(&source(), platform, PREWARM).unwrap();
+            for fields in ["4237076858:fv(!0),extra:unknown()", "4237076858:fv(!0),4237076858:fv(!0)"] {
+                assert!(config_mask(&patched.replace("4237076858:fv(!0)", fields), platform).is_err());
+            }
+            let unread = source().replace("\"1291166712\"", "\"removed\"");
+            assert!(patch_config(&unread, platform, COMPUTER_USE).is_err());
+        }
     }
 
     #[test]

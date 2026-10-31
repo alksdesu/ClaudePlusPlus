@@ -27,6 +27,11 @@ fn installed_hashes(state: &str, status: &str, native: bool) -> Result<bool> {
 }
 
 pub fn installed(app: &Path, version: &str) -> Result<bool> {
+    #[cfg(target_os = "macos")]
+    if !asar::has_recipe(version) {
+        super::macos::inspect(app)?;
+        return Ok(super::macos::selection_at(app)?.fast_mode_status);
+    }
     if let Some(recipe) = super::macos_recipe::get(version) {
         let selected = asar::active_selection(&app.join("Contents/Resources/app.asar"), version)?.fast_mode_status;
         recipe.fast_widget.inspect(app, false)?;

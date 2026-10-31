@@ -1,4 +1,6 @@
 pub(super) mod updates;
+mod structure;
+mod integrity;
 
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
@@ -147,7 +149,7 @@ fn plist_at(app: &Path) -> Result<plist::Value> {
     plist::Value::from_file(path).context("读取应用 Info.plist")
 }
 
-fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
+pub(super) fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
     ensure!(
         !fs::symlink_metadata(app)?.is_symlink(),
         "不允许修改应用符号链接"
@@ -164,7 +166,15 @@ fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
         .get("CFBundleShortVersionString")
         .and_then(plist::Value::as_string)
         .context("缺少 Desktop 版本")?;
-    asar::check_version(version)?;
+    if !asar::has_recipe(version) {
+        integrity::verify(app, &info)?;
+        verify_archive_integrity(app, &info, "Contents/Resources/app.asar")?;
+        if app.join(structure::PACKED).try_exists()? {
+            verify_archive_integrity(app, &info, structure::PACKED)?;
+        }
+        let selected = structure::selection(app)?;
+        return Ok((version.into(), if selected.is_empty() { asar::PatchState::Pristine } else { asar::PatchState::Patched }));
+    }
     let archive = app.join("Contents/Resources/app.asar");
     ensure!(
         !fs::symlink_metadata(&archive)?.is_symlink(),
@@ -196,6 +206,37 @@ fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
         "Electron ASAR 文件头哈希不匹配"
     );
     Ok((version.into(), state))
+}
+
+fn archive_integrity<'a>(info: &'a plist::Value, relative: &str) -> Result<&'a plist::Dictionary> {
+    info.as_dictionary()
+        .and_then(|d| d.get("ElectronAsarIntegrity"))
+        .and_then(plist::Value::as_dictionary)
+        .and_then(|d| d.get(relative.strip_prefix("Contents/").unwrap_or(relative)))
+        .and_then(plist::Value::as_dictionary)
+        .context("缺少 Electron ASAR 完整性记录")
+}
+
+fn verify_archive_integrity(app: &Path, info: &plist::Value, relative: &str) -> Result<()> {
+    let entry = archive_integrity(info, relative)?;
+    ensure!(entry.get("algorithm").and_then(plist::Value::as_string) == Some("SHA256")
+        && entry.get("hash").and_then(plist::Value::as_string) == Some(asar::header_hash(&app.join(relative))?.as_str()),
+        "Electron ASAR 文件头哈希不匹配：{relative}");
+    Ok(())
+}
+
+pub(super) fn supported_selection_at(app: &Path) -> Result<super::native::Selection> {
+    let (version, _) = inspect(app)?;
+    let extended = super::native::supports_extended(&version) || !asar::has_recipe(&version);
+    Ok(super::native::Selection { computer_use: true, chinese: extended, simulators: extended,
+        prewarm: extended, fast_mode_status: extended })
+}
+
+fn check_selection_at(app: &Path, selection: super::native::Selection) -> Result<()> {
+    let supported = supported_selection_at(app)?;
+    ensure!(selection.mask() & !supported.mask() == 0 && (!selection.chinese || supported.chinese),
+        "当前 Desktop 尚未验证所选原生功能");
+    Ok(())
 }
 
 fn verify_signature(app: &Path, log: Option<&Path>) -> Result<()> {
@@ -370,6 +411,7 @@ pub(super) fn selection_at(app: &Path) -> Result<super::native::Selection> {
         .and_then(|d| d.get("CFBundleShortVersionString"))
         .and_then(plist::Value::as_string)
         .context("缺少 Desktop 版本")?;
+    if !asar::has_recipe(version) { return structure::selection(app); }
     let mut selected = asar::active_selection(&app.join("Contents/Resources/app.asar"), version)?;
     selected.chinese = super::native::language::installed(app, version)?;
     selected.fast_mode_status = super::fast_status::installed(app, version)?;
@@ -378,27 +420,30 @@ pub(super) fn selection_at(app: &Path) -> Result<super::native::Selection> {
 
 fn patch(app: &Path, selected: super::native::Selection) -> Result<()> {
     let (version, _) = inspect(app)?;
-    super::native::check_selection(&version, selected)?;
-    let hash = asar::patch_features(&app.join("Contents/Resources/app.asar"), &version, selected)?;
-    if selected.computer_use {
-        renderer::patch(app, &version)?;
-    }
-    if selected.chinese {
-        super::native::language::patch(app, &version)?;
-    }
-    if selected.fast_mode_status {
-        super::fast_status::patch(app, &version)?;
+    let before_info = plist_at(app)?;
+    if asar::has_recipe(&version) {
+        super::native::check_selection(&version, selected)?;
+        asar::patch_features(&app.join("Contents/Resources/app.asar"), &version, selected)?;
+        if selected.computer_use { renderer::patch(app, &version)?; }
+        if selected.chinese { super::native::language::patch(app, &version)?; }
+        if selected.fast_mode_status { super::fast_status::patch(app, &version)?; }
+    } else {
+        structure::patch(app, selected)?;
     }
     let mut info = plist_at(app)?;
-    let entry = info
-        .as_dictionary_mut()
-        .and_then(|d| d.get_mut("ElectronAsarIntegrity"))
-        .and_then(plist::Value::as_dictionary_mut)
-        .and_then(|d| d.get_mut("Resources/app.asar"))
-        .and_then(plist::Value::as_dictionary_mut)
-        .context("缺少 Electron ASAR 完整性记录")?;
-    entry.insert("hash".into(), plist::Value::String(hash));
+    for relative in ["Contents/Resources/app.asar", structure::PACKED] {
+        if !app.join(relative).try_exists()? { continue; }
+        let hash = asar::header_hash(&app.join(relative))?;
+        archive_integrity(&info, relative)?;
+        let entry = info.as_dictionary_mut()
+            .and_then(|d| d.get_mut("ElectronAsarIntegrity"))
+            .and_then(plist::Value::as_dictionary_mut)
+            .and_then(|d| d.get_mut(relative.strip_prefix("Contents/").unwrap()))
+            .and_then(plist::Value::as_dictionary_mut).context("缺少 Electron ASAR 完整性记录")?;
+        entry.insert("hash".into(), plist::Value::String(hash));
+    }
     info.to_file_xml(app.join("Contents/Info.plist"))?;
+    integrity::update(app, &before_info, &info)?;
     inspect(app)?;
     ensure!(selection_at(app)? == selected, "原生功能组合回读验证失败");
     Ok(())
@@ -695,7 +740,7 @@ impl Installation {
             verify_original(&self.baseline(&r), None)?;
             r
         };
-        super::native::check_selection(&record.version, selected)?;
+        check_selection_at(&self.baseline(&record), selected)?;
         self.clear_staging(&record)?;
         let transaction = self.transaction(&record);
         let stage = self.sibling(record.id, "app")?;
@@ -857,6 +902,36 @@ pub fn restore_copy(app: &Path, store: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "需要官方 macOS Desktop 副本"]
+    fn structural_combinations_update_both_archive_integrity_records() {
+        let original = PathBuf::from(std::env::var_os("CLAUDEPP_MAC_APP").expect("缺少官方应用路径"));
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Claude.app");
+        fs::create_dir_all(app.join("Contents/Resources")).unwrap();
+        let framework = "Contents/Frameworks/Electron Framework.framework/Electron Framework";
+        fs::create_dir_all(app.join(framework).parent().unwrap()).unwrap();
+        for bits in 0..32u8 {
+            for name in ["Contents/Info.plist", "Contents/Resources/app.asar", structure::PACKED, framework] {
+                fs::copy(original.join(name), app.join(name)).unwrap();
+            }
+            let selected = super::super::native::Selection {
+                computer_use: bits & 1 != 0, simulators: bits & 2 != 0, prewarm: bits & 4 != 0,
+                fast_mode_status: bits & 8 != 0, chinese: bits & 16 != 0,
+            };
+            assert!(selection_at(&app).unwrap().is_empty());
+            patch(&app, selected).unwrap();
+            assert_eq!(selection_at(&app).unwrap(), selected, "combination {bits}");
+            let (_, state) = inspect(&app).unwrap();
+            assert_eq!(state == asar::PatchState::Pristine, bits == 0);
+            println!("verified combination {bits}");
+        }
+        let mut info = plist_at(&app).unwrap();
+        info.as_dictionary_mut().unwrap().remove("ElectronAsarIntegrity");
+        info.to_file_xml(app.join("Contents/Info.plist")).unwrap();
+        assert!(inspect(&app).is_err());
+    }
 
     #[test]
     fn combination_updates_keep_independent_signing_workspaces() {

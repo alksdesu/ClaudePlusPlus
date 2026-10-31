@@ -77,37 +77,14 @@ fn installer_running() -> Result<bool> {
     }))
 }
 
-fn compatible_selection(version: &str, desired: Selection) -> Selection {
-    if super::asar::check_version(version).is_err() {
-        return Selection::default();
-    }
-    let supports = |s| crate::computer_use::native::check_selection(version, s).is_ok();
+fn compatible_selection(supported: Result<Selection>, desired: Selection) -> Selection {
+    let Ok(supported) = supported else { return Selection::default(); };
     Selection {
-        computer_use: desired.computer_use
-            && supports(Selection {
-                computer_use: true,
-                ..Default::default()
-            }),
-        chinese: desired.chinese
-            && supports(Selection {
-                chinese: true,
-                ..Default::default()
-            }),
-        simulators: desired.simulators
-            && supports(Selection {
-                simulators: true,
-                ..Default::default()
-            }),
-        prewarm: desired.prewarm
-            && supports(Selection {
-                prewarm: true,
-                ..Default::default()
-            }),
-        fast_mode_status: desired.fast_mode_status
-            && supports(Selection {
-                fast_mode_status: true,
-                ..Default::default()
-            }),
+        computer_use: desired.computer_use && supported.computer_use,
+        chinese: desired.chinese && supported.chinese,
+        simulators: desired.simulators && supported.simulators,
+        prewarm: desired.prewarm && supported.prewarm,
+        fast_mode_status: desired.fast_mode_status && supported.fast_mode_status,
     }
 }
 
@@ -473,7 +450,7 @@ impl Controller {
                     self.mark_official()?;
                 }
                 let v = version(&original)?;
-                let selection = compatible_selection(&v, j.desired);
+                let selection = compatible_selection(super::supported_selection_at(&original), j.desired);
                 j.adapter_version = env!("CARGO_PKG_VERSION").into();
                 j.attempted_stamp = Some(stamp.clone());
                 if selection.is_empty() || inspect(&original).is_err() {
@@ -730,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_versions_keep_all_features_pending() {
+    fn unrecognized_content_keeps_all_features_pending() {
         let all = Selection {
             computer_use: true,
             chinese: true,
@@ -738,11 +715,9 @@ mod tests {
             prewarm: true,
             fast_mode_status: true,
         };
-        assert_eq!(compatible_selection("unknown", all), Selection::default());
-        assert_eq!(compatible_selection("3.1623.4", all), all);
-        assert_eq!(compatible_selection("3.6556.2", all), all);
-        assert_eq!(compatible_selection("3.6556.3", all), Selection::default());
-        let old = compatible_selection("3.1623.1", all);
+        assert_eq!(compatible_selection(Err(anyhow::anyhow!("unrecognized")), all), Selection::default());
+        assert_eq!(compatible_selection(Ok(all), all), all);
+        let old = compatible_selection(Ok(Selection { computer_use: true, ..Default::default() }), all);
         assert!(old.computer_use && !old.fast_mode_status);
         assert_eq!(names(remaining(all, old)).len(), 4);
     }

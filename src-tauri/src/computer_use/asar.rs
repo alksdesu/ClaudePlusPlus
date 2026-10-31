@@ -76,10 +76,9 @@ fn build(version: &str) -> Result<&'static Build> {
         .context("当前 Desktop 尚未适配；请更新 Claude++ 后重新扫描，不会猜测锚点")
 }
 
-#[cfg(target_os = "macos")]
-pub fn check_version(version: &str) -> Result<()> {
-    if super::macos_recipe::get(version).is_some() { return Ok(()); }
-    build(version).map(|_| ())
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn has_recipe(version: &str) -> bool {
+    super::macos_recipe::get(version).is_some() || BUILDS.iter().any(|b| b.version == version)
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -128,7 +127,8 @@ fn entry_mut<'a>(header: &'a mut Value, path: &[&str]) -> Result<&'a mut Value> 
 }
 
 impl Archive {
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
+        ensure!(!path.is_symlink(), "ASAR 不允许是符号链接");
         let mut file = File::open(path).context("读取 app.asar")?;
         let length = file.metadata()?.len();
         let mut prefix = [0u8; 16];
@@ -162,7 +162,7 @@ impl Archive {
     }
 
     /// 只读不校验；调用方必须在使用内容前调 verify_entry
-    fn read(&mut self, path: &[&str]) -> Result<Vec<u8>> {
+    pub(super) fn read(&mut self, path: &[&str]) -> Result<Vec<u8>> {
         let entry = entry_mut(&mut self.header, path)?;
         ensure!(
             entry.get("link").is_none() && entry.get("unpacked").is_none(),
@@ -187,16 +187,30 @@ impl Archive {
         Ok(source)
     }
 
-    fn verify_entry(&mut self, path: &[&str], source: &[u8]) -> Result<()> {
+    pub(super) fn verify_entry(&mut self, path: &[&str], source: &[u8]) -> Result<()> {
         let entry = entry_mut(&mut self.header, path)?;
         verify_integrity(entry.get("integrity").context("入口没有完整性信息")?, source)
     }
 
     #[cfg(any(test, target_os = "macos"))]
-    fn source(&mut self, path: &[&str]) -> Result<Vec<u8>> {
+    pub(super) fn source(&mut self, path: &[&str]) -> Result<Vec<u8>> {
         let source = self.read(path)?;
         self.verify_entry(path, &source)?;
         Ok(source)
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(super) fn files(&mut self, directory: &[&str]) -> Result<Vec<String>> {
+        let node = entry_mut(&mut self.header, directory)?;
+        ensure!(node.get("link").is_none() && node.get("unpacked").is_none(), "ASAR 目录类型异常");
+        Ok(node.get("files").and_then(Value::as_object).context("缺少 ASAR 目录")?
+            .keys().cloned().collect())
+    }
+
+    #[cfg(any(test, target_os = "macos"))]
+    pub(super) fn contains(&mut self, path: &[&str]) -> Result<bool> {
+        let (name, parent) = path.split_last().context("ASAR 路径为空")?;
+        Ok(self.files(parent)?.iter().any(|p| p == name))
     }
 
     #[cfg(any(test, target_os = "macos"))]
@@ -321,6 +335,18 @@ pub(super) fn patch_with_rules(
     Ok(hash(&Archive::open(path)?.raw_header))
 }
 
+#[cfg(target_os = "macos")]
+pub(super) fn validate_rules(path: &Path) -> Result<()> {
+    let mut archive = Archive::open(path)?;
+    let (_, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
+    if rules::main_mask(&main, rules::Platform::Macos)? == 0 {
+        rules::patch_main(&main, rules::Platform::Macos, rules::Platform::Macos.supported())?;
+        let (_, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+        rules::patch_prewarm(&prewarm)?;
+    }
+    Ok(())
+}
+
 fn integrity(source: &[u8], block_size: u64) -> Result<Value> {
     ensure!(
         block_size > 0 && block_size <= MAX_ENTRY,
@@ -406,6 +432,38 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
     entry["offset"] = json!((archive.length - archive.payload_start).to_string());
     entry["size"] = json!(modified.len());
     entry["integrity"] = integrity(modified, block_size)?;
+    write_archive(path, archive, modified)
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn write_files(path: &Path, files: &[(String, Vec<u8>)]) -> Result<String> {
+    let mut archive = Archive::open(path)?;
+    let mut appended = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (name, bytes) in files {
+        let parts: Vec<_> = name.split('/').collect();
+        ensure!(parts.iter().all(|p| !p.is_empty() && !matches!(*p, "." | "..") && !p.contains('\\'))
+            && seen.insert(name), "ASAR 路径无效或重复");
+        ensure!(bytes.len() as u64 <= MAX_ENTRY, "ASAR 入口过大");
+        let exists = archive.contains(&parts)?;
+        let block_size = if exists {
+            archive.source(&parts)?;
+            entry_mut(&mut archive.header, &parts)?["integrity"]["blockSize"]
+                .as_u64().context("缺少 ASAR blockSize")?
+        } else { 4 * 1024 * 1024 };
+        let (leaf, parent) = parts.split_last().context("ASAR 路径为空")?;
+        let node = entry_mut(&mut archive.header, parent)?.get_mut("files")
+            .and_then(Value::as_object_mut).context("缺少 ASAR 目录")?;
+        let entry = node.entry((*leaf).to_owned()).or_insert_with(|| json!({}));
+        entry["offset"] = json!((archive.length - archive.payload_start + appended.len() as u64).to_string());
+        entry["size"] = json!(bytes.len());
+        entry["integrity"] = integrity(bytes, block_size)?;
+        appended.extend_from_slice(bytes);
+    }
+    write_archive(path, archive, &appended)
+}
+
+fn write_archive(path: &Path, mut archive: Archive, appended: &[u8]) -> Result<String> {
     let header = serde_json::to_vec(&archive.header)?;
     ensure!(
         header.len() as u64 <= MAX_HEADER - 16,
@@ -424,7 +482,7 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
         out.write_all(&[0; 3][..padding])?;
         archive.file.seek(SeekFrom::Start(archive.payload_start))?;
         std::io::copy(&mut archive.file, &mut out)?;
-        out.write_all(modified)?;
+        out.write_all(appended)?;
         out.sync_all()?;
         fs::rename(&tmp, path)?;
         Ok(())
@@ -723,6 +781,39 @@ mod tests {
         let original = header.clone();
         assert!(entry_mut(&mut header, TEST_ENTRY).is_err());
         assert_eq!(header, original);
+    }
+
+    #[test]
+    fn batch_writes_preserve_other_entries_and_verify_each_payload() {
+        let (_dir, path) = fixture(&[("first.js", "original"), ("keep.js", "untouched")]);
+        let before = header_hash(&path).unwrap();
+        let after = write_files(&path, &[
+            (".vite/build/first.js".into(), b"replacement".to_vec()),
+            (".vite/build/added.json".into(), b"{\"ok\":true}".to_vec()),
+        ]).unwrap();
+        assert_ne!(before, after);
+        assert_eq!(after, header_hash(&path).unwrap());
+        let mut archive = Archive::open(&path).unwrap();
+        assert_eq!(archive.source(&[".vite", "build", "first.js"]).unwrap(), b"replacement");
+        assert_eq!(archive.source(&[".vite", "build", "keep.js"]).unwrap(), b"untouched");
+        assert_eq!(archive.source(&[".vite", "build", "added.json"]).unwrap(), b"{\"ok\":true}");
+    }
+
+    #[test]
+    fn invalid_batch_never_changes_the_archive() {
+        for names in [vec!["../escape"], vec!["missing/file"], vec![".vite/build/first.js", ".vite/build/first.js"]] {
+            let (_dir, path) = fixture(&[("first.js", "original")]);
+            let before = fs::read(&path).unwrap();
+            let files = names.iter().map(|n| (n.to_string(), b"changed".to_vec())).collect::<Vec<_>>();
+            assert!(write_files(&path, &files).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+        let (_dir, path) = fixture(&[("first.js", "original")]);
+        let mut corrupt = fs::read(&path).unwrap();
+        *corrupt.last_mut().unwrap() ^= 1;
+        fs::write(&path, &corrupt).unwrap();
+        assert!(write_files(&path, &[(".vite/build/first.js".into(), b"changed".to_vec())]).is_err());
+        assert_eq!(fs::read(&path).unwrap(), corrupt);
     }
 
     #[test]
