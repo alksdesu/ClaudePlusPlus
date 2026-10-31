@@ -152,6 +152,37 @@ fn safe_directory(path: &Path) -> Result<()> {
     plain(path, true)
 }
 
+/// Resolve only the AppX-registered package root, not links inside the app.
+fn registered_package_app(root: &Path) -> Result<PathBuf> {
+    let meta = fs::symlink_metadata(root)?;
+    let resolved = if meta.file_attributes() & 0x400 != 0 {
+        let target = junction::get_target(root).context("安装目录不是 NTFS junction")?;
+        plain(&target, true)?;
+        let resolved = fs::canonicalize(&target)?;
+        let windows_apps = |path: &Path| {
+            path.parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("WindowsApps"))
+        };
+        ensure!(
+            windows_apps(root)
+                && windows_apps(&resolved)
+                && root.file_name() == resolved.file_name(),
+            "安装目录链接必须指向 WindowsApps 中的同名包"
+        );
+        resolved
+    } else {
+        plain(root, true)?;
+        fs::canonicalize(root)?
+    };
+    for ancestor in resolved.ancestors() {
+        plain(ancestor, true)?;
+    }
+    let app = resolved.join("app");
+    plain(&app, true)?;
+    Ok(app)
+}
+
 fn digest(path: &Path) -> Result<String> {
     plain(path, false)?;
     let mut file = File::open(path)?;
@@ -270,7 +301,13 @@ fn process_belongs_to(app: &Path, executable: &str) -> bool {
         "{}\\",
         normalize(&app.to_string_lossy()).trim_end_matches('\\')
     );
-    normalize(executable).starts_with(&prefix)
+    if normalize(executable).starts_with(&prefix) {
+        return true;
+    }
+    // A running MSIX app can report the registered C: path even when the
+    // installation has been resolved to its D: WindowsApps directory.
+    fs::canonicalize(executable.trim())
+        .is_ok_and(|path| normalize(&path.to_string_lossy()).starts_with(&prefix))
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -328,9 +365,7 @@ impl Installation {
         }
         let package: serde_json::Value = serde_json::from_str(&text)?;
         let root = PathBuf::from(package["root"].as_str().context("包路径缺失")?);
-        plain(&root, true)?;
-        plain(&root.join("app"), true)?;
-        let app = fs::canonicalize(root.join("app"))?;
+        let app = registered_package_app(&root)?;
         Ok(Some(Self {
             app,
             store: configuration()?,
@@ -1007,6 +1042,69 @@ pub fn restore_copy(app: &Path, store: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registered_package_accepts_plain_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("app")).unwrap();
+        assert_eq!(
+            registered_package_app(dir.path()).unwrap(),
+            fs::canonicalize(dir.path()).unwrap().join("app")
+        );
+    }
+
+    #[test]
+    fn registered_package_accepts_same_package_junction_and_detects_running_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source/WindowsApps/Claude_test");
+        let target = dir.path().join("target/WindowsApps/Claude_test");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir_all(target.join("app")).unwrap();
+        fs::write(target.join("app/Claude.exe"), b"fixture").unwrap();
+        junction::create(&target, &source).unwrap();
+        let app = registered_package_app(&source).unwrap();
+        assert_eq!(app, fs::canonicalize(target.join("app")).unwrap());
+        assert!(process_belongs_to(
+            &app,
+            &source.join("app/Claude.exe").to_string_lossy()
+        ));
+        assert!(!process_belongs_to(
+            &app,
+            &source.join("app-other/Claude.exe").to_string_lossy()
+        ));
+    }
+
+    #[test]
+    fn registered_package_rejects_redirect_to_other_package_or_container() {
+        let dir = tempfile::tempdir().unwrap();
+        for (index, destination) in [
+            "target/WindowsApps/OtherPackage",
+            "target/OtherFolder/Claude_test",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let source = dir
+                .path()
+                .join(format!("source{index}/WindowsApps/Claude_test"));
+            let target = dir.path().join(destination);
+            fs::create_dir_all(source.parent().unwrap()).unwrap();
+            fs::create_dir_all(target.join("app")).unwrap();
+            junction::create(&target, &source).unwrap();
+            assert!(registered_package_app(&source).is_err());
+        }
+    }
+
+    #[test]
+    fn registered_package_still_rejects_linked_app_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("WindowsApps/Claude_test");
+        let other = dir.path().join("other");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir(&other).unwrap();
+        junction::create(&other, root.join("app")).unwrap();
+        assert!(registered_package_app(&root).is_err());
+    }
 
     #[test]
     fn version_format_is_not_guessed() {
