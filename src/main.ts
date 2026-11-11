@@ -1019,6 +1019,7 @@ const WRAPPER_META: Record<WrapperState, { label: string; cls: string }> = {
 function renderFastMode(): string {
   const fm = state.fastmode;
   const rendererNative = fm?.renderer.native === true;
+  const macWrapper = fm?.msixPath == null && rendererNative;
   const head = `
       <div class="page-head">
         <div>
@@ -1033,7 +1034,7 @@ function renderFastMode(): string {
               ? `<button class="btn btn-secondary" data-action="fastmode-uninstall" ${
                   anyDesktopRunning() ||
                   state.busy ||
-                  (fm.wrapper !== "deployed" && (rendererNative || (fm.renderer.state !== "patched" && fm.renderer.state !== "outdated")))
+                  (fm.wrapper !== "deployed" && fm.wrapper !== "outdated" && (rendererNative || (fm.renderer.state !== "patched" && fm.renderer.state !== "outdated")))
                     ? "disabled"
                     : ""
                 }>${rendererNative ? "还原 wrapper" : "还原官方"}</button>
@@ -1115,9 +1116,9 @@ function renderFastMode(): string {
             ${fm.cliDir ? `<span class="mono">${esc(fm.cliDir)}</span>` : ""}
             ${
               fm.wrapper === "deployed"
-                ? `<span>官方 CLI 改名为 <span class="mono">${rendererNative ? "claude-real.app" : "claude-real.exe"}</span> 留在原处，内容没动</span>
+                ? `<span>官方 CLI 改名为 <span class="mono">${macWrapper ? "claude-real.app" : "claude-real.exe"}</span> 留在原处，内容没动</span>
                    ${
-                     rendererNative
+                     macWrapper
                        ? '<span>移走或删掉 Claude++ 后软链会断，Desktop 会自动重新下载官方 CLI</span>'
                        : ""
                    }`

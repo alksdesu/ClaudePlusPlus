@@ -1,4 +1,5 @@
 use std::fs;
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::Path;
 
@@ -143,7 +144,7 @@ impl<'a> Pe<'a> {
     }
 }
 
-fn header_hash(bytes: &[u8]) -> Result<(String, Range<usize>)> {
+fn header_hashes(bytes: &[u8]) -> Result<BTreeMap<String, (String, Range<usize>)>> {
     let positions: Vec<_> = memchr::memmem::find_iter(bytes, FUSE_SENTINEL).collect();
     ensure!(positions.len() == 1, "Electron fuse 标记未唯一命中");
     let wire = slice(bytes, positions[0] + FUSE_SENTINEL.len(), 8)?;
@@ -153,25 +154,27 @@ fn header_hash(bytes: &[u8]) -> Result<(String, Range<usize>)> {
     );
     let range = Pe::new(bytes)?.integrity_range()?;
     let records: Vec<serde_json::Value> = serde_json::from_slice(&bytes[range.clone()])?;
-    ensure!(records.len() == 1, "ASAR 完整性记录不唯一");
-    let record = &records[0];
-    ensure!(
-        record["file"].as_str() == Some("resources\\app.asar")
-            && record["alg"]
-                .as_str()
-                .is_some_and(|s| s.eq_ignore_ascii_case("sha256")),
-        "ASAR 完整性记录格式不受支持"
-    );
-    let hash = record["value"].as_str().context("缺少 ASAR 头部哈希")?;
-    ensure!(
-        hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
-        "ASAR 头部哈希格式错误"
-    );
-    let matches: Vec<_> =
-        memchr::memmem::find_iter(&bytes[range.clone()], hash.as_bytes()).collect();
-    ensure!(matches.len() == 1, "完整性哈希位置不唯一");
-    let start = range.start + matches[0];
-    Ok((hash.into(), start..start + 64))
+    let mut found = BTreeMap::new();
+    for record in records {
+        let file = record["file"].as_str().context("ASAR 完整性记录缺少文件名")?;
+        ensure!(
+            matches!(file, "resources\\app.asar" | "resources\\ion-dist.asar")
+                && record["alg"].as_str().is_some_and(|s| s.eq_ignore_ascii_case("sha256")),
+            "ASAR 完整性记录格式不受支持"
+        );
+        let hash = record["value"].as_str().context("缺少 ASAR 头部哈希")?;
+        ensure!(hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()), "ASAR 头部哈希格式错误");
+        let matches: Vec<_> = memchr::memmem::find_iter(&bytes[range.clone()], hash.as_bytes()).collect();
+        ensure!(matches.len() == 1, "完整性哈希位置不唯一");
+        let start = range.start + matches[0];
+        ensure!(found.insert(file.replace('\\', "/"), (hash.into(), start..start + 64)).is_none(), "ASAR 完整性记录重复");
+    }
+    ensure!(found.contains_key("resources/app.asar"), "缺少主进程 ASAR 完整性记录");
+    Ok(found)
+}
+
+fn header_hash(bytes: &[u8]) -> Result<(String, Range<usize>)> {
+    header_hashes(bytes)?.remove("resources/app.asar").context("缺少主进程 ASAR 哈希")
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -186,17 +189,25 @@ pub fn inspect(path: &Path) -> Result<String> {
     header_hash(&read(path)?).map(|(hash, _)| hash)
 }
 
+pub fn inspect_archives(path: &Path) -> Result<BTreeMap<String, String>> {
+    Ok(header_hashes(&read(path)?)?.into_iter().map(|(name, (hash, _))| (name, hash)).collect())
+}
+
 pub fn update(path: &Path, expected: &str, replacement: &str) -> Result<()> {
+    update_archive(path, "resources/app.asar", expected, replacement)
+}
+
+pub fn update_archive(path: &Path, archive: &str, expected: &str, replacement: &str) -> Result<()> {
     ensure!(
         replacement.len() == 64 && replacement.bytes().all(|b| b.is_ascii_hexdigit()),
         "新的 ASAR 哈希格式错误"
     );
     let mut bytes = read(path)?;
-    let (current, range) = header_hash(&bytes)?;
+    let (current, range) = header_hashes(&bytes)?.remove(archive).context("exe 没有目标 ASAR 的完整性记录")?;
     ensure!(current == expected, "exe 中的 ASAR 基准已变化");
     bytes[range].copy_from_slice(replacement.as_bytes());
     ensure!(
-        header_hash(&bytes)?.0 == replacement,
+        header_hashes(&bytes)?.get(archive).is_some_and(|(hash, _)| hash == replacement),
         "exe 完整性记录回读失败"
     );
     fs::write(path, bytes).context("更新 exe 的 ASAR 完整性记录")
@@ -253,6 +264,49 @@ mod tests {
     }
     fn put32(b: &mut [u8], at: usize, n: u32) {
         b[at..at + 4].copy_from_slice(&n.to_le_bytes());
+    }
+
+    fn records(bytes: &mut [u8], records: serde_json::Value) {
+        let data = serde_json::to_vec(&records).unwrap();
+        put32(bytes, 612, data.len() as u32);
+        bytes[768..768 + data.len()].copy_from_slice(&data);
+    }
+
+    #[test]
+    fn updates_each_archive_without_changing_the_other_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude.exe");
+        let mut bytes = fixture();
+        records(&mut bytes, serde_json::json!([
+            {"file":"resources\\app.asar","alg":"SHA256","value":"a".repeat(64)},
+            {"file":"resources\\ion-dist.asar","alg":"SHA256","value":"b".repeat(64)}
+        ]));
+        fs::write(&path, &bytes).unwrap();
+        update_archive(&path, "resources/ion-dist.asar", &"b".repeat(64), &"c".repeat(64)).unwrap();
+        assert_eq!(inspect(&path).unwrap(), "a".repeat(64));
+        assert_eq!(inspect_archives(&path).unwrap()["resources/ion-dist.asar"], "c".repeat(64));
+        update(&path, &"a".repeat(64), &"d".repeat(64)).unwrap();
+        assert_eq!(inspect_archives(&path).unwrap()["resources/ion-dist.asar"], "c".repeat(64));
+        let before = fs::read(&path).unwrap();
+        assert!(update_archive(&path, "resources/ion-dist.asar", &"b".repeat(64), &"e".repeat(64)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
+    fn duplicate_unknown_or_missing_archive_records_are_refused() {
+        for second in ["resources\\app.asar", "resources\\unknown.asar"] {
+            let mut bytes = fixture();
+            records(&mut bytes, serde_json::json!([
+                {"file":"resources\\app.asar","alg":"SHA256","value":"a".repeat(64)},
+                {"file":second,"alg":"SHA256","value":"b".repeat(64)}
+            ]));
+            assert!(header_hashes(&bytes).is_err());
+        }
+        let mut bytes = fixture();
+        records(&mut bytes, serde_json::json!([
+            {"file":"resources\\ion-dist.asar","alg":"SHA256","value":"a".repeat(64)}
+        ]));
+        assert!(header_hashes(&bytes).is_err());
     }
 
     #[test]

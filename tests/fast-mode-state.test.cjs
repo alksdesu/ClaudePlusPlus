@@ -45,8 +45,8 @@ const context = { exports: {} };
 vm.runInNewContext(compiled, context);
 const label = (state, native) => context.exports.rendererPresentation({ state, native }).label;
 
-test('macOS distinguishes signed status installation from unsupported platforms', () => {
-  assert.equal(label('pristine', true), '可安装 · 需重签');
+test('native Fast availability points to feature installation on both platforms', () => {
+  assert.equal(label('pristine', true), '可在功能增强安装');
   assert.equal(label('patched', true), '原生开关已安装');
   assert.equal(label('mismatch', true), '锚点失配');
   assert.equal(label('unsupported', true), '当前未适配');
@@ -55,6 +55,26 @@ test('macOS distinguishes signed status installation from unsupported platforms'
 
 const mainSource = fs.readFileSync(path.join(__dirname, '../src/main.ts'), 'utf8');
 const mainAst = ts.createSourceFile('main.ts', mainSource, ts.ScriptTarget.Latest, true);
+const renderNodes = mainAst.statements.filter(n =>
+  ts.isFunctionDeclaration(n) && n.name?.text === 'renderFastMode' ||
+  ts.isVariableStatement(n) && n.declarationList.declarations.some(d => d.name.getText(mainAst) === 'WRAPPER_META')
+).map(n => n.getText(mainAst)).join('\n');
+const renderCode = ts.transpileModule(renderNodes + '\nglobalThis.renderUnderTest = renderFastMode;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+test('native Windows Fast controls retain Windows wrapper details and restoration', () => {
+  const fm = { supported: true, wrapper: 'deployed', msixPath: 'C:\\WindowsApps\\Claude', renderer: { native: true, state: 'pristine', missingAnchors: [] }, settings: { installed: true }, speed: { fast: 0, standard: 0 } };
+  const ui = { state: { fastmode: fm, busy: false }, anyDesktopRunning: () => false, esc: String, rendererPresentation: context.exports.rendererPresentation };
+  vm.runInNewContext(renderCode, ui);
+  const windows = ui.renderUnderTest();
+  assert.ok(windows.includes('claude-real.exe'));
+  assert.ok(windows.includes('可在功能增强安装'));
+  assert.equal(windows.includes('软链'), false);
+  fm.wrapper = 'outdated';
+  assert.match(ui.renderUnderTest(), /data-action="fastmode-uninstall"\s*>还原 wrapper/);
+  fm.wrapper = 'deployed';
+  fm.msixPath = null;
+  assert.ok(ui.renderUnderTest().includes('claude-real.app'));
+  assert.ok(ui.renderUnderTest().includes('软链'));
+});
 const refreshFunctions = mainAst.statements.filter(n => ts.isFunctionDeclaration(n) && ['refreshNative', 'refreshFastMode'].includes(n.name?.text)).map(n => n.getText(mainAst)).join('\n');
 const refreshCode = ts.transpileModule(refreshFunctions + '\nglobalThis.refreshUnderTest = refreshNative;', { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 test('native rescans also refresh Fast status after install, removal and errors', async () => {

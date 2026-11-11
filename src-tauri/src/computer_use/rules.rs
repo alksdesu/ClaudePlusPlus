@@ -287,7 +287,7 @@ fn patch_config(text: &str, platform: Platform, mask: u8) -> Result<String> {
 rule!(
     prewarm_entry,
     concat!(
-        r#"async sparePrewarmSupport\(\)\{if\(!(?P<flags>[\w$]+(?:\.[\w$]+)?)\("4237076858"\)\)"#,
+        r#"async sparePrewarmSupport\(\)\{if\(!(?P<flags>[\w$]+(?:\.[\w$]+)?)\("4237076858"\)(?:\|\|[\w$]+(?:\.[\w$]+)?\(\))?\)"#,
         r#"return\{unsupported:"gate_off"\};"#,
         r#"(?P<gate>if\((?P<deploy>[\w$]+(?:\.[\w$]+)?)\(\)\.type!=="1p"\)return\{unsupported:"third_party"\};)?"#,
     )
@@ -315,6 +315,18 @@ rule!(
     concat!(
         r"(?P<g>[\w$]+)=\{id:(?P<model>[\w$]+)\.id,name:[\w$]+,description:[\w$]+,",
         r"thinking:[\w$]+\((?P<surface>[\w$]+),(?P<model2>[\w$]+)\.id,[\w$]+\),",
+        r#"(?P<added>\.\.\.(?P<surface2>[\w$]+)==="code"&&(?P<srv1>[\w$]+)\?\.fast_mode!==void 0&&"#,
+        r"\{fast_mode:(?P<srv2>[\w$]+)\.fast_mode\},)?",
+        r#"(?P<tail>\.\.\.[\w$]+!==void 0&&\{section:"overflow")"#,
+    )
+);
+
+rule!(
+    fast_emit_conditional,
+    concat!(
+        r"(?P<thinking>[\w$]+)=[\w$]+\((?P<surface>[\w$]+),(?P<model2>[\w$]+)\.id,[\w$]+\),",
+        r"(?P<g>[\w$]+)=\{id:(?P<model>[\w$]+)\.id,name:[\w$]+,description:[\w$]+,",
+        r"thinking:[\w$]+\?[\w$]+\((?P<thinking2>[\w$]+)\):(?P<thinking3>[\w$]+),",
         r#"(?P<added>\.\.\.(?P<surface2>[\w$]+)==="code"&&(?P<srv1>[\w$]+)\?\.fast_mode!==void 0&&"#,
         r"\{fast_mode:(?P<srv2>[\w$]+)\.fast_mode\},)?",
         r#"(?P<tail>\.\.\.[\w$]+!==void 0&&\{section:"overflow")"#,
@@ -385,7 +397,17 @@ struct FastParts<'t> {
 
 fn fast_parts<'t>(text: &'t str) -> Result<FastParts<'t>> {
     let parse = only(fast_parse(), text, &[], "Fast 能力解析入口")?;
-    let emit = only(fast_emit(), text, EMIT_ALIASES, "Fast 模型条目入口")?;
+    let emit = match (fast_emit().is_match(text), fast_emit_conditional().is_match(text)) {
+        (true, false) => only(fast_emit(), text, EMIT_ALIASES, "Fast 模型条目入口")?,
+        (false, true) => only(
+            fast_emit_conditional(),
+            text,
+            &[&["model", "model2"], &["thinking", "thinking2", "thinking3"]],
+            "Fast 模型条目入口",
+        )?,
+        (false, false) => anyhow::bail!("Fast 模型条目入口未命中"),
+        (true, true) => anyhow::bail!("Fast 模型条目入口命中不唯一"),
+    };
     let server = only(fast_server(), text, &[], "Fast 模型服务端字段")?;
     let emit_start = emit.get(0).context("Fast 条目范围缺失")?.start();
     let server_start = server.get(0).context("Fast 字段范围缺失")?.start();
@@ -557,6 +579,16 @@ rule!(
     r"function (?P<fn>[\w$]+)\((?P<a>[\w$]+),(?P<b>[\w$]+)=(?P<list>[\w$]+)\)\{"
 );
 
+rule!(
+    locale_validator,
+    r"function [\w$]+\((?P<arg>[\w$]+)\)\{return (?P<list>[\w$]+)\.includes\((?P<arg2>[\w$]+)\)\}"
+);
+
+rule!(
+    locale_exact,
+    r"function [\w$]+\((?P<arg>[\w$]+)\)\{return (?P<arg2>[\w$]+)&&(?P<list>[\w$]+)\.includes\((?P<arg3>[\w$]+)\)\?(?P<arg4>[\w$]+):void 0\}"
+);
+
 /// JS 里带字符串的函数体不能靠括号配对硬数，逐字符跳过引号与转义
 fn body_end(text: &str, open: usize) -> Result<usize> {
     let bytes = text.as_bytes();
@@ -594,8 +626,7 @@ fn body_end(text: &str, open: usize) -> Result<usize> {
 
 struct Locale {
     resolver: String,
-    fallback_args: (String, String),
-    fallback_body: (usize, usize),
+    fallback: Option<((String, String), (usize, usize))>,
     lists: Vec<(usize, usize)>,
     patched: bool,
 }
@@ -622,6 +653,7 @@ fn locale(text: &str) -> Result<Locale> {
             caps["fn"].to_string(),
             caps["a"].to_string(),
             caps["b"].to_string(),
+            caps["list"].to_string(),
             (list.1, list.2),
             open + 1,
             end - 1,
@@ -632,36 +664,55 @@ fn locale(text: &str) -> Result<Locale> {
             plain.push(entry);
         }
     }
-    ensure!(
-        chinese_aware.len() == 1 && plain.len() == 1,
-        "语言解析入口不唯一"
-    );
-    let (resolver, _, _, resolver_list, _, _) = chinese_aware.remove(0);
-    let (_, arg_a, arg_b, fallback_list, open, end) = plain.remove(0);
+    ensure!(chinese_aware.len() == 1, "语言解析入口不唯一");
+    let (resolver, _, _, list_name, resolver_list, _, _) = chinese_aware.remove(0);
     let mut lists = vec![resolver_list];
-    if fallback_list != resolver_list {
-        lists.push(fallback_list);
-    }
-    let delegated = format!("return {resolver}({arg_a},{arg_b})");
+    let fallback = if plain.len() == 1 {
+        let (_, arg_a, arg_b, _, fallback_list, open, end) = plain.remove(0);
+        if fallback_list != resolver_list {
+            lists.push(fallback_list);
+        }
+        Some(((arg_a, arg_b), (open, end)))
+    } else {
+        ensure!(plain.is_empty(), "语言解析入口不唯一");
+        let validator: Vec<_> = locale_validator()
+            .captures_iter(text)
+            .filter(|caps| caps["list"] == list_name && caps["arg"] == caps["arg2"])
+            .collect();
+        let exact: Vec<_> = locale_exact()
+            .captures_iter(text)
+            .filter(|caps| {
+                caps["list"] == list_name
+                    && caps["arg"] == caps["arg2"]
+                    && caps["arg"] == caps["arg3"]
+                    && caps["arg"] == caps["arg4"]
+            })
+            .collect();
+        ensure!(validator.len() == 1 && exact.len() == 1, "语言白名单调用路径不唯一");
+        None
+    };
     let patched_lists = lists
         .iter()
         .filter(|(start, end)| text[*start..*end].ends_with(&CHINESE[1..]))
         .count();
-    let patched_body = text[open..end] == delegated;
+    let patched_body = fallback.as_ref().is_none_or(|((arg_a, arg_b), (open, end))| {
+        text[*open..*end] == format!("return {resolver}({arg_a},{arg_b})")
+    });
     ensure!(
-        patched_lists == lists.len() && patched_body || patched_lists == 0 && !patched_body,
+        patched_lists == lists.len() && patched_body
+            || patched_lists == 0 && (fallback.is_none() || !patched_body),
         "语言补丁只应用了一部分"
     );
     ensure!(
         patched_lists > 0 || !lists.iter().any(|(s, e)| text[*s..*e].contains("\"zh-Han")),
         "语言白名单已包含中文但缺少解析改动"
     );
+    let patched = patched_lists == lists.len();
     Ok(Locale {
         resolver,
-        fallback_args: (arg_a, arg_b),
-        fallback_body: (open, end),
+        fallback,
         lists,
-        patched: patched_body,
+        patched,
     })
 }
 
@@ -672,14 +723,10 @@ pub fn language_installed(text: &str) -> Result<bool> {
 pub fn patch_language(text: &str) -> Result<String> {
     let locale = locale(text)?;
     ensure!(!locale.patched, "语言补丁已安装");
-    let mut edits = vec![(
-        locale.fallback_body.0,
-        locale.fallback_body.1,
-        format!(
-            "return {}({},{})",
-            locale.resolver, locale.fallback_args.0, locale.fallback_args.1
-        ),
-    )];
+    let mut edits = Vec::new();
+    if let Some(((arg_a, arg_b), (open, end))) = locale.fallback {
+        edits.push((open, end, format!("return {}({arg_a},{arg_b})", locale.resolver)));
+    }
     edits.extend(locale.lists.iter().map(|(_, end)| (*end, *end, CHINESE.to_string())));
     Ok(splice(text, &mut edits))
 }
@@ -727,6 +774,7 @@ pub fn fast_state_asset(dir: &std::path::Path) -> Result<Option<Asset>> {
     locate_asset(dir, "fastModeOffByCredits", |text| fast_state_parts(text).is_ok(), "Fast 状态")
 }
 
+#[cfg(test)]
 pub fn language_asset(dir: &std::path::Path) -> Result<Option<Asset>> {
     locate_asset(dir, "startsWith(\"zh-\")", |text| locale(text).is_ok(), "语言")
 }
@@ -863,6 +911,18 @@ mod tests {
         assert!(patch_prewarm(&patched).is_err());
     }
 
+    #[test]
+    fn prewarm_keeps_the_additional_native_gate() {
+        let source = PREWARM_SOURCE.replace(
+            r#"if(!t.x0("4237076858"))"#,
+            r#"if(!t.x0("4237076858")||t._n())"#,
+        );
+        let patched = patch_prewarm(&source).unwrap();
+        assert!(prewarm_installed(&patched).unwrap());
+        assert!(patched.contains(r#"if(!t.x0("4237076858")||t._n())"#));
+        assert!(!patched.contains("third_party"));
+    }
+
     fn fast_source() -> String {
         concat!(
             r#"let{model:i,catalog:a,hybrid:o,server:s,primaryId:l,label:u}=n;"#,
@@ -892,6 +952,19 @@ mod tests {
         assert!(fast_main_installed(&half).is_err());
         let foreign = patched.replace("{fast_mode:s.fast_mode}", "{fast_mode:other.fast_mode}");
         assert!(fast_main_installed(&foreign).is_err());
+    }
+
+    #[test]
+    fn fast_mapping_accepts_conditional_thinking_from_the_same_model() {
+        let source = fast_source().replace(
+            "g={id:i.id,name:f,description:h,thinking:aE(t,i.id,e),",
+            "q=aE(t,i.id,e),g={id:i.id,name:f,description:h,thinking:r?f(q):q,",
+        );
+        assert_eq!(fast_main_installed(&source).unwrap(), Some(false));
+        let patched = patch_fast_main(&source).unwrap();
+        assert_eq!(fast_main_installed(&patched).unwrap(), Some(true));
+        assert!(patched.contains(r#"...t==="code"&&s?.fast_mode!==void 0&&{fast_mode:s.fast_mode},"#));
+        assert!(fast_main_installed(&source.replace("thinking:r?f(q):q", "thinking:r?f(other):q")).is_err());
     }
 
     const STATE_SOURCE: &str = concat!(
@@ -927,6 +1000,23 @@ mod tests {
         assert!(patch_language(&patched).is_err());
         let half = patched.replace("function xy(e,t=by){return vy(e,t)}", LOCALE_SOURCE.split("function xy").nth(1).map(|s| format!("function xy{s}")).unwrap().trim_end());
         assert!(language_installed(&half).is_err());
+    }
+
+    #[test]
+    fn chinese_uses_the_shared_language_list() {
+        let source = concat!(
+            r#"var px=["en-US","fr-FR"];function mx(e){return px.includes(e)}"#,
+            r#"function vx(e){return e&&px.includes(e)?e:void 0}"#,
+            r#"function Dx(e,t=px){let n=new Map;for(let t of e)if(t){"#,
+            r#"let e=t.toLowerCase();if(e.startsWith("zh-"))return n.get(e)}return "en-US"}"#,
+        );
+        assert!(!language_installed(source).unwrap());
+        let patched = patch_language(source).unwrap();
+        assert!(language_installed(&patched).unwrap());
+        assert_eq!(patched.matches(r#""zh-Hans","zh-Hant""#).count(), 1);
+        assert!(patched.contains("function mx(e){return px.includes(e)}"));
+        assert!(patch_language(&patched).is_err());
+        assert!(language_installed(&source.replace("function mx(e){return px.includes(e)}", "function mx(e){return other.includes(e)}")).is_err());
     }
 
     #[test]
@@ -1003,6 +1093,8 @@ mod tests {
     #[ignore = "需要官方 renderer 副本"]
     fn verified_renderer_assets_round_trip() {
         let dir = std::path::PathBuf::from(std::env::var_os("CLAUDEPP_RENDERER").expect("缺少 renderer 目录"));
+        let output = std::env::var_os("CLAUDEPP_PATCH_OUTPUT").map(std::path::PathBuf::from);
+        if let Some(dir) = &output { std::fs::create_dir_all(dir).unwrap(); }
         let mut language = 0;
         let mut state = 0;
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -1013,14 +1105,43 @@ mod tests {
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
             if locale(&text).is_ok() {
                 language += 1;
-                assert!(language_installed(&patch_language(&text).unwrap()).unwrap());
+                let patched = patch_language(&text).unwrap();
+                assert!(language_installed(&patched).unwrap());
+                if let Some(dir) = &output { std::fs::write(dir.join(path.file_name().unwrap()).with_extension("mjs"), patched).unwrap(); }
             }
             if fast_state_parts(&text).is_ok() {
                 state += 1;
-                assert!(fast_state_installed(&patch_fast_state(&text).unwrap()).unwrap());
+                let patched = patch_fast_state(&text).unwrap();
+                assert!(fast_state_installed(&patched).unwrap());
+                if let Some(dir) = &output { std::fs::write(dir.join(path.file_name().unwrap()).with_extension("mjs"), patched).unwrap(); }
             }
         }
         assert_eq!((language, state), (1, 1), "语言与 Fast 状态入口各应唯一");
+    }
+
+    #[test]
+    #[ignore = "需要官方主进程副本"]
+    fn current_rules_round_trip_every_combination() {
+        let read = |variable| std::fs::read_to_string(std::env::var_os(variable).expect(variable)).unwrap();
+        let main = read("CLAUDEPP_MAIN");
+        let prewarm = read("CLAUDEPP_PREWARM");
+        let platform = match std::env::var("CLAUDEPP_PLATFORM").as_deref() {
+            Ok("macos") => Platform::Macos,
+            Ok("windows") => Platform::Windows,
+            _ => panic!("缺少有效的 CLAUDEPP_PLATFORM"),
+        };
+        let output = std::env::var_os("CLAUDEPP_PATCH_OUTPUT").map(std::path::PathBuf::from);
+        if let Some(dir) = &output { std::fs::create_dir_all(dir).unwrap(); }
+        for mask in 0..=platform.supported() {
+            let patched = patch_main(&main, platform, mask).unwrap();
+            assert_eq!(main_mask(&patched, platform).unwrap(), mask);
+            assert_eq!(patched == main, mask == 0);
+            if let Some(dir) = &output { std::fs::write(dir.join(format!("main-{mask}.cjs")), &patched).unwrap(); }
+        }
+        let patched = patch_prewarm(&prewarm).unwrap();
+        assert!(!prewarm_installed(&prewarm).unwrap());
+        assert!(prewarm_installed(&patched).unwrap());
+        if let Some(dir) = &output { std::fs::write(dir.join("prewarm.cjs"), patched).unwrap(); }
     }
 
     #[test]

@@ -571,7 +571,7 @@ mod imp {
     const WRAPPER_MAX_BYTES: u64 = 1024 * 1024;
     const CLI_EXE: &str = "claude.exe";
     const REAL_EXE: &str = "claude-real.exe";
-    const NATIVE_NOTE: &str = "已装原生开关，renderer 由「功能增强」页管理";
+    const NATIVE_NOTE: &str = "原生 Fast 开关由「功能增强」页管理";
 
     fn slot_occupant(exe: &Path) -> SlotOccupant {
         match fs::metadata(exe).map(|m| m.len()) {
@@ -1239,6 +1239,28 @@ mod imp {
             missing_anchors: Vec::new(),
         };
         let Some(root) = msix_root else { return not_found };
+        let app = root.join("app");
+        if app.join(crate::computer_use::assets::PACKED).exists() {
+            let mut info = RendererInfo {
+                native: true,
+                file: Some("ion-dist.asar".into()),
+                state: RendererState::Pristine,
+                missing_anchors: Vec::new(),
+            };
+            match crate::computer_use::packed_fast_state(&app) {
+                Ok(true) => info.state = RendererState::Patched,
+                Ok(false) => {},
+                Err(error) => {
+                    info.state = if error.downcast_ref::<std::io::Error>().is_some() {
+                        RendererState::Unreadable
+                    } else {
+                        RendererState::Mismatch
+                    };
+                    info.missing_anchors.push(format!("{error:#}"));
+                },
+            }
+            return info;
+        }
         let v1 = renderer_dir(root);
         native_renderer(&v1).unwrap_or_else(|| renderer_info_in(&v1))
     }
@@ -1615,7 +1637,8 @@ mod imp {
             return RepairOutcome::Nothing;
         }
         let wrapper_target = cli.as_ref().filter(|_| status.wrapper != WrapperState::Deployed);
-        let need_renderer = matches!(status.renderer.state, RendererState::Pristine | RendererState::Outdated);
+        let need_renderer = !status.renderer.native
+            && matches!(status.renderer.state, RendererState::Pristine | RendererState::Outdated);
         if wrapper_target.is_none() && !need_renderer {
             return RepairOutcome::Nothing;
         }
@@ -2736,16 +2759,26 @@ mod imp {
         true
     }
 
+    fn official_fast_api_key(key: &std::ffi::OsStr) -> bool {
+        let Some(value) = key.to_str() else { return false };
+        value.starts_with("sk-ant-api")
+            && value.len() > 24
+            && value.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    }
+
+    fn fast_check_overrides(env: impl Fn(&str) -> Option<OsString>) -> Vec<&'static str> {
+        ["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS"]
+            .into_iter()
+            .filter(|name| env(name).is_none())
+            .collect()
+    }
+
     fn fast_mode_api_key(current: Option<OsString>, token: Option<OsString>) -> Option<OsString> {
         if current.as_ref().is_some_and(|key| !key.is_empty()) {
             return None;
         }
         let token = token?;
-        let value = token.to_str()?;
-        (value.starts_with("sk-ant-api")
-            && value.len() > 24
-            && value.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
-        .then_some(token)
+        official_fast_api_key(&token).then_some(token)
     }
 
     fn wrapper_command(
@@ -2753,15 +2786,18 @@ mod imp {
         args: Vec<OsString>,
         clear_desktop_default: bool,
         api_key: Option<OsString>,
+        skip_checks: &[&str],
     ) -> Command {
         let mut command = Command::new(real);
         command.args(args);
         if clear_desktop_default {
-            // Desktop 的 3p 默认禁用早于 fastMode 设置；组织策略仍由官方 CLI 校验。
             command.env_remove("CLAUDE_CODE_DISABLE_FAST_MODE");
             if let Some(key) = api_key {
                 // 官方 Fast 资格预检不读取 Desktop 的 ANTHROPIC_AUTH_TOKEN。
                 command.env("ANTHROPIC_API_KEY", key);
+            }
+            for name in skip_checks {
+                command.env(name, "1");
             }
         }
         command
@@ -2774,12 +2810,15 @@ mod imp {
             Path::new("/Library/Application Support/ClaudeCode"),
             Path::new("/Library/Managed Preferences"),
         );
+        let current_key = std::env::var_os("ANTHROPIC_API_KEY");
         let api_key = fast_mode_api_key(
-            std::env::var_os("ANTHROPIC_API_KEY"),
+            current_key.clone(),
             std::env::var_os("ANTHROPIC_AUTH_TOKEN"),
         );
+        let skip_checks = fast_check_overrides(|name| std::env::var_os(name));
         let args = merged_args(std::env::args_os().skip(1));
-        let error = wrapper_command(&real, args, clear_desktop_default, api_key).exec();
+        let error = wrapper_command(&real, args, clear_desktop_default, api_key, &skip_checks)
+            .exec();
         eprintln!("[fast-wrapper] exec {} 失败: {error}", real.display());
         1
     }
@@ -2924,7 +2963,7 @@ mod imp {
         fn wrapper_command_only_removes_the_desktop_fast_default() {
             let args = vec!["--settings".into(), FAST_ONLY.into()];
             for clear in [false, true] {
-                let command = wrapper_command(Path::new("/cli/claude-real"), args.clone(), clear, None);
+                let command = wrapper_command(Path::new("/cli/claude-real"), args.clone(), clear, None, &[]);
                 assert_eq!(command.get_args().collect::<Vec<_>>(), args);
                 let changes = command.get_envs().collect::<Vec<_>>();
                 if clear {
@@ -2958,18 +2997,43 @@ mod imp {
         }
 
         #[test]
+        fn fast_checks_default_on_without_overriding_environment() {
+            let names = ["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS"];
+            assert_eq!(fast_check_overrides(|_| None), names);
+            let command = wrapper_command(Path::new("/cli/claude-real"), vec![], true, None, &names);
+            let changes: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+            assert!(!changes.contains_key(std::ffi::OsStr::new("ANTHROPIC_API_KEY")));
+            for name in names {
+                assert_eq!(changes.get(std::ffi::OsStr::new(name)), Some(&Some(std::ffi::OsStr::new("1"))));
+            }
+            for explicit in names {
+                let selected = fast_check_overrides(|name| (name == explicit).then(|| "0".into()));
+                assert_eq!(selected, names.into_iter().filter(|name| *name != explicit).collect::<Vec<_>>());
+            }
+            assert!(fast_check_overrides(|_| Some("0".into())).is_empty());
+        }
+
+        #[test]
         fn api_key_alias_is_scoped_to_the_desktop_override() {
             let key = OsString::from("sk-ant-api03-test-only-not-a-real-key");
             for clear in [false, true] {
-                let command = wrapper_command(Path::new("/cli/claude-real"), vec![], clear, Some(key.clone()));
+                let checks = fast_check_overrides(|_| None);
+                let command = wrapper_command(Path::new("/cli/claude-real"), vec![], clear, Some(key.clone()), &checks);
                 let changes: std::collections::BTreeMap<_, _> = command.get_envs().collect();
                 if clear {
                     assert_eq!(changes.get(std::ffi::OsStr::new("ANTHROPIC_API_KEY")), Some(&Some(key.as_os_str())));
+                    assert_eq!(
+                        changes.get(std::ffi::OsStr::new("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK")),
+                        Some(&Some(std::ffi::OsStr::new("1")))
+                    );
+                    assert_eq!(
+                        changes.get(std::ffi::OsStr::new("CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS")),
+                        Some(&Some(std::ffi::OsStr::new("1")))
+                    );
                 } else {
                     assert!(changes.is_empty());
                 }
                 assert!(!changes.contains_key(std::ffi::OsStr::new("ANTHROPIC_AUTH_TOKEN")));
-                assert!(!changes.contains_key(std::ffi::OsStr::new("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK")));
             }
         }
 

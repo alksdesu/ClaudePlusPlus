@@ -151,14 +151,21 @@ class W {
             && !managedRestricted();
     }
 
+    internal static bool OfficialFastApiKey(string key) {
+        return !String.IsNullOrEmpty(key) && key.Length > 24
+            && Regex.IsMatch(key, @"\Ask-ant-api[A-Za-z0-9_-]+\z");
+    }
+
     internal static void ApplyFastEnvironment(ProcessStartInfo command, Func<bool> managedRestricted) {
         var env = command.EnvironmentVariables;
         if (!DesktopFastOverride(key => env[key], managedRestricted)) return;
         env.Remove("CLAUDE_CODE_DISABLE_FAST_MODE");
         var token = env["ANTHROPIC_AUTH_TOKEN"];
-        if (String.IsNullOrEmpty(env["ANTHROPIC_API_KEY"]) && token != null && token.Length > 24
-            && Regex.IsMatch(token, @"\Ask-ant-api[A-Za-z0-9_-]+\z")) {
+        if (String.IsNullOrEmpty(env["ANTHROPIC_API_KEY"]) && OfficialFastApiKey(token)) {
             env["ANTHROPIC_API_KEY"] = token;
+        }
+        foreach (var name in new[] { "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS" }) {
+            if (env[name] == null) env[name] = "1";
         }
     }
 

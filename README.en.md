@@ -50,17 +50,19 @@ Desktop keeps Code session metadata separately for every account and organizatio
 3. 存储归一 (Unify storage): unify in one click.
 4. Claude 会话 (Claude sessions): select CLI sessions and register them, then open the project in Desktop to continue.
 5. Codex 导入 (Codex import): migrate in one click (quit Codex first), then register the results under Claude 会话.
-6. Fast Mode: install (one administrator prompt on Windows); the bottom of the page shows whether recent replies actually ran fast.
+6. Fast Mode: install; the bottom of the page shows whether recent replies actually ran fast.
 7. 功能增强 (Native features): pick the native features you want and apply.
 
-On Windows the Fast toggle in the model menu comes either from the patch the Fast Mode tab installs or from the native toggle on 功能增强. Only one can stay; follow the prompts in the app to switch.
+Install the model menu's native Fast toggle on 功能增强 (Native features). The Fast Mode tab manages the CLI wrapper and its automatic repair. Older Windows Desktop builds also support a renderer patch from the Fast Mode tab; it cannot coexist with the native toggle, so follow the prompts in the app to switch.
+
+The Fast Mode wrapper supports official API keys and token authentication through custom gateways, skipping Claude Code's client-side organization eligibility and network availability checks by default. Check `usage.speed` in session replies for the actual speed; gateways such as OpenRouter apply their own upstream routing rules.
 
 ## Safety
 
 - Nothing is written while Desktop or Codex is running.
 - Unifying and migrating never modify transcripts; unifying keeps the original folders as `.bak-<timestamp>`; deletions go to the recycle bin.
 - Desktop is backed up in full before any change, patched and verified on a copy before replacement, and can be restored if something fails midway.
-- Only client-side restrictions are lifted; server-side billing, entitlement and organization policy are untouched.
+- The Fast Mode wrapper changes only the local CLI launch environment; the server still handles billing and request authorization.
 
 ## Build
 

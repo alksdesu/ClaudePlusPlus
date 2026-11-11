@@ -25,7 +25,7 @@ class WrapperTests {
         var command = new ProcessStartInfo(file, text.ToString()) {
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true
         };
-        foreach (var key in new[] { "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_PROCESS_WRAPPER", "CLAUDE_CODE_MANAGED_SETTINGS_PATH" }) command.EnvironmentVariables.Remove(key);
+        foreach (var key in new[] { "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", "CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS", "CLAUDE_CODE_PROCESS_WRAPPER", "CLAUDE_CODE_MANAGED_SETTINGS_PATH" }) command.EnvironmentVariables.Remove(key);
         command.EnvironmentVariables["CLAUDE_CODE_ENTRYPOINT"] = "claude-desktop-3p";
         command.EnvironmentVariables["CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"] = "1";
         command.EnvironmentVariables["CLAUDE_CODE_DISABLE_FAST_MODE"] = "1";
@@ -53,7 +53,11 @@ class WrapperTests {
         Console.WriteLine(new JavaScriptSerializer().Serialize(new {
             args = args, settings = settings,
             disabled = Environment.GetEnvironmentVariable("CLAUDE_CODE_DISABLE_FAST_MODE"),
+            skipOrgCheck = Environment.GetEnvironmentVariable("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"),
+            skipNetworkErrors = Environment.GetEnvironmentVariable("CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS"),
             tokenRetained = Environment.GetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN") == Token,
+            gatewayTokenRetained = Environment.GetEnvironmentVariable("ANTHROPIC_AUTH_TOKEN") == "gateway-opaque-token",
+            baseUrl = Environment.GetEnvironmentVariable("ANTHROPIC_BASE_URL"),
             apiKeyPresent = !String.IsNullOrEmpty(key), apiKeyMatchesToken = key == Token,
             apiKeyPreserved = key == "existing-test-key"
         }));
@@ -69,6 +73,13 @@ class WrapperTests {
         Check(Object.Equals(nested["fastMode"], true), "nested setting is not the root choice");
         Check(Object.Equals(((Dictionary<string, object>)nested["nested"])["fastMode"], false), "nested setting was rewritten");
         foreach (var input in new[] { "not json", "C:\\settings file.json", "[]" }) Check(W.MergeFast(input) == input, "unknown settings must be preserved");
+    }
+
+    static void VerifyApiKeyFormat() {
+        Check(W.OfficialFastApiKey(Token), "official API key format was rejected");
+        foreach (var token in new[] { "gateway-opaque-token", "sk-or-v1-synthetic-not-a-real-key", "sk-ant-oat01-test-only-not-a-real-token", "sk-ant-api03-test with whitespace" }) {
+            Check(!W.OfficialFastApiKey(token), "non-API token was accepted: " + token);
+        }
     }
 
     static void VerifyRestrictions(string root) {
@@ -94,6 +105,8 @@ class WrapperTests {
         W.ApplyFastEnvironment(command, () => true);
         Check(command.EnvironmentVariables["CLAUDE_CODE_DISABLE_FAST_MODE"] == "1", "managed disable flag was removed");
         Check(command.EnvironmentVariables["ANTHROPIC_API_KEY"] == null, "managed credentials were altered");
+        Check(command.EnvironmentVariables["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] == null, "managed org check was bypassed");
+        Check(command.EnvironmentVariables["CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS"] == null, "managed network check was bypassed");
         foreach (var variable in new[] { "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_DISABLE_FAST_MODE", "CLAUDE_CODE_PROCESS_WRAPPER", "CLAUDE_CODE_MANAGED_SETTINGS_PATH" }) {
             command = Command("unused", new string[0]);
             command.EnvironmentVariables[variable] = "other";
@@ -107,6 +120,8 @@ class WrapperTests {
         var result = Run(Command(wrapper, args), 0);
         Check(result["disabled"] == null, "real child still has the Desktop default disable flag");
         Check(Object.Equals(result["apiKeyMatchesToken"], true), "real child has no preflight key alias");
+        Check(Object.Equals(result["skipOrgCheck"], "1"), "direct Anthropic key still has the client org check");
+        Check(Object.Equals(result["skipNetworkErrors"], "1"), "network preflight fallback missing");
         Check(Object.Equals(result["tokenRetained"], true), "original authentication token changed");
         var received = (object[])result["args"];
         Check(Object.Equals(received[1], args[1]) && Object.Equals(received[2], args[2]), "argument quoting changed");
@@ -117,14 +132,35 @@ class WrapperTests {
         command.EnvironmentVariables["ANTHROPIC_API_KEY"] = "existing-test-key";
         result = Run(command, 7);
         Check(Object.Equals(result["apiKeyPreserved"], true), "existing API key replaced");
+        Check(Object.Equals(result["skipOrgCheck"], "1") && Object.Equals(result["skipNetworkErrors"], "1"), "API-key gateway preflight overrides missing");
         command = Command(wrapper, new[] { "--probe" });
         command.EnvironmentVariables["CLAUDE_CODE_ENTRYPOINT"] = "cli";
         result = Run(command, 0);
         Check(Object.Equals(result["disabled"], "1") && Object.Equals(result["apiKeyPresent"], false), "non-Desktop environment changed");
+        Check(result["skipOrgCheck"] == null, "non-Desktop process bypassed the org check");
+        Check(result["skipNetworkErrors"] == null, "non-Desktop process bypassed the network check");
         command = Command(wrapper, new[] { "--probe" });
         command.EnvironmentVariables["ANTHROPIC_AUTH_TOKEN"] = "gateway-opaque-token";
+        command.EnvironmentVariables["ANTHROPIC_BASE_URL"] = "https://gateway.example/api";
         result = Run(command, 0);
         Check(Object.Equals(result["apiKeyPresent"], false), "opaque token treated as an Anthropic API key");
+        Check(Object.Equals(result["gatewayTokenRetained"], true), "gateway authentication token changed");
+        Check(Object.Equals(result["baseUrl"], "https://gateway.example/api"), "gateway endpoint changed");
+        Check(Object.Equals(result["skipOrgCheck"], "1") && Object.Equals(result["skipNetworkErrors"], "1"), "token gateway preflight overrides missing");
+        command = Command(wrapper, new[] { "--probe" });
+        command.EnvironmentVariables["ANTHROPIC_BASE_URL"] = "https://openrouter.ai/api";
+        result = Run(command, 0);
+        Check(Object.Equals(result["skipOrgCheck"], "1") && Object.Equals(result["skipNetworkErrors"], "1"), "custom endpoint preflight overrides missing");
+        command = Command(wrapper, new[] { "--probe" });
+        command.EnvironmentVariables["CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"] = "0";
+        result = Run(command, 0);
+        Check(Object.Equals(result["skipOrgCheck"], "0"), "explicit org check choice was overwritten");
+        Check(Object.Equals(result["skipNetworkErrors"], "1"), "org check choice disabled the network override");
+        command = Command(wrapper, new[] { "--probe" });
+        command.EnvironmentVariables["CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS"] = "0";
+        result = Run(command, 0);
+        Check(Object.Equals(result["skipNetworkErrors"], "0"), "explicit network check choice was overwritten");
+        Check(Object.Equals(result["skipOrgCheck"], "1"), "network check choice disabled the org override");
     }
 
     static int Main(string[] args) {
@@ -132,6 +168,7 @@ class WrapperTests {
         try {
             var root = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             VerifySettings();
+            VerifyApiKeyFormat();
             VerifyRestrictions(root);
             VerifyChild(root);
             Console.WriteLine("Windows wrapper: " + assertions + " assertions passed");

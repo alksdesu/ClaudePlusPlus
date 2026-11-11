@@ -1,5 +1,7 @@
 #[cfg(any(test, windows, target_os = "macos"))]
 mod asar;
+#[cfg(any(test, windows))]
+pub(crate) mod assets;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(any(test, target_os = "macos"))]
@@ -48,6 +50,8 @@ pub struct Status {
 pub use macos::{apply_copy, install, install_copy, restore, restore_copy, status, status_copy};
 #[cfg(windows)]
 pub use rules::installed_fast_state;
+#[cfg(windows)]
+pub(crate) use windows::packed_fast_state;
 #[cfg(windows)]
 pub use windows::{
     apply_copy, elevated_entry, install, install_copy, restore, restore_copy, status, status_copy,

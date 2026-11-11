@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::native::Selection;
-use super::{asar, pe, rules, Status};
+use super::{asar, assets::{self, Resources}, pe, rules, Status};
 
 const FILES: [&str; 2] = ["claude.exe", "resources/app.asar"];
 const RENDERER: &str = "resources/ion-dist/assets/v1";
@@ -209,7 +209,7 @@ enum Scope {
     Transaction,
 }
 
-fn required(found: Option<(PathBuf, String)>, scope: Scope, label: &str) -> Result<Option<String>> {
+fn required<T>(found: Option<(T, String)>, scope: Scope, label: &str) -> Result<Option<String>> {
     match found {
         Some((_, text)) => Ok(Some(text)),
         None if scope == Scope::Transaction => Ok(None),
@@ -225,17 +225,21 @@ fn verify_pair(app: &Path, scope: Scope) -> Result<Selection> {
         plain(&app.join(file), false)?;
     }
     let mut selection = asar::rules_selection(&app.join(FILES[1]), PLATFORM)?;
-    ensure!(
-        pe::inspect(&app.join(FILES[0]))? == asar::header_hash(&app.join(FILES[1]))?,
-        "exe 与 ASAR 的完整性记录不一致"
-    );
-    let renderer = app.join(RENDERER);
-    let (fast, language) = if scope == Scope::Transaction && !renderer.is_dir() {
+    let headers = pe::inspect_archives(&app.join(FILES[0]))?;
+    let packed = headers.contains_key(assets::PACKED);
+    for (relative, expected) in headers {
+        let path = app.join(&relative);
+        plain(&path, false)?;
+        ensure!(expected == asar::header_hash(&path)?, "exe 与 {relative} 的完整性记录不一致");
+    }
+    let mut resources = Resources::open(app)?;
+    ensure!(resources.packed() == packed, "界面资源布局与 exe 完整性记录不一致");
+    let (fast, language) = if scope == Scope::Transaction && !resources.available() {
         (None, None)
     } else {
         (
-            required(rules::fast_state_asset(&renderer)?, scope, "Fast 状态")?,
-            required(rules::language_asset(&renderer)?, scope, "语言")?,
+            required(resources.fast_state()?, scope, "Fast 状态")?,
+            required(resources.language()?, scope, "语言")?,
         )
     };
     let fast = fast.as_deref().map(rules::fast_state_installed).transpose()?;
@@ -246,7 +250,7 @@ fn verify_pair(app: &Path, scope: Scope) -> Result<Selection> {
     let chinese = language.as_deref().map(rules::language_installed).transpose()?;
     selection.chinese = chinese.unwrap_or(false);
     ensure!(
-        selection.chinese == super::native::catalogs::present(&app.join(CATALOGS))?,
+        selection.chinese == resources.catalogs_present()?,
         "中文词典与语言入口状态不一致"
     );
     Ok(selection)
@@ -513,6 +517,11 @@ impl Installation {
             hashes(&self.baseline(record))? == record.baseline,
             "原始备份哈希不一致"
         );
+        for entry in record.entries() {
+            let path = self.baseline(record).join(&entry.path);
+            let actual = path.try_exists()?.then(|| digest(&path)).transpose()?;
+            ensure!(actual == entry.baseline, "原始备份文件校验失败：{}", entry.path);
+        }
         verify_original(&self.baseline(record), Scope::Transaction)
     }
 
@@ -727,7 +736,11 @@ impl Installation {
     /// exe 与 ASAR 始终入账：备份和校验都以它们为基准，内容没变的不会被替换
     fn plan(&self, selection: Selection) -> Result<Vec<String>> {
         let mut files: Vec<String> = FILES.iter().map(|f| (*f).to_string()).collect();
-        let renderer = self.app.join(RENDERER);
+        let mut resources = Resources::open(&self.app)?;
+        if resources.packed() {
+            files.push(assets::PACKED.into());
+            return Ok(files);
+        }
         let relative = |path: &Path| -> Result<String> {
             Ok(path
                 .strip_prefix(&self.app)?
@@ -735,12 +748,12 @@ impl Installation {
                 .replace('\\', "/"))
         };
         if selection.fast_mode_status {
-            let (path, _) = rules::fast_state_asset(&renderer)?.context("未找到 Fast 状态入口")?;
-            files.push(relative(&path)?);
+            let (path, _) = resources.fast_state()?.context("未找到 Fast 状态入口")?;
+            files.push(relative(&resources.path(&path))?);
         }
         if selection.chinese {
-            let (path, _) = rules::language_asset(&renderer)?.context("未找到语言入口")?;
-            files.push(relative(&path)?);
+            let (path, _) = resources.language()?.context("未找到语言入口")?;
+            files.push(relative(&resources.path(&path))?);
             files.extend(
                 super::native::catalogs::RESOURCES
                     .iter()
@@ -751,20 +764,15 @@ impl Installation {
     }
 
     fn stage_patch(&self, stage: &Path, selection: Selection) -> Result<()> {
+        let headers = pe::inspect_archives(&stage.join(FILES[0]))?;
         if selection.mask() != 0 {
             let original = pe::inspect(&stage.join(FILES[0]))?;
             let header = asar::patch_with_rules(&stage.join(FILES[1]), PLATFORM, selection)?;
             pe::update(&stage.join(FILES[0]), &original, &header)?;
         }
-        let renderer = stage.join(RENDERER);
-        if selection.fast_mode_status {
-            let (path, text) = rules::fast_state_asset(&renderer)?.context("未找到 Fast 状态入口")?;
-            fs::write(path, rules::patch_fast_state(&text)?)?;
-        }
-        if selection.chinese {
-            let (path, text) = rules::language_asset(&renderer)?.context("未找到语言入口")?;
-            fs::write(path, rules::patch_language(&text)?)?;
-            super::native::catalogs::install(&stage.join(CATALOGS), stage)?;
+        if let Some(header) = Resources::open(stage)?.apply(selection, stage)? {
+            let original = headers.get(assets::PACKED).context("exe 缺少界面 ASAR 完整性记录")?;
+            pe::update_archive(&stage.join(FILES[0]), assets::PACKED, original, &header)?;
         }
         Ok(())
     }
@@ -1019,6 +1027,11 @@ pub fn elevated_entry() -> Option<i32> {
 pub fn status_copy(app: &Path, store: &Path) -> Result<Status> {
     Installation::copy(app, store)?.status()
 }
+
+pub(crate) fn packed_fast_state(app: &Path) -> Result<bool> {
+    ensure!(Resources::open(app)?.packed(), "界面资源不是 ASAR 布局");
+    Ok(verify_pair(app, Scope::App)?.fast_mode_status)
+}
 pub fn install_copy(app: &Path, store: &Path, _identity: &str) -> Result<String> {
     let install = Installation::copy(app, store)?;
     install.apply(Selection {
@@ -1252,10 +1265,12 @@ mod tests {
     #[ignore = "需要官方应用副本"]
     fn combinations_switch_and_restore_every_file() {
         let app = PathBuf::from(std::env::var_os("CLAUDEPP_WINDOWS_FIXTURE").expect("缺少副本路径"));
-        let store = app.parent().unwrap().join("probe-store");
-        let _ = fs::remove_dir_all(&store);
-        let before: Vec<_> = FILES.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
-        let installation = Installation::copy(&app, &store).unwrap();
+        let store = tempfile::tempdir_in(app.parent().unwrap()).unwrap();
+        let mut files = vec![FILES[0].to_owned()];
+        files.extend(pe::inspect_archives(&app.join(FILES[0])).unwrap().into_keys());
+        let before: Vec<_> = files.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
+        let installation = Installation::copy(&app, store.path()).unwrap();
+        let packed = Resources::open(&app).unwrap().packed();
         let computer_use = Selection {
             computer_use: true,
             ..Default::default()
@@ -1283,10 +1298,10 @@ mod tests {
             installation.apply(selection).unwrap();
             assert_eq!(verify_pair(&app, Scope::App).unwrap(), selection);
             assert_eq!(
-                super::super::native::catalogs::present(&app.join(CATALOGS)).unwrap(),
+                Resources::open(&app).unwrap().catalogs_present().unwrap(),
                 selection.chinese
             );
-            if selection.mask() == 0 {
+            if selection.mask() == 0 && !packed {
                 let current: Vec<_> = FILES.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
                 assert_eq!(before, current, "只装 renderer 功能时 exe 与 ASAR 不该变");
             }
@@ -1297,8 +1312,8 @@ mod tests {
 
         installation.restore().unwrap();
         assert!(verify_pair(&app, Scope::App).unwrap().is_empty());
-        assert!(!super::super::native::catalogs::present(&app.join(CATALOGS)).unwrap());
-        let after: Vec<_> = FILES.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
+        assert!(!Resources::open(&app).unwrap().catalogs_present().unwrap());
+        let after: Vec<_> = files.iter().map(|f| digest(&app.join(f)).unwrap()).collect();
         assert_eq!(before, after, "还原后文件未回到原始内容");
         assert_eq!(
             walkdir_count(&app, "cpp-cu-"),

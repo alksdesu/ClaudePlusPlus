@@ -118,6 +118,7 @@ fn field(bytes: &[u8], offset: usize) -> u32 {
 fn entry_mut<'a>(header: &'a mut Value, path: &[&str]) -> Result<&'a mut Value> {
     let mut value = header;
     for part in path {
+        ensure!(value.get("link").is_none(), "ASAR 资源目录不允许是链接");
         value = value
             .get_mut("files")
             .and_then(|files| files.get_mut(*part))
@@ -192,25 +193,28 @@ impl Archive {
         verify_integrity(entry.get("integrity").context("入口没有完整性信息")?, source)
     }
 
-    #[cfg(any(test, target_os = "macos"))]
     pub(super) fn source(&mut self, path: &[&str]) -> Result<Vec<u8>> {
         let source = self.read(path)?;
         self.verify_entry(path, &source)?;
         Ok(source)
     }
 
-    #[cfg(any(test, target_os = "macos"))]
-    pub(super) fn files(&mut self, directory: &[&str]) -> Result<Vec<String>> {
-        let node = entry_mut(&mut self.header, directory)?;
-        ensure!(node.get("link").is_none() && node.get("unpacked").is_none(), "ASAR 目录类型异常");
-        Ok(node.get("files").and_then(Value::as_object).context("缺少 ASAR 目录")?
-            .keys().cloned().collect())
-    }
-
-    #[cfg(any(test, target_os = "macos"))]
-    pub(super) fn contains(&mut self, path: &[&str]) -> Result<bool> {
+    pub(super) fn contains(&self, path: &[&str]) -> Result<bool> {
         let (name, parent) = path.split_last().context("ASAR 路径为空")?;
         Ok(self.files(parent)?.iter().any(|p| p == name))
+    }
+
+    pub(super) fn files(&self, path: &[&str]) -> Result<Vec<String>> {
+        let mut node = &self.header;
+        for part in path {
+            ensure!(node.get("link").is_none(), "ASAR 资源目录不允许是链接");
+            node = node.get("files").and_then(|files| files.get(*part))
+                .context("ASAR 资源目录缺失")?;
+        }
+        ensure!(node.get("link").is_none() && node.get("unpacked").is_none(), "ASAR 目录类型异常");
+        let files = node.get("files").and_then(Value::as_object).context("ASAR 资源不是目录")?;
+        ensure!(files.keys().all(|name| safe_component(name)), "ASAR 资源名包含路径分隔符");
+        Ok(files.keys().cloned().collect())
     }
 
     #[cfg(any(test, target_os = "macos"))]
@@ -435,32 +439,64 @@ fn replace_entry(path: &Path, mut archive: Archive, name: &str, modified: &[u8])
     write_archive(path, archive, modified)
 }
 
-#[cfg(any(test, target_os = "macos"))]
-pub(super) fn write_files(path: &Path, files: &[(String, Vec<u8>)]) -> Result<String> {
+fn safe_component(name: &str) -> bool {
+    !name.is_empty() && name != "." && name != ".."
+        && !name.chars().any(|c| matches!(c, '/' | '\\' | ':' | '\0'))
+}
+
+#[cfg(test)]
+pub(super) fn fixture_resources(path: &Path, entries: &[(&str, &[u8])]) {
+    let mut header = json!({"files": {}});
+    let mut payload = Vec::new();
+    for (relative, bytes) in entries {
+        let parts: Vec<_> = relative.split('/').collect();
+        let (leaf, parents) = parts.split_last().unwrap();
+        let mut node = &mut header;
+        for parent in parents {
+            node = node["files"].as_object_mut().unwrap().entry((*parent).to_owned())
+                .or_insert_with(|| json!({"files": {}}));
+        }
+        node["files"][*leaf] = json!({"offset":payload.len().to_string(),"size":bytes.len(),"integrity":integrity(bytes, 32).unwrap()});
+        payload.extend_from_slice(bytes);
+    }
+    let header = serde_json::to_vec(&header).unwrap();
+    let padding = (4 - header.len() % 4) % 4;
+    let pickle = 4 + header.len() as u32 + padding as u32;
+    let mut bytes: Vec<_> = [4, pickle + 4, pickle, header.len() as u32].into_iter().flat_map(u32::to_le_bytes).collect();
+    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(&[0; 3][..padding]);
+    bytes.extend_from_slice(&payload);
+    fs::write(path, bytes).unwrap();
+}
+
+pub(super) fn write_files(path: &Path, changes: &[(String, Vec<u8>)]) -> Result<String> {
     let mut archive = Archive::open(path)?;
-    let mut appended = Vec::new();
+    let mut payload = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for (name, bytes) in files {
+    for (name, bytes) in changes {
         let parts: Vec<_> = name.split('/').collect();
-        ensure!(parts.iter().all(|p| !p.is_empty() && !matches!(*p, "." | "..") && !p.contains('\\'))
-            && seen.insert(name), "ASAR 路径无效或重复");
-        ensure!(bytes.len() as u64 <= MAX_ENTRY, "ASAR 入口过大");
-        let exists = archive.contains(&parts)?;
-        let block_size = if exists {
+        ensure!(parts.iter().all(|part| safe_component(part)) && seen.insert(name), "ASAR 资源路径无效或重复");
+        ensure!(bytes.len() as u64 <= MAX_ENTRY, "ASAR 资源过大");
+        let block_size = if archive.contains(&parts)? {
             archive.source(&parts)?;
             entry_mut(&mut archive.header, &parts)?["integrity"]["blockSize"]
                 .as_u64().context("缺少 ASAR blockSize")?
-        } else { 4 * 1024 * 1024 };
-        let (leaf, parent) = parts.split_last().context("ASAR 路径为空")?;
-        let node = entry_mut(&mut archive.header, parent)?.get_mut("files")
-            .and_then(Value::as_object_mut).context("缺少 ASAR 目录")?;
-        let entry = node.entry((*leaf).to_owned()).or_insert_with(|| json!({}));
-        entry["offset"] = json!((archive.length - archive.payload_start + appended.len() as u64).to_string());
+        } else {
+            4 * 1024 * 1024
+        };
+        let (leaf, parents) = parts.split_last().context("ASAR 资源路径为空")?;
+        let parent = entry_mut(&mut archive.header, parents)?;
+        ensure!(parent.get("link").is_none(), "ASAR 资源目录不允许是链接");
+        let files = parent.get_mut("files").and_then(Value::as_object_mut).context("ASAR 资源目录缺失")?;
+        let offset = archive.length - archive.payload_start + payload.len() as u64;
+        let entry = files.entry((*leaf).to_owned()).or_insert_with(|| json!({}));
+        ensure!(entry.get("files").is_none(), "不能覆盖 ASAR 目录");
+        entry["offset"] = json!(offset.to_string());
         entry["size"] = json!(bytes.len());
         entry["integrity"] = integrity(bytes, block_size)?;
-        appended.extend_from_slice(bytes);
+        payload.extend_from_slice(bytes);
     }
-    write_archive(path, archive, &appended)
+    write_archive(path, archive, &payload)
 }
 
 fn write_archive(path: &Path, mut archive: Archive, appended: &[u8]) -> Result<String> {
