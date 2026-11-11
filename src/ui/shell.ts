@@ -3,7 +3,7 @@ import { features, selectedNames } from "./native-features";
 import { esc } from "./text";
 
 const navigation: { title: string; items: { id: AppState["tab"]; label: string; icon: string }[] }[] = [
-  { title: "工作台", items: [{ id: "overview", label: "总览", icon: "◈" }, { id: "features", label: "功能增强", icon: "✦" }, { id: "appearance", label: "语言与个性化", icon: "Aa" }, { id: "fastmode", label: "Fast Mode", icon: "↯" }] },
+  { title: "工作台", items: [{ id: "overview", label: "总览", icon: "◈" }, { id: "features", label: "功能增强", icon: "✦" }, { id: "appearance", label: "语言与个性化", icon: "Aa" }, { id: "fastmode", label: "Fast Mode", icon: "↯" }, { id: "promptblock", label: "提示词屏蔽", icon: "⊘" }] },
   { title: "会话管理", items: [{ id: "unify", label: "存储归一", icon: "⊞" }, { id: "migrate", label: "Claude 会话", icon: "↔" }, { id: "codex", label: "Codex 导入", icon: "⇥" }] },
   { title: "维护", items: [{ id: "backups", label: "备份与恢复", icon: "↶" }, { id: "diagnostics", label: "诊断与设置", icon: "≡" }] },
 ];

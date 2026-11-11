@@ -1,10 +1,11 @@
 import { rendererPresentation } from "./ui/fastmode";
 import { state } from "./state";
-import type { PoolKind, PoolCombo, CliSession, DiscoveryReport, UnifyPlan, DesktopSession, RunningDesktop, RegisterReport, UnregisterReport, DeleteReport, WrapperState, FastModeSettings, FastModeStatus, FastModeReport, ComputerUseStatus, WatchStatus, TombstoneInfo, CodexStatus, CodexSession, CodexMigrateReport, CodexFilter, SessionPreview, PurgeOutcome, AppState } from "./state";
+import type { PoolKind, PoolCombo, CliSession, DiscoveryReport, UnifyPlan, DesktopSession, RunningDesktop, RegisterReport, UnregisterReport, DeleteReport, WrapperState, FastModeSettings, FastModeStatus, FastModeReport, PromptBlockStatus, ComputerUseStatus, WatchStatus, TombstoneInfo, CodexStatus, CodexSession, CodexMigrateReport, CodexFilter, SessionPreview, PurgeOutcome, AppState } from "./state";
 import { esc } from "./ui/text";
 import type { DesktopUpdateStatus } from "./ui/desktop-update";
 import { renderFeatures, selectionChanged, canApply, type FeatureGroup, type FeatureView, type NativeStatus, type NativeSelection } from "./ui/native-features";
 import { renderNavigation, renderOverview, renderBackups, renderDiagnostics } from "./ui/shell";
+import { renderPromptBlock, applyTargets } from "./ui/promptblock";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -60,6 +61,11 @@ async function refreshFastMode() {
     state.fastmode = await invoke<FastModeStatus>("fastmode_status");
   } catch {
     state.fastmode = null;
+  }
+  try {
+    state.promptblock = await invoke<PromptBlockStatus>("promptblock_status");
+  } catch {
+    state.promptblock = null;
   }
 }
 
@@ -852,6 +858,7 @@ function render() {
     : state.tab === "backups" ? renderBackups(state)
     : state.tab === "diagnostics" ? renderDiagnostics(state)
     : state.tab === "fastmode" ? renderFastMode()
+    : state.tab === "promptblock" ? renderPromptBlock(state)
     : state.tab === "computer-use" ? renderComputerUse() : sessionView;
   app.innerHTML = `<header class="topbar" data-tauri-drag-region><div class="brand">${FLOWER_MARK}Claude++</div><span class="app-purpose">Desktop 工具箱</span>${watchChip()}${windowControls()}</header>
     <div class="workspace">${renderNavigation(state)}<main id="main-content" tabindex="-1">${content}</main></div>`;
@@ -1174,6 +1181,26 @@ async function doFastMode(action: "install" | "uninstall") {
   }
 }
 
+async function doPromptBlock(action: "apply" | "restore", ids: string[]) {
+  if (ids.length === 0) return;
+  state.busy = true;
+  render();
+  const results: string[] = [];
+  let failed = false;
+  for (const id of ids) {
+    const kind = state.promptblock?.installs.find((i) => i.id === id)?.kind ?? id;
+    try {
+      results.push(`${kind}：${await invoke<string>(action === "apply" ? "promptblock_apply" : "promptblock_restore", { id })}`);
+    } catch (error) {
+      failed = true;
+      results.push(`${kind}：${String(error)}`);
+    }
+  }
+  toast(results.join("\n"), failed);
+  state.busy = false;
+  await refresh();
+}
+
 async function doFastModeAuto(auto: boolean) {
   try {
     const settings = await invoke<FastModeSettings>("fastmode_set_auto", { auto });
@@ -1416,6 +1443,11 @@ app.addEventListener("click", (event) => {
     if (action === "fastmode-install") void doFastMode("install");
     if (action === "fastmode-uninstall") void doFastMode("uninstall");
     if (action === "fastmode-auto") void doFastModeAuto((target as HTMLInputElement).checked);
+    if (action === "promptblock-apply" || action === "promptblock-restore") {
+      const id = target.closest<HTMLElement>("[data-install]")?.dataset.install;
+      if (id) void doPromptBlock(action === "promptblock-apply" ? "apply" : "restore", [id]);
+    }
+    if (action === "promptblock-apply-all") void doPromptBlock("apply", applyTargets(state.promptblock?.installs ?? []).map((i) => i.id));
     if (action === "cu-install" || action === "cu-restore") {
       state.computerUseConfirm = action === "cu-install" ? "install" : "restore";
       render();

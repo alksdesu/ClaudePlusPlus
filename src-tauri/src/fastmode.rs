@@ -142,7 +142,7 @@ const SPEED_SESSIONS: usize = 15;
 const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 static LAST_AUTO_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
 
-fn settings_dir() -> PathBuf {
+pub(crate) fn settings_dir() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("com.claudeplusplus.manager")
@@ -227,10 +227,10 @@ fn exe_dir_of(version_dir: &Path) -> Option<PathBuf> {
 
 /// exe_dir 是 Desktop spawn 的那层，旧布局下就是 version_dir
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CliInstall {
-    version: String,
+pub(crate) struct CliInstall {
+    pub(crate) version: String,
     version_dir: PathBuf,
-    exe_dir: PathBuf,
+    pub(crate) exe_dir: PathBuf,
 }
 
 /// 下载中的版本目录还没有 .verified，跳过它才不会把半成品当成 CLI 失踪记成失败
@@ -255,7 +255,7 @@ fn cli_root() -> Option<PathBuf> {
     dirs::data_local_dir().map(|d| d.join("Claude-3p").join("claude-code"))
 }
 
-fn current_cli() -> Option<CliInstall> {
+pub(crate) fn current_cli() -> Option<CliInstall> {
     cli_root().and_then(|root| latest_cli(&root))
 }
 

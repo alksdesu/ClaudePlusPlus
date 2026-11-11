@@ -21,6 +21,7 @@ Desktop 按账号和组织分开存放 Code 会话的元数据。换个渠道或
 | 会话预览 | 单击会话打开只读预览，大会话只加载最后 300 条 |
 | 删除与清理 | 两边一起删除会话，或清理 Desktop 留下的删除标记。删掉的转录进系统回收站 |
 | Fast Mode | 让 API key 登录的 Desktop 默认请求 Fast。前提是 key 本身有 fast 资格 |
+| 提示词屏蔽 | 抹掉 Claude Code 注入的限制类提示词段，行为引导不动；Desktop 自带与 npm 全局 CLI 都支持，随时还原（Windows） |
 | 原生功能 | 打开 Desktop 自带、但对 API key 模式关着的功能，见下节 |
 | 托盘守护 | 新渠道、新账号出现时自动归一；Desktop 或 CLI 更新后自动补上 Fast Mode |
 

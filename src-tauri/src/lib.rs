@@ -6,6 +6,7 @@ pub mod link;
 pub mod migrate;
 pub mod preview;
 pub mod procs;
+pub mod promptblock;
 pub mod unify;
 pub mod watch;
 
@@ -424,6 +425,21 @@ fn fastmode_set_auto(auto: bool) -> Result<FastModeSettings, String> {
 }
 
 #[tauri::command(async)]
+fn promptblock_status() -> promptblock::Status {
+    promptblock::status()
+}
+
+#[tauri::command(async)]
+fn promptblock_apply(id: String) -> Result<String, String> {
+    promptblock::apply(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
+fn promptblock_restore(id: String) -> Result<String, String> {
+    promptblock::restore(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command(async)]
 fn native_features_status() -> Result<computer_use::native::NativeStatus, String> {
     computer_use::native::status().map_err(|e| format!("{e:#}"))
 }
@@ -518,6 +534,9 @@ pub fn run() {
             fastmode_install,
             fastmode_uninstall,
             fastmode_set_auto,
+            promptblock_status,
+            promptblock_apply,
+            promptblock_restore,
             native_features_status,
             native_features_apply,
             desktop_update_status,

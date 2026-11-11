@@ -116,6 +116,24 @@ export interface FastModeReport {
   renderer: string;
 }
 
+export type PromptBlockState = "patched" | "pristine" | "updated" | "damaged" | "broken" | "missing";
+
+export interface PromptBlockInstall {
+  id: string;
+  kind: string;
+  exePath: string;
+  cliVersion: string | null;
+  state: PromptBlockState;
+  appliedAt: string | null;
+  segmentHits: Record<string, number>;
+  note: string | null;
+}
+
+export interface PromptBlockStatus {
+  supported: boolean;
+  installs: PromptBlockInstall[];
+}
+
 export interface ComputerUseStatus {
   supported: boolean;
   requiresSigning?: boolean;
@@ -191,7 +209,7 @@ export interface PurgeOutcome {
 }
 
 export interface AppState {
-  tab: "overview" | "features" | "unify" | "migrate" | "codex" | "fastmode" | "computer-use" | "appearance" | "backups" | "diagnostics";
+  tab: "overview" | "features" | "unify" | "migrate" | "codex" | "fastmode" | "promptblock" | "computer-use" | "appearance" | "backups" | "diagnostics";
   native: NativeStatus | null;
   nativeDraft: NativeSelection;
   nativeDirty: boolean;
@@ -221,6 +239,7 @@ export interface AppState {
   selectedCodex: Set<string>;
   codexFilter: CodexFilter;
   fastmode: FastModeStatus | null;
+  promptblock: PromptBlockStatus | null;
   computerUse: ComputerUseStatus | null;
   computerUseError: string | null;
   computerUseScanning: boolean;
@@ -260,6 +279,7 @@ export const state: AppState = {
   selectedCodex: new Set(),
   codexFilter: "all",
   fastmode: null,
+  promptblock: null,
   computerUse: null,
   computerUseError: null,
   computerUseScanning: false,

@@ -23,6 +23,7 @@ Desktop keeps Code session metadata separately for every account and organizatio
 | Preview | Click a session for a read-only preview; large sessions load only the last 300 messages |
 | Delete and clean up | Delete a session on both sides, or clear the deletion markers Desktop leaves behind. Deleted transcripts go to the recycle bin |
 | Fast Mode | Makes an API-key Desktop request Fast by default. The key itself must be entitled to fast |
+| Prompt blocking | Blanks the restriction prompts Claude Code injects, leaving behavior guidance alone; covers the bundled and npm CLIs, reversible (Windows) |
 | Native features | Turns on features Desktop ships but keeps off in API-key mode; see below |
 | Tray daemon | Unifies new channels and accounts as they appear, and puts Fast Mode back after Desktop or CLI updates |
 
