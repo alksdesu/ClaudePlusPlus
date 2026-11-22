@@ -2,19 +2,38 @@
 //! bytecode 常量池两份拷贝全文件命中；journal 记录每处原字节，可随时逐字节还原。
 //! 行为引导类段落、管线合成消息、模型身份行都不在表内。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
+#[cfg(not(target_os = "macos"))]
+use std::collections::HashSet;
+#[cfg(any(test, not(target_os = "macos")))]
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::io::Read;
+#[cfg(any(test, not(target_os = "macos")))]
+use std::io::{Seek, SeekFrom};
+use std::path::Path;
+#[cfg(any(test, not(target_os = "macos")))]
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+#[cfg(any(test, not(target_os = "macos")))]
+use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, ensure, Context, Result};
+#[cfg(any(test, not(target_os = "macos")))]
 use base64::engine::general_purpose::STANDARD as BASE64;
+#[cfg(any(test, not(target_os = "macos")))]
 use base64::Engine as _;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+#[cfg(any(test, not(target_os = "macos")))]
+use serde::Deserialize;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+mod bun;
 
 const MAX_EXE: u64 = 512 * 1024 * 1024;
 // 官方 CLI 300+ MB，wrapper 几 KB：以 1 MB 分界认出官方本体
+#[cfg(not(target_os = "macos"))]
 const MIN_OFFICIAL_BYTES: u64 = 1024 * 1024;
 const MAX_HITS_PER_NEEDLE: usize = 16;
 const SMOKE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -206,6 +225,7 @@ fn write_edits(data: &mut [u8], edits: &[PlannedEdit], revert: bool) {
 
 /* ---------- journal ---------- */
 
+#[cfg(any(test, not(target_os = "macos")))]
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct EditRecord {
@@ -214,6 +234,7 @@ struct EditRecord {
     patched: String,
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct InstallJournal {
@@ -226,16 +247,19 @@ struct InstallJournal {
     edits: Vec<EditRecord>,
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct Journal {
     installs: BTreeMap<String, InstallJournal>,
 }
 
+#[cfg(not(target_os = "macos"))]
 fn journal_path() -> PathBuf {
     crate::fastmode::settings_dir().join("promptblock.json")
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn load_journal_from(path: &Path) -> Journal {
     fs::read_to_string(path)
         .ok()
@@ -243,6 +267,7 @@ fn load_journal_from(path: &Path) -> Journal {
         .unwrap_or_default()
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn save_journal_to(path: &Path, journal: &Journal) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -253,6 +278,7 @@ fn save_journal_to(path: &Path, journal: &Journal) -> Result<()> {
     Ok(())
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn record_edits(edits: &[PlannedEdit]) -> Vec<EditRecord> {
     edits
         .iter()
@@ -264,6 +290,7 @@ fn record_edits(edits: &[PlannedEdit]) -> Vec<EditRecord> {
         .collect()
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn planned_from_records(records: &[EditRecord]) -> Result<Vec<PlannedEdit>> {
     records
         .iter()
@@ -277,6 +304,7 @@ fn planned_from_records(records: &[EditRecord]) -> Result<Vec<PlannedEdit>> {
         .collect()
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn file_signature(path: &Path) -> Result<(u64, i64)> {
     let metadata = fs::metadata(path)?;
     let mtime = metadata
@@ -287,11 +315,13 @@ fn file_signature(path: &Path) -> Result<(u64, i64)> {
     Ok((metadata.len(), mtime))
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn signature_matches(path: &Path, entry: &InstallJournal) -> bool {
     file_signature(path).map(|(len, mtime)| len == entry.file_len && mtime == entry.mtime_ms).unwrap_or(false)
 }
 
 /// 逐条 seek 读取补丁位点，确认文件内容与记录的补丁字节一致
+#[cfg(any(test, not(target_os = "macos")))]
 fn probe_edits(path: &Path, records: &[EditRecord]) -> Result<bool> {
     let mut file = fs::File::open(path)?;
     let mut buffer = Vec::new();
@@ -308,11 +338,13 @@ fn probe_edits(path: &Path, records: &[EditRecord]) -> Result<bool> {
 
 /* ---------- 文件换入与自检 ---------- */
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     path.with_file_name(format!("{name}.{suffix}"))
 }
 
+#[cfg(any(test, not(target_os = "macos")))]
 fn clear_leftovers(target: &Path) -> Result<()> {
     for leftover in [sibling(target, "cpp-new"), sibling(target, "cpp-prev")] {
         if leftover.symlink_metadata().is_ok() {
@@ -326,6 +358,7 @@ fn clear_leftovers(target: &Path) -> Result<()> {
 
 /// 临时文件写好再换名顶替：中途失败换回原文件；npm 的 exe 带硬链接，就地写会殃及
 /// 另一个链接目标，换名正好把链接断开
+#[cfg(any(test, not(target_os = "macos")))]
 fn swap_in(target: &Path, bytes: &[u8]) -> Result<Option<String>> {
     let temp = sibling(target, "cpp-new");
     let stash = sibling(target, "cpp-prev");
@@ -363,6 +396,7 @@ fn smoke_test(exe: &Path) -> Result<String> {
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
+            let _ = child.wait();
             bail!("exe --version 超时未退出");
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -379,6 +413,7 @@ fn smoke_test(exe: &Path) -> Result<String> {
 
 /* ---------- 安装发现 ---------- */
 
+#[cfg(not(target_os = "macos"))]
 #[derive(Clone)]
 struct Install {
     id: String,
@@ -388,11 +423,13 @@ struct Install {
     problem: Option<String>,
 }
 
+#[cfg(not(target_os = "macos"))]
 fn official_size(path: &Path) -> bool {
     fs::metadata(path).map(|m| m.is_file() && m.len() > MIN_OFFICIAL_BYTES && m.len() <= MAX_EXE).unwrap_or(false)
 }
 
 /// wrapper 部署后官方本体在 claude-real.exe，否则就是 claude.exe 自己
+#[cfg(not(target_os = "macos"))]
 fn official_exe_in(dir: &Path) -> Result<PathBuf> {
     let real = dir.join("claude-real.exe");
     let plain = dir.join("claude.exe");
@@ -404,12 +441,14 @@ fn official_exe_in(dir: &Path) -> Result<PathBuf> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn package_version(package_dir: &Path) -> Option<String> {
     let text = fs::read_to_string(package_dir.join("package.json")).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     Some(json.get("version")?.as_str()?.to_string())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn npm_like_install(id: &str, kind: &str, package_dir: &Path) -> Option<Install> {
     let exe = package_dir.join("bin").join("claude.exe");
     if !official_size(&exe) {
@@ -424,6 +463,7 @@ fn npm_like_install(id: &str, kind: &str, package_dir: &Path) -> Option<Install>
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 fn discover() -> Vec<Install> {
     if !cfg!(windows) {
         return Vec::new();
@@ -488,6 +528,7 @@ pub struct InstallStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub supported: bool,
+    pub platform: &'static str,
     pub installs: Vec<InstallStatus>,
 }
 
@@ -495,6 +536,7 @@ fn now_iso() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
 }
 
+#[cfg(not(target_os = "macos"))]
 fn classify(install: &Install, entry: Option<&InstallJournal>) -> (&'static str, Option<String>) {
     if let Some(problem) = &install.problem {
         return ("broken", Some(problem.clone()));
@@ -512,6 +554,7 @@ fn classify(install: &Install, entry: Option<&InstallJournal>) -> (&'static str,
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn status() -> Status {
     let journal = load_journal_from(&journal_path());
     let mut seen: HashSet<String> = HashSet::new();
@@ -546,9 +589,10 @@ pub fn status() -> Status {
             note: Some("当初屏蔽过的安装已不在原处，可清除这条记录".into()),
         });
     }
-    Status { supported: cfg!(windows), installs }
+    Status { supported: cfg!(windows), platform: std::env::consts::OS, installs }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn ensure_writable(install_id: &str) -> Result<()> {
     ensure!(cfg!(windows), "当前平台未适配提示词屏蔽");
     if install_id == "bundled" {
@@ -557,10 +601,12 @@ fn ensure_writable(install_id: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn find_install(id: &str) -> Result<Install> {
     discover().into_iter().find(|i| i.id == id).with_context(|| format!("没找到 CLI 安装 {id}"))
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn apply(id: &str) -> Result<String> {
     ensure_writable(id)?;
     let install = find_install(id)?;
@@ -607,6 +653,7 @@ pub fn apply(id: &str) -> Result<String> {
     Ok(message)
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn restore(id: &str) -> Result<String> {
     ensure_writable(id)?;
     let path = journal_path();
@@ -643,6 +690,9 @@ pub fn restore(id: &str) -> Result<String> {
     }
     Ok(message)
 }
+
+#[cfg(target_os = "macos")]
+pub use macos::{apply, restore, status};
 
 #[cfg(test)]
 mod tests {

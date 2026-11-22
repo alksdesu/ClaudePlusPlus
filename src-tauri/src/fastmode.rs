@@ -234,7 +234,7 @@ pub(crate) struct CliInstall {
 }
 
 /// 下载中的版本目录还没有 .verified，跳过它才不会把半成品当成 CLI 失踪记成失败
-fn latest_cli(root: &Path) -> Option<CliInstall> {
+pub(crate) fn latest_cli(root: &Path) -> Option<CliInstall> {
     let mut versions: Vec<(Vec<u64>, String, PathBuf)> = fs::read_dir(root)
         .ok()?
         .flatten()
@@ -2675,6 +2675,7 @@ mod imp {
             || settings.get("processWrapper").is_some()
             || settings.get("env").is_some_and(|env| {
                 env.get("CLAUDE_CODE_DISABLE_FAST_MODE").is_some()
+                    || env.get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK").is_some()
                     || env.get("CLAUDE_CODE_PROCESS_WRAPPER").is_some()
             })
     }
@@ -2883,6 +2884,7 @@ mod imp {
                 r#"{"processWrapper":"/org/launcher"}"#,
                 r#"{"env":{"CLAUDE_CODE_PROCESS_WRAPPER":"/org/launcher"}}"#,
                 r#"{"env":{"CLAUDE_CODE_DISABLE_FAST_MODE":"1"}}"#,
+                r#"{"env":{"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK":"0"}}"#,
                 "not json",
                 "[]",
                 "null",
@@ -2917,6 +2919,7 @@ mod imp {
                 r#"{"fastMode":false}"#,
                 r#"{"processWrapper":"/org/launcher"}"#,
                 r#"{"env":{"CLAUDE_CODE_DISABLE_FAST_MODE":"1"}}"#,
+                r#"{"env":{"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK":"0"}}"#,
                 "not json",
             ] {
                 fs::write(dropins.join("30-policy.json"), source).unwrap();

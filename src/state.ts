@@ -116,7 +116,7 @@ export interface FastModeReport {
   renderer: string;
 }
 
-export type PromptBlockState = "patched" | "pristine" | "updated" | "damaged" | "broken" | "missing";
+export type PromptBlockState = "patched" | "pristine" | "updated" | "damaged" | "broken" | "missing" | "legacy" | "unsupported";
 
 export interface PromptBlockInstall {
   id: string;
@@ -131,6 +131,7 @@ export interface PromptBlockInstall {
 
 export interface PromptBlockStatus {
   supported: boolean;
+  platform?: string;
   installs: PromptBlockInstall[];
 }
 

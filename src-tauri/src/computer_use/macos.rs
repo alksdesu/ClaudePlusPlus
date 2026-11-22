@@ -105,7 +105,7 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn fingerprint(root: &Path) -> Result<String> {
+pub(crate) fn fingerprint(root: &Path) -> Result<String> {
     let mut digest = Sha256::new();
     let mut buf = [0u8; 65536];
     for path in walk(root)? {
@@ -449,6 +449,21 @@ fn patch(app: &Path, selected: super::native::Selection) -> Result<()> {
     Ok(())
 }
 
+// macOS 官方更新换布局时不清掉旧 ion-dist 目录；打包版只加载 asar，残留会混入备份与产物
+fn prune_stale_resources(app: &Path) -> Result<()> {
+    let loose = app.join("Contents/Resources/ion-dist");
+    let Ok(loose_meta) = fs::symlink_metadata(&loose) else {
+        return Ok(());
+    };
+    let Ok(packed_meta) = fs::symlink_metadata(app.join(structure::PACKED)) else {
+        return Ok(());
+    };
+    ensure!(packed_meta.is_file(), "界面资源包不是普通文件");
+    ensure!(loose_meta.is_dir(), "残留界面资源不是目录，拒绝清理");
+    fs::remove_dir_all(&loose).context("清理残留界面资源目录")?;
+    Ok(())
+}
+
 fn swap(stage: &Path, target: &Path, retired: &Path) -> Result<()> {
     ensure!(
         !stage.is_symlink() && !target.is_symlink() && !retired.is_symlink(),
@@ -759,6 +774,7 @@ impl Installation {
                     .arg(&stage),
                 Some(&log),
             )?;
+            prune_stale_resources(&stage)?;
             patch(&stage, selected)?;
             sign(&stage, identity, &transaction)?;
             record.modified_hash = Some(fingerprint(&stage)?);
@@ -931,6 +947,37 @@ mod tests {
         info.as_dictionary_mut().unwrap().remove("ElectronAsarIntegrity");
         info.to_file_xml(app.join("Contents/Info.plist")).unwrap();
         assert!(inspect(&app).is_err());
+    }
+
+    #[test]
+    fn stale_loose_resources_are_pruned_only_beside_packed_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Claude.app");
+        let resources = app.join("Contents/Resources");
+        fs::create_dir_all(resources.join("ion-dist/assets/v1")).unwrap();
+        fs::write(resources.join("ion-dist/assets/v1/chunk.js"), "old").unwrap();
+        prune_stale_resources(&app).unwrap();
+        assert!(resources.join("ion-dist").is_dir());
+        fs::write(app.join(structure::PACKED), "asar").unwrap();
+        prune_stale_resources(&app).unwrap();
+        assert!(!resources.join("ion-dist").try_exists().unwrap());
+        assert!(app.join(structure::PACKED).is_file());
+        prune_stale_resources(&app).unwrap();
+        assert!(app.join(structure::PACKED).is_file());
+    }
+
+    #[test]
+    fn stale_resource_pruning_refuses_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = dir.path().join("Claude.app");
+        let resources = app.join("Contents/Resources");
+        fs::create_dir_all(&resources).unwrap();
+        fs::write(app.join(structure::PACKED), "asar").unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, resources.join("ion-dist")).unwrap();
+        assert!(prune_stale_resources(&app).is_err());
+        assert!(elsewhere.is_dir());
     }
 
     #[test]

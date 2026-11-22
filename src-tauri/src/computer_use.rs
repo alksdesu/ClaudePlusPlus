@@ -1,9 +1,11 @@
 #[cfg(any(test, windows, target_os = "macos"))]
 mod asar;
-#[cfg(any(test, windows))]
+#[cfg(any(test, windows, target_os = "macos"))]
 pub(crate) mod assets;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::fingerprint as fingerprint_bundle;
 #[cfg(any(test, target_os = "macos"))]
 mod macos_recipe;
 pub mod native;

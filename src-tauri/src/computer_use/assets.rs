@@ -49,7 +49,7 @@ impl Resources {
         Self::at(app.join("resources"))
     }
 
-    fn at(resources: PathBuf) -> Result<Self> {
+    pub(crate) fn at(resources: PathBuf) -> Result<Self> {
         plain(&resources, true)?;
         let packed = resources.join("ion-dist.asar");
         if packed.try_exists()? {
@@ -253,6 +253,21 @@ mod tests {
             }
         }
         dir
+    }
+
+    #[test]
+    fn packed_resources_allow_a_loose_html_entry() {
+        let dir = fixture(true);
+        let loose = dir.path().join(LOOSE);
+        fs::create_dir(&loose).unwrap();
+        fs::write(loose.join("index.html"), b"<html></html>").unwrap();
+        let mut resources = Resources::open(dir.path()).unwrap();
+        assert!(resources.packed());
+        assert!(resources.fast_state().unwrap().is_some());
+        assert!(resources.language().unwrap().is_some());
+        resources.apply(Selection { chinese: true, fast_mode_status: true, ..Default::default() }, dir.path()).unwrap();
+        assert_eq!(fs::read(loose.join("index.html")).unwrap(), b"<html></html>");
+        assert!(Resources::open(dir.path()).unwrap().catalogs_present().unwrap());
     }
 
     #[test]

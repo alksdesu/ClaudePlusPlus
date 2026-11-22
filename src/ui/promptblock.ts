@@ -17,7 +17,7 @@ export const promptSegments: PromptSegment[] = [
   { id: "injection_warning", label: "防注入提醒", detail: "怀疑工具结果有 prompt injection 要先报告用户。" },
   { id: "zct_denial", label: "权限拒绝回执说教", detail: "“别恶意绕过拒绝”一段；“停下来问用户”的三个后缀保留。" },
   { id: "refusal_nudge", label: "截停恢复禁令句", detail: "只抹“不得改写重产”三处禁令，被截停与工具未执行的事实说明保留。" },
-  { id: "heron_brook", label: "服务端动态提示词通道", detail: "statsig 键改成废名，heron_brook / brook_heron 下发直接落空。" },
+  { id: "heron_brook", label: "服务端动态提示词通道", detail: "屏蔽 heron_brook / brook_heron 的远端文本入口。" },
 ];
 
 const stateMeta: Record<PromptBlockState, { label: string; cls: string }> = {
@@ -27,14 +27,16 @@ const stateMeta: Record<PromptBlockState, { label: string; cls: string }> = {
   damaged: { label: "位点对不上", cls: "pill-tombstone" },
   broken: { label: "目录异常", cls: "pill-tombstone" },
   missing: { label: "安装已消失", cls: "pill-foreign" },
+  legacy: { label: "可升级屏蔽", cls: "pill-pending" },
+  unsupported: { label: "结构待适配", cls: "pill-foreign" },
 };
 
 export function applyTargets(installs: PromptBlockInstall[]): PromptBlockInstall[] {
-  return installs.filter((i) => i.state === "pristine" || i.state === "updated");
+  return installs.filter((i) => i.state === "pristine" || i.state === "updated" || i.state === "legacy");
 }
 
 function installBlocked(install: PromptBlockInstall, desktopRunning: boolean): boolean {
-  return install.id === "bundled" && desktopRunning;
+  return install.id.startsWith("bundled") && desktopRunning;
 }
 
 function installCard(install: PromptBlockInstall, busy: boolean, desktopRunning: boolean): string {
@@ -42,7 +44,7 @@ function installCard(install: PromptBlockInstall, busy: boolean, desktopRunning:
   const hitTotal = Object.values(install.segmentHits).reduce((n, c) => n + c, 0);
   const blocked = installBlocked(install, desktopRunning);
   const disabled = busy || blocked ? "disabled" : "";
-  const canApply = install.state === "pristine" || install.state === "updated";
+  const canApply = applyTargets([install]).length > 0;
   const canRestore = install.appliedAt !== null;
   return `<div class="card" data-install="${esc(install.id)}">
     <div class="card-title">
@@ -52,13 +54,14 @@ function installCard(install: PromptBlockInstall, busy: boolean, desktopRunning:
     <div class="card-meta">
       <span>版本 <span class="mono">${esc(install.cliVersion ?? "—")}</span></span>
       <span class="mono">${esc(install.exePath)}</span>
-      ${install.appliedAt ? `<span>屏蔽于 ${esc(install.appliedAt)}${hitTotal ? `，覆写 ${hitTotal} 处` : ""}</span>` : ""}
+      ${hitTotal ? `<span>已识别 ${Object.keys(install.segmentHits).length} 类提示词，共 ${hitTotal} 处文本</span>` : ""}
+      ${install.state === "legacy" ? "<span>当前已安装 heron 屏蔽，其他已识别项目可通过升级应用。</span>" : install.appliedAt ? `<span>屏蔽于 ${esc(install.appliedAt)}${hitTotal ? `，覆写 ${hitTotal} 处` : ""}</span>` : ""}
       ${install.note ? `<span>${esc(install.note)}</span>` : ""}
       ${blocked ? "<span>Desktop 开着，先退出才能改这份 CLI</span>" : ""}
     </div>
     <div class="computer-use-actions">
       ${canApply ? `<button class="btn btn-primary" data-action="promptblock-apply" ${disabled}>屏蔽注入段</button>` : ""}
-      ${canRestore ? `<button class="btn btn-secondary" data-action="promptblock-restore" ${disabled}>${install.state === "patched" ? "还原官方内容" : "清除记录"}</button>` : ""}
+      ${canRestore ? `<button class="btn btn-secondary" data-action="promptblock-restore" ${disabled}>${install.state === "patched" || install.state === "legacy" ? "还原官方内容" : "清除记录"}</button>` : ""}
     </div>
   </div>`;
 }
@@ -73,7 +76,7 @@ export function renderPromptBlock(state: AppState): string {
       <div>
         <div class="eyebrow">PROMPT BLOCK</div>
         <h1>把注入的限制提示词关掉</h1>
-        <p class="lead">同长度覆写 CLI exe 里的限制段，行为引导与管线消息保持原样。每处都记了原字节，随时还原。</p>
+        <p class="lead">管理本机 Claude Code 的提示词屏蔽，修改前备份，支持还原。</p>
       </div>
       <div class="head-actions">
         <button class="btn btn-secondary" data-action="refresh" ${state.busy ? "disabled" : ""}>重新扫描</button>
@@ -84,15 +87,15 @@ export function renderPromptBlock(state: AppState): string {
     return `<div class="view">${head}<div class="empty-note">屏蔽状态读取失败，请重新扫描</div></div>`;
   }
   if (!status.supported) {
-    return `<div class="view">${head}<div class="banner">当前系统还没适配，先做了 Windows。</div></div>`;
+    return `<div class="view">${head}<div class="banner">当前系统尚未适配提示词屏蔽。</div></div>`;
   }
   const cards = status.installs.map((i) => installCard(i, state.busy, desktopRunning)).join("");
   return `<div class="view">
     ${head}
-    ${desktopRunning && status.installs.some((i) => i.id === "bundled") ? '<div class="banner">Desktop 开着，自带 CLI 要等它退出后才能应用或还原。</div>' : ""}
+    ${desktopRunning && status.installs.some((i) => i.id.startsWith("bundled")) ? '<div class="banner">Desktop 开着，自带 CLI 要等它退出后才能应用或还原。</div>' : ""}
     <section class="column-section">
       <div class="eyebrow">CLI 安装</div>
-      ${cards || '<div class="empty-note">没找到 Claude Code CLI（Desktop 自带或 npm 全局）。</div>'}
+      ${cards || '<div class="empty-note">没找到 Claude Code CLI（Desktop 自带、原生安装或 npm 全局）。</div>'}
     </section>
     <section class="column-section">
       <div class="eyebrow">屏蔽的注入段</div>
@@ -105,7 +108,8 @@ export function renderPromptBlock(state: AppState): string {
     <section class="column-section">
       <div class="eyebrow">边界</div>
       <div class="card"><div class="card-meta">
-        <span>只改本机 exe 里的提示词文本；服务端分类器、计费与权限校验照常。</span>
+        <span>各版本包含的提示词不同，以安装卡片识别出的项目为准。</span>
+        ${status.platform === "macos" ? "<span>macOS 会备份完整 CLI 应用并重新签名。重新启动会话后生效，旧提示词快照会重新生成。</span>" : ""}
         <span>finishing_work、willow_tern 等行为引导段和重试、续写等管线消息不动。</span>
         <span>CLI 或 Desktop 更新后补丁随旧文件消失，回这页重新应用即可。</span>
       </div></div>
