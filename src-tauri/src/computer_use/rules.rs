@@ -287,19 +287,127 @@ fn patch_config(text: &str, platform: Platform, mask: u8) -> Result<String> {
 rule!(
     prewarm_entry,
     concat!(
-        r#"async sparePrewarmSupport\(\)\{if\(!(?P<flags>[\w$]+(?:\.[\w$]+)?)\("4237076858"\)(?:\|\|[\w$]+(?:\.[\w$]+)?\(\))?\)"#,
-        r#"return\{unsupported:"gate_off"\};"#,
+        r#"async sparePrewarmSupport\(\)\{(?:if\(!(?P<flags>[\w$]+(?:\.[\w$]+)?)\("4237076858"\)(?:\|\|[\w$]+(?:\.[\w$]+)?\(\))?\)"#,
+        r#"return\{unsupported:"gate_off"\};|if\(![\w$]+(?:\.[\w$]+)?\(\)\)return\{unsupported:"flags_not_loaded"\};"#,
+        r#"if\([\w$]+(?:\.[\w$]+)?\(\)\)return\{unsupported:"connector_names"\};)"#,
         r#"(?P<gate>if\((?P<deploy>[\w$]+(?:\.[\w$]+)?)\(\)\.type!=="1p"\)return\{unsupported:"third_party"\};)?"#,
     )
 );
 
+pub fn prewarm_uses_rollout(text: &str) -> Result<bool> {
+    Ok(only(prewarm_entry(), text, &[], "原生预热入口")?.name("flags").is_some())
+}
+
+rule!(
+    prewarm_delegate,
+    concat!(
+        r"^let (?P<result>[\w$]+)=await (?P<module>[\w$]+)\.backgroundStartSupport\(\);",
+        r"return (?P<r2>[\w$]+)\.refused\?\{unsupported:(?P<r3>[\w$]+)\.refused\}:",
+        r"\{unsupported:void 0,orgLauncher:(?P<r4>[\w$]+)\.orgLauncher\}\}"
+    )
+);
+
+pub fn prewarm_helper(text: &str) -> Result<Option<String>> {
+    let entry = only(prewarm_entry(), text, &[], "原生预热入口")?;
+    let span = entry.get(0).context("预热入口范围缺失")?;
+    let end = body_end(text, span.start() + "async sparePrewarmSupport()".len())?;
+    let tail = &text[span.end()..end];
+    if !tail.contains("backgroundStartSupport") {
+        return Ok(None);
+    }
+    ensure!(entry.name("gate").is_none(), "预热门槛同时出现在本地和共享模块");
+    let call = only(prewarm_delegate(), tail, &[&["result", "r2", "r3", "r4"]], "预热共享调用")?;
+    module_file(text, &call["module"]).map(Some)
+}
+
+fn module_file(text: &str, module: &str) -> Result<String> {
+    let binding = Regex::new(&format!(
+        r#"(?:\b(?:var|let|const) |,){}=require\("\./(?P<file>index[\w.-]*\.js)"\)"#,
+        regex::escape(module)
+    ))?;
+    let source = only(&binding, text, &[], "预热共享模块引用")?;
+    Ok(source["file"].to_owned())
+}
+
+rule!(
+    prewarm_claim_call,
+    concat!(
+        r"options:(?P<module>[\w$]+)\.[\w$]+\((?P<args>[\w$]+)\.sdkOptions,",
+        r"\{userAdditionalDirectories:(?P<a2>[\w$]+)\.userAdditionalDirectories,bootModel:[\w$]+\.bootModel\}\)"
+    )
+);
+
+pub fn prewarm_claim_helper(text: &str) -> Result<Option<String>> {
+    if prewarm_helper(text)?.is_none() { return Ok(None); }
+    let call = only(prewarm_claim_call(), text, &[&["args", "a2"]], "预热接管参数调用")?;
+    module_file(text, &call["module"]).map(Some)
+}
+
+rule!(
+    prewarm_claim_env,
+    concat!(
+        r"for\(let (?P<key>[\w$]+) of (?P<allowed>[\w$]+)\)\{let (?P<value>[\w$]+)=(?P<options>[\w$]+)\.env\?\.\[(?P<k2>[\w$]+)\];",
+        r#"typeof (?P<v2>[\w$]+)=="string"(?P<skip>&&\([^;]{1,400}\))?&&\((?P<env>[\w$]+)\[(?P<k3>[\w$]+)\]=(?P<v3>[\w$]+)\)\}return\{cwd:(?P<o2>[\w$]+)\.cwd"#
+    )
+);
+
+fn claim_env_parts(text: &str) -> Result<Captures<'_>> {
+    let caps = only(prewarm_claim_env(), text, &[&["key", "k2", "k3"], &["value", "v2", "v3"], &["options", "o2"]], "预热接管环境")?;
+    let list = format!(r#"{}=["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_HOST_SESSION_ID"]"#, &caps["allowed"]);
+    ensure!(text.matches(&list).count() == 1, "预热接管环境白名单已变化");
+    Ok(caps)
+}
+
+fn claim_env_filter(caps: &Captures<'_>) -> String {
+    let options = &caps["options"];
+    format!(
+        r#"&&({}!=="CLAUDE_CODE_OAUTH_TOKEN"||{}!==""||{options}.env?.CLAUDE_CODE_ENTRYPOINT!=="claude-desktop-3p"||!{options}.env?.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST||!{options}.env?.CLAUDE_CODE_HOST_AUTH_ENV_VAR)"#,
+        &caps["key"], &caps["value"]
+    )
+}
+
+pub fn prewarm_claim_installed(text: &str) -> Result<bool> {
+    let caps = claim_env_parts(text)?;
+    if let Some(skip) = caps.name("skip") {
+        ensure!(skip.as_str() == claim_env_filter(&caps), "预热接管环境补丁引用不一致");
+        Ok(true)
+    } else { Ok(false) }
+}
+
+pub fn patch_prewarm_claim(text: &str) -> Result<String> {
+    ensure!(!prewarm_claim_installed(text)?, "预热接管环境已适配");
+    let caps = claim_env_parts(text)?;
+    let at = caps.name("v2").context("预热接管环境范围缺失")?.end() + "==\"string\"".len();
+    Ok(splice(text, &mut vec![(at, at, claim_env_filter(&caps))]))
+}
+
+rule!(
+    background_start,
+    concat!(
+        r"async function (?P<name>[\w$]+)\(\)\{",
+        r#"(?P<gate>if\([\w$]+(?:\.[\w$]+)?\(\)\.type!=="1p"\)return\{refused:"third_party"\};)?"#,
+        r"let (?P<policy>[\w$]+);try\{(?P<p2>[\w$]+)=await (?P<module>[\w$]+)\.[\w$]+\(\)\}",
+        r#"catch\{return\{refused:"org_launcher"\}\}return (?P<m2>[\w$]+)\.[\w$]+\((?P<p3>[\w$]+)\)\?"#,
+        r#"\{refused:"org_launcher"\}:\{refused:void 0,orgLauncher:(?P<p4>[\w$]+)\}\}"#,
+        r"exports\.backgroundStartSupport=(?P<export>[\w$]+);"
+    )
+);
+
+fn prewarm_gate(text: &str) -> Result<Captures<'_>> {
+    if text.contains("exports.backgroundStartSupport=") {
+        return only(background_start(), text, &[&["name", "export"], &["policy", "p2", "p3", "p4"], &["module", "m2"]], "预热共享检查");
+    }
+    ensure!(prewarm_helper(text)?.is_none(), "预热检查位于共享模块，不能按本地入口判断");
+    only(prewarm_entry(), text, &[], "原生预热入口")
+}
+
 pub fn prewarm_installed(text: &str) -> Result<bool> {
-    let caps = only(prewarm_entry(), text, &[], "原生预热入口")?;
+    let caps = prewarm_gate(text)?;
     Ok(caps.name("gate").is_none())
 }
 
 pub fn patch_prewarm(text: &str) -> Result<String> {
-    let caps = only(prewarm_entry(), text, &[], "原生预热入口")?;
+    let caps = prewarm_gate(text)?;
     let gate = caps.name("gate").context("原生预热门槛已移除")?;
     let mut edits = vec![(gate.start(), gate.end(), String::new())];
     Ok(splice(text, &mut edits))
@@ -314,9 +422,10 @@ rule!(
     fast_emit,
     concat!(
         r"(?P<g>[\w$]+)=\{id:(?P<model>[\w$]+)\.id,name:[\w$]+,description:[\w$]+,",
-        r"thinking:[\w$]+\((?P<surface>[\w$]+),(?P<model2>[\w$]+)\.id,[\w$]+\),",
+        r"thinking:[\w$]+\((?P<surface>[\w$]+),(?P<model2>[\w$]+)\.id,(?P<settings>[\w$]+)\),",
         r#"(?P<added>\.\.\.(?P<surface2>[\w$]+)==="code"&&(?P<srv1>[\w$]+)\?\.fast_mode!==void 0&&"#,
         r"\{fast_mode:(?P<srv2>[\w$]+)\.fast_mode\},)?",
+        r#"(?P<fallback>\.\.\.[\w$]+==="code"&&[\w$]+\?\.fast_mode===void 0&&\["anthropic","gateway"\][^{};]{0,200}\{fast_mode:[^{};]{0,700}\},)?"#,
         r#"(?P<tail>\.\.\.[\w$]+!==void 0&&\{section:"overflow")"#,
     )
 );
@@ -324,11 +433,12 @@ rule!(
 rule!(
     fast_emit_conditional,
     concat!(
-        r"(?P<thinking>[\w$]+)=[\w$]+\((?P<surface>[\w$]+),(?P<model2>[\w$]+)\.id,[\w$]+\),",
+        r"(?P<thinking>[\w$]+)=[\w$]+\((?P<surface>[\w$]+),(?P<model2>[\w$]+)\.id,(?P<settings>[\w$]+)\),",
         r"(?P<g>[\w$]+)=\{id:(?P<model>[\w$]+)\.id,name:[\w$]+,description:[\w$]+,",
         r"thinking:[\w$]+\?[\w$]+\((?P<thinking2>[\w$]+)\):(?P<thinking3>[\w$]+),",
         r#"(?P<added>\.\.\.(?P<surface2>[\w$]+)==="code"&&(?P<srv1>[\w$]+)\?\.fast_mode!==void 0&&"#,
         r"\{fast_mode:(?P<srv2>[\w$]+)\.fast_mode\},)?",
+        r#"(?P<fallback>\.\.\.[\w$]+==="code"&&[\w$]+\?\.fast_mode===void 0&&\["anthropic","gateway"\][^{};]{0,200}\{fast_mode:[^{};]{0,700}\},)?"#,
         r#"(?P<tail>\.\.\.[\w$]+!==void 0&&\{section:"overflow")"#,
     )
 );
@@ -363,6 +473,36 @@ rule!(
 
 rule!(local_spawn, r"(?P<acc>[\w$]+)\(\)\.allowsLocalSpawn");
 
+rule!(
+    fast_catalog,
+    concat!(
+        r#"var (?P<name>[\w$]+)=\{\$schema:"https://downloads\.claude\.ai/model-catalog/v1/schema\.json",schema_version:1,"#,
+        r#"[^{};]{0,400}surfaces:JSON\.parse\('"#,
+    )
+);
+
+fn fast_catalog_name(text: &str) -> Result<Option<String>> {
+    let hits: Vec<_> = fast_catalog().captures_iter(text).collect();
+    ensure!(hits.len() <= 1, "官方模型目录不唯一");
+    let Some(caps) = hits.first() else { return Ok(None) };
+    let start = caps.get(0).context("官方模型目录范围缺失")?.end();
+    let bytes = text.as_bytes();
+    let mut end = start;
+    while end < bytes.len() && bytes[end] != b'\'' {
+        end += if bytes[end] == b'\\' { 2 } else { 1 };
+    }
+    ensure!(end < bytes.len(), "官方模型目录字符串未闭合");
+    let raw = text[start..end].replace("\\'", "'");
+    let catalog: serde_json::Value = serde_json::from_str(&raw).context("官方模型目录格式已变化")?;
+    let configs = catalog.pointer("/ccd/model_selector_config")
+        .and_then(serde_json::Value::as_array).context("官方 Desktop 模型目录缺失")?;
+    let rows: Vec<_> = configs.iter().filter(|row| row["id"] == "ccd").collect();
+    ensure!(rows.len() == 1, "官方 Desktop 模型目录不唯一");
+    let models = rows[0]["models"].as_array().context("官方模型列表缺失")?;
+    ensure!(models.iter().any(|model| model.pointer("/fast_mode/type").and_then(serde_json::Value::as_str) == Some("toggle")), "官方目录没有 Fast 控件定义");
+    Ok(Some(caps["name"].to_owned()))
+}
+
 /// 能力访问器在全文多处出现，名字必须一致才敢回填
 fn accessor(text: &str) -> Result<String> {
     let mut names: Vec<_> = local_spawn()
@@ -393,6 +533,20 @@ struct FastParts<'t> {
     server: String,
     capability: Captures<'t>,
     project: Captures<'t>,
+}
+
+fn fast_catalog_fallback(text: &str, parts: &FastParts<'_>) -> Result<String> {
+    let Some(catalog) = fast_catalog_name(text)? else { return Ok(String::new()) };
+    let row = free_name(&parts.emit["model"], "")?;
+    Ok(format!(
+        concat!(
+            "...{}===\"code\"&&{}?.fast_mode===void 0&&[\"anthropic\",\"gateway\"].includes({}.provider)&&{{fast_mode:",
+            "{}.surfaces.ccd.model_selector_config.find({row}=>{row}.id===\"ccd\")?.models.find({row}=>{row}.id===",
+            r#"{}.id.replace(/^anthropic\//i,"").replace(/\[1m\]$/i,"").replace(/(\d)\.(\d)/g,"$1-$2"))?.fast_mode}},"#,
+        ),
+        &parts.emit["surface"], parts.server, &parts.emit["settings"], catalog, &parts.emit["model"],
+        row = row,
+    ))
 }
 
 fn fast_parts<'t>(text: &'t str) -> Result<FastParts<'t>> {
@@ -442,6 +596,9 @@ pub fn fast_main_installed(text: &str) -> Result<Option<bool>> {
         flags.iter().all(|f| *f) || flags.iter().all(|f| !f),
         "Fast 原生映射只改了一部分"
     );
+    if let Some(fallback) = parts.emit.name("fallback") {
+        ensure!(flags[0] && fallback.as_str() == fast_catalog_fallback(text, &parts)?, "Fast 官方目录映射不一致");
+    }
     if !flags[0] {
         return Ok(Some(false));
     }
@@ -467,6 +624,12 @@ pub fn fast_main_installed(text: &str) -> Result<Option<bool>> {
     Ok(Some(true))
 }
 
+pub fn fast_main_upgrade_needed(text: &str) -> Result<bool> {
+    Ok(fast_main_installed(text)? == Some(true)
+        && fast_catalog_name(text)?.is_some()
+        && fast_parts(text)?.emit.name("fallback").is_none())
+}
+
 pub fn patch_fast_main(text: &str) -> Result<String> {
     ensure!(
         fast_main_installed(text)?.context("当前主进程没有 Fast 能力映射")? == false,
@@ -485,8 +648,9 @@ pub fn patch_fast_main(text: &str) -> Result<String> {
             emit.start(),
             emit.start(),
             format!(
-                "...{}===\"code\"&&{}?.fast_mode!==void 0&&{{fast_mode:{}.fast_mode}},",
-                &parts.emit["surface"], parts.server, parts.server
+                "...{}===\"code\"&&{}?.fast_mode!==void 0&&{{fast_mode:{}.fast_mode}},{fallback}",
+                &parts.emit["surface"], parts.server, parts.server,
+                fallback = fast_catalog_fallback(text, &parts)?
             ),
         ),
         (
@@ -565,6 +729,77 @@ pub fn patch_fast_state(text: &str) -> Result<String> {
         format!("{local}&&[\"on\",\"off\",\"cooldown\"].includes({st})?{st}!==\"off\":"),
     )];
     Ok(splice(text, &mut edits))
+}
+
+rule!(
+    fast_model_lookup,
+    concat!(
+        r"fastModeFor:(?P<arg>[\w$]+)=>\{let (?P<value>[\w$]+)=",
+        r"(?P<expr>(?P<lookup>[\w$]+)\((?P<input>[\w$]+)\)|",
+        r#"\((?P<lookup2>[\w$]+)\((?P<input2>[\w$]+)\)\?\?(?P<lookup3>[\w$]+)\((?P<input3>[\w$]+)\+"\[1m\]"\)\))"#,
+        r#"\?\.fast_mode;return (?P<value2>[\w$]+)\?\.type==="toggle""#,
+    )
+);
+
+fn fast_lookup_parts(text: &str) -> Result<Captures<'_>> {
+    let caps = only(fast_model_lookup(), text, &[&["value", "value2"]], "Fast 模型查找入口")?;
+    if caps.name("lookup").is_some() {
+        ensure!(caps["arg"] == caps["input"], "Fast 模型查找参数不一致");
+    } else {
+        ensure!(caps["arg"] == caps["input2"] && caps["arg"] == caps["input3"]
+            && caps["lookup2"] == caps["lookup3"], "Fast 模型查找参数不一致");
+    }
+    Ok(caps)
+}
+
+pub fn fast_model_lookup_installed(text: &str) -> Result<bool> {
+    Ok(fast_lookup_parts(text)?.name("lookup2").is_some())
+}
+
+pub fn patch_fast_model_lookup(text: &str) -> Result<String> {
+    let caps = fast_lookup_parts(text)?;
+    let lookup = caps.name("lookup").context("Fast 模型查找已适配")?.as_str();
+    let arg = &caps["arg"];
+    let span = caps.name("expr").context("Fast 模型查找范围缺失")?;
+    let mut edits = vec![(span.start(), span.end(), format!("({lookup}({arg})??{lookup}({arg}+\"[1m]\"))"))];
+    Ok(splice(text, &mut edits))
+}
+
+rule!(
+    fast_start,
+    concat!(
+        r"spawnSessionQuery\([\w$]+,[\w$]+,(?P<options>[\w$]+),(?P<flags>[\w$]+),",
+        r"[\w$]+,[\w$]+=\[\],[\w$]+=\[\],[\w$]+=\[\],[\w$]+,[\w$]+,[\w$]+\)\{",
+        r"(?P<added>typeof [^;]{1,400};)?using "
+    )
+);
+
+fn fast_start_settings(caps: &Captures<'_>) -> String {
+    let options = &caps["options"];
+    let flags = &caps["flags"];
+    format!(
+        "typeof {options}.settings===\"object\"&&typeof {options}.settings?.fastMode===\"boolean\"&&({flags}={{...{flags},fastMode:{options}.settings.fastMode}});"
+    )
+}
+
+pub fn fast_start_installed(text: &str) -> Result<Option<bool>> {
+    if !text.contains("spawnSessionQuery(") {
+        return Ok(None);
+    }
+    let caps = only(fast_start(), text, &[], "Fast 启动设置入口")?;
+    if let Some(added) = caps.name("added") {
+        ensure!(added.as_str() == fast_start_settings(&caps), "Fast 启动设置引用不一致");
+        Ok(Some(true))
+    } else {
+        Ok(Some(false))
+    }
+}
+
+pub fn patch_fast_start(text: &str) -> Result<String> {
+    ensure!(fast_start_installed(text)? == Some(false), "Fast 启动设置入口不可安装");
+    let caps = only(fast_start(), text, &[], "Fast 启动设置入口")?;
+    let at = caps.get(0).context("Fast 启动设置范围缺失")?.end() - "using ".len();
+    Ok(splice(text, &mut vec![(at, at, fast_start_settings(&caps))]))
 }
 
 const CHINESE: &str = ",\"zh-Hans\",\"zh-Hant\"";
@@ -923,6 +1158,30 @@ mod tests {
         assert!(!patched.contains("third_party"));
     }
 
+    #[test]
+    fn prewarm_without_rollout_preserves_readiness_and_launcher_checks() {
+        let source = concat!(
+            r#"async sparePrewarmSupport(){if(!t.ready())return{unsupported:"flags_not_loaded"};"#,
+            r#"if(t.connectors())return{unsupported:"connector_names"};"#,
+            r#"if(t.deployment().type!=="1p")return{unsupported:"third_party"};"#,
+            r#"let e;try{e=await launcher.read()}catch{return{unsupported:"org_launcher"}}"#,
+            r#"return launcher.blocked(e)?{unsupported:"org_launcher"}:{unsupported:void 0,orgLauncher:e}}"#,
+        );
+        assert!(!prewarm_uses_rollout(source).unwrap());
+        assert!(prewarm_uses_rollout(PREWARM_SOURCE).unwrap());
+        let patched = patch_prewarm(source).unwrap();
+        assert_eq!(patched, source.replace(
+            r#"if(t.deployment().type!=="1p")return{unsupported:"third_party"};"#, "",
+        ));
+        assert!(prewarm_installed(&patched).unwrap());
+        assert!(!prewarm_uses_rollout(&patched).unwrap());
+        assert!(patch_prewarm(&patched).is_err());
+        assert!(prewarm_installed(&format!("{source}{source}")).is_err());
+        for marker in ["flags_not_loaded", "connector_names"] {
+            assert!(patch_prewarm(&source.replace(marker, "unknown_gate")).is_err());
+        }
+    }
+
     fn fast_source() -> String {
         concat!(
             r#"let{model:i,catalog:a,hybrid:o,server:s,primaryId:l,label:u}=n;"#,
@@ -935,6 +1194,97 @@ mod tests {
             r#"var X={get allowsLocalSpawn(){return Xw().allowsLocalSpawn}};"#,
         )
         .to_string()
+    }
+
+    #[test]
+    fn delegated_prewarm_requires_the_referenced_module() {
+        let source = concat!(
+            r#"const bg=require("./index.helper.js");"#,
+            r#"async sparePrewarmSupport(){if(!t.ready())return{unsupported:"flags_not_loaded"};"#,
+            r#"if(t.connectors())return{unsupported:"connector_names"};"#,
+            "let result=await bg.backgroundStartSupport();return result.refused?",
+            "{unsupported:result.refused}:{unsupported:void 0,orgLauncher:result.orgLauncher}}"
+        );
+        assert_eq!(prewarm_helper(source).unwrap().as_deref(), Some("index.helper.js"));
+        assert!(!prewarm_uses_rollout(source).unwrap());
+        assert!(prewarm_installed(source).is_err());
+        assert!(patch_prewarm(source).is_err());
+        for changed in [
+            source.replace("index.helper.js", "../other.js"),
+            source.replace("orgLauncher:result", "orgLauncher:other"),
+            source.replace("bg.backgroundStartSupport()", "other.backgroundStartSupport()"),
+            format!(r#"{source}const bg=require("./index.second.js");"#),
+        ] {
+            assert!(prewarm_helper(&changed).is_err());
+        }
+    }
+
+    #[test]
+    fn prewarm_claim_omits_only_the_empty_host_managed_third_party_token() {
+        let source = concat!(
+            r#"const allowed=["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_HOST_SESSION_ID"];"#,
+            "function claim(e){let i={};for(let t of allowed){let n=e.env?.[t];",
+            r#"typeof n=="string"&&(i[t]=n)}return{cwd:e.cwd,env:i}}"#
+        );
+        assert!(!prewarm_claim_installed(source).unwrap());
+        let patched = patch_prewarm_claim(source).unwrap();
+        assert!(prewarm_claim_installed(&patched).unwrap());
+        assert!(patch_prewarm_claim(&patched).is_err());
+        assert!(prewarm_claim_installed(&patched.replace("e.env?.CLAUDE_CODE_ENTRYPOINT", "other.env?.CLAUDE_CODE_ENTRYPOINT")).is_err());
+        let script = format!(r#"
+            const assert=require('node:assert/strict');{patched}
+            const env={{CLAUDE_CODE_OAUTH_TOKEN:'',CLAUDE_CODE_ENTRYPOINT:'claude-desktop-3p',CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST:'1',CLAUDE_CODE_HOST_AUTH_ENV_VAR:'ANTHROPIC_AUTH_TOKEN',CLAUDE_CODE_HOST_SESSION_ID:'session',CLAUDE_CODE_SESSION_ACCESS_TOKEN:'access',ANTHROPIC_AUTH_TOKEN:'provider'}};
+            const run=change=>claim({{cwd:'/test',env:{{...env,...change}}}}).env;
+            assert.deepEqual(run({{}}),{{CLAUDE_CODE_HOST_SESSION_ID:'session',CLAUDE_CODE_SESSION_ACCESS_TOKEN:'access'}});
+            assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN,'');
+            for(const change of [{{CLAUDE_CODE_ENTRYPOINT:'claude-desktop'}},{{CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST:''}},{{CLAUDE_CODE_HOST_AUTH_ENV_VAR:undefined}}])assert.equal(run(change).CLAUDE_CODE_OAUTH_TOKEN,'');
+            assert.equal(run({{CLAUDE_CODE_OAUTH_TOKEN:'real-token'}}).CLAUDE_CODE_OAUTH_TOKEN,'real-token');
+            assert.deepEqual(claim({{cwd:'/test'}}).env,{{}});
+        "#);
+        let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn shared_prewarm_preserves_launcher_policy_and_failures() {
+        let source = concat!(
+            r#"async function start(){if(deployment().type!=="1p")return{refused:"third_party"};"#,
+            r#"let policy;try{policy=await launcher.read()}catch{return{refused:"org_launcher"}}"#,
+            r#"return launcher.blocked(policy)?{refused:"org_launcher"}:{refused:void 0,orgLauncher:policy}}"#,
+            "exports.backgroundStartSupport=start;"
+        );
+        assert!(!prewarm_installed(source).unwrap());
+        let patched = patch_prewarm(source).unwrap();
+        assert!(prewarm_installed(&patched).unwrap());
+        assert!(patch_prewarm(&patched).is_err());
+        assert!(prewarm_installed(&patched.replace("Support=start", "Support=other")).is_err());
+        assert!(prewarm_installed(&source.replace("launcher.blocked", "other.blocked")).is_err());
+        let script = format!(r#"
+            const assert=require('node:assert/strict');
+            async function run(source,type,blocked,throws){{
+                const exports={{}},policy={{id:'policy'}},calls=[];
+                new Function('exports','deployment','launcher',source)(exports,()=>({{type}}),{{
+                    read:async()=>{{calls.push('read');if(throws)throw Error('unavailable');return policy}},
+                    blocked:value=>{{assert.strictEqual(value,policy);calls.push('check');return blocked}}
+                }});
+                return {{result:await exports.backgroundStartSupport(),calls,policy}};
+            }}
+            (async()=>{{
+                const original={original},patched={patched};
+                const denied=await run(original,'3p',false,false);
+                assert.equal(denied.result.refused,'third_party');assert.deepEqual(denied.calls,[]);
+                for(const type of ['1p','3p']){{
+                    const allowed=await run(patched,type,false,false);
+                    assert.strictEqual(allowed.result.orgLauncher,allowed.policy);
+                    assert.equal(allowed.result.refused,undefined);
+                    assert.deepEqual(allowed.calls,['read','check']);
+                    assert.equal((await run(patched,type,true,false)).result.refused,'org_launcher');
+                    assert.equal((await run(patched,type,false,true)).result.refused,'org_launcher');
+                }}
+            }})().catch(error=>{{console.error(error);process.exitCode=1}});
+        "#, original=serde_json::to_string(source).unwrap(),patched=serde_json::to_string(&patched).unwrap());
+        let output = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
 
     #[test]
@@ -965,6 +1315,109 @@ mod tests {
         assert_eq!(fast_main_installed(&patched).unwrap(), Some(true));
         assert!(patched.contains(r#"...t==="code"&&s?.fast_mode!==void 0&&{fast_mode:s.fast_mode},"#));
         assert!(fast_main_installed(&source.replace("thinking:r?f(q):q", "thinking:r?f(other):q")).is_err());
+    }
+
+    #[test]
+    fn fast_start_forwards_choices_before_the_session_exists_without_replacing_other_settings() {
+        let source = "spawnSessionQuery(e,n,r,i,a,o=[],s=[],c=[],l,u,d){using f=span();return i}";
+        assert_eq!(fast_start_installed(source).unwrap(), Some(false));
+        let patched = patch_fast_start(source).unwrap();
+        assert_eq!(fast_start_installed(&patched).unwrap(), Some(true));
+        assert!(patch_fast_start(&patched).is_err());
+        assert!(fast_start_installed(&patched.replace("fastMode:r.settings.fastMode", "fastMode:other.settings.fastMode")).is_err());
+        assert!(fast_start_installed(&format!("{source}{source}")).is_err());
+        let method = patched.replace("using f=span();", "");
+        let script = format!(r#"
+            const assert=require('node:assert/strict'),manager={{{method}}};
+            const initial={{permissions:{{ask:['Write']}},env:{{EXISTING:'1'}}}};
+            const run=settings=>manager.spawnSessionQuery(null,null,{{settings}},initial,null,[],[],[],null,null,{{session:undefined}});
+            for (const fastMode of [true,false]){{
+                const result=run({{fastMode}});
+                assert.equal(result.fastMode,fastMode);
+                assert.strictEqual(result.permissions,initial.permissions);
+                assert.strictEqual(result.env,initial.env);
+            }}
+            for (const settings of [undefined,null,'settings.json',{{}},{{fastMode:'true'}}])assert.strictEqual(run(settings),initial);
+            assert.equal(initial.fastMode,undefined);
+        "#);
+        let result = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+
+    fn catalog_source() -> String {
+        let fast = serde_json::json!({"type":"toggle","name":"Fast mode","options":[{"id":"fast"},{"id":"off"}]});
+        let catalog = serde_json::json!({"ccd":{"model_selector_config":[{"id":"ccd","models":[
+            {"id":"claude-opus-5-5","fast_mode":fast},
+            {"id":"claude-fable-5-2","fast_mode":fast},
+            {"id":"claude-sonnet-5-5"}
+        ]}]}});
+        format!(r#"var baked={{$schema:"https://downloads.claude.ai/model-catalog/v1/schema.json",schema_version:1,surfaces:JSON.parse('{catalog}')}};"#)
+    }
+
+    #[test]
+    fn fast_catalog_upgrade_preserves_old_installation_detection() {
+        let catalog = catalog_source();
+        let original = format!("{catalog}{}", fast_source());
+        let legacy = format!("{catalog}{}", patch_fast_main(&fast_source()).unwrap());
+        assert!(!fast_main_upgrade_needed(&original).unwrap());
+        assert!(fast_main_upgrade_needed(&legacy).unwrap());
+        let patched = patch_fast_main(&original).unwrap();
+        assert_eq!(fast_main_installed(&patched).unwrap(), Some(true));
+        assert!(!fast_main_upgrade_needed(&patched).unwrap());
+        assert!(fast_main_installed(&patched.replace("baked.surfaces.ccd", "foreign.surfaces.ccd")).is_err());
+        assert!(patch_fast_main(&format!("{catalog}{original}")).is_err());
+        assert!(patch_fast_main(&original.replace("model_selector_config", "unknown_config")).is_err());
+    }
+
+    #[test]
+    fn fast_catalog_reuses_official_controls_for_gateway_model_ids() {
+        let catalog = catalog_source();
+        let source = format!("{catalog}{}", fast_source());
+        let patched = patch_fast_main(&source).unwrap();
+        let parts = fast_parts(&patched).unwrap();
+        let spread = format!("{}{}", parts.emit.name("added").unwrap().as_str(), parts.emit.name("fallback").unwrap().as_str());
+        let script = format!(r#"
+            const assert=require('node:assert/strict');
+            {catalog}
+            const models=baked.surfaces.ccd.model_selector_config[0].models;
+            function pick(id,s,provider='gateway',t='code'){{let i={{id}},e={{provider}};return {{{spread}}}.fast_mode;}}
+            for (const [id,index] of [['anthropic/claude-opus-5.5',0],['anthropic/claude-fable-5.2[1m]',1],['claude-fable-5-2',1]]){{
+                assert.strictEqual(pick(id),models[index].fast_mode);
+                assert.strictEqual(pick(id,{{fast_mode:null}}),null);
+                const custom={{type:'toggle',name:'custom'}};
+                assert.strictEqual(pick(id,{{fast_mode:custom}}),custom);
+                assert.equal(pick(id,undefined,'bedrock'),undefined);
+                assert.equal(pick(id,undefined,'gateway','chat'),undefined);
+            }}
+            for (const id of ['anthropic/claude-sonnet-5.5','anthropic/claude-fable-5.1','other/claude-opus-5.5','anthropic/claude-opus-latest'])assert.equal(pick(id),undefined);
+        "#);
+        let result = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+
+    #[test]
+    fn fast_model_lookup_handles_catalogs_with_only_long_context_rows() {
+        let original = r#"const selector={fastModeFor:e=>{let t=g(e)?.fast_mode;return t?.type==="toggle"&&t.options?.some(e=>!!e.id&&e.id!=="off"&&!!e.name)?t:void 0}};"#;
+        let patched = patch_fast_model_lookup(original).unwrap();
+        assert!(!fast_model_lookup_installed(original).unwrap());
+        assert!(fast_model_lookup_installed(&patched).unwrap());
+        assert!(patch_fast_model_lookup(&patched).is_err());
+        assert!(fast_model_lookup_installed(&patched.replace("g(e+", "other(e+")).is_err());
+        let script = format!(r#"
+            const assert=require('node:assert/strict');
+            const rows=new Map(),g=e=>rows.get(e)??rows.get(e?.replace(/\[1m\]$/,''));
+            {patched}
+            const fast={{type:'toggle',options:[{{id:'fast',name:'Fast'}}]}};
+            rows.set('anthropic/claude-fable-5.2[1m]',{{fast_mode:fast}});
+            assert.strictEqual(selector.fastModeFor('anthropic/claude-fable-5.2'),fast);
+            assert.strictEqual(selector.fastModeFor('anthropic/claude-fable-5.2[1m]'),fast);
+            assert.equal(selector.fastModeFor('unknown'),undefined);
+            assert.equal(selector.fastModeFor(undefined),undefined);
+            rows.set('anthropic/claude-fable-5.2',{{fast_mode:null}});
+            assert.equal(selector.fastModeFor('anthropic/claude-fable-5.2'),undefined);
+        "#);
+        let result = std::process::Command::new("node").args(["-e", &script]).output().unwrap();
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     }
 
     const STATE_SOURCE: &str = concat!(
@@ -1138,10 +1591,26 @@ mod tests {
             assert_eq!(patched == main, mask == 0);
             if let Some(dir) = &output { std::fs::write(dir.join(format!("main-{mask}.cjs")), &patched).unwrap(); }
         }
-        let patched = patch_prewarm(&prewarm).unwrap();
-        assert!(!prewarm_installed(&prewarm).unwrap());
+        if let Some(name) = prewarm_claim_helper(&prewarm).unwrap() {
+            let path = std::path::PathBuf::from(std::env::var_os("CLAUDEPP_PREWARM").unwrap());
+            let source = std::fs::read_to_string(path.parent().unwrap().join(&name)).unwrap();
+            assert!(!prewarm_claim_installed(&source).unwrap());
+            let patched = patch_prewarm_claim(&source).unwrap();
+            assert!(prewarm_claim_installed(&patched).unwrap());
+            if let Some(dir) = &output { std::fs::write(dir.join(name).with_extension("cjs"), patched).unwrap(); }
+        }
+        let (name, gate) = match prewarm_helper(&prewarm).unwrap() {
+            Some(name) => {
+                let path = std::path::PathBuf::from(std::env::var_os("CLAUDEPP_PREWARM").unwrap());
+                let source = std::fs::read_to_string(path.parent().unwrap().join(&name)).unwrap();
+                (name, source)
+            }
+            None => ("prewarm.cjs".into(), prewarm),
+        };
+        let patched = patch_prewarm(&gate).unwrap();
+        assert!(!prewarm_installed(&gate).unwrap());
         assert!(prewarm_installed(&patched).unwrap());
-        if let Some(dir) = &output { std::fs::write(dir.join("prewarm.cjs"), patched).unwrap(); }
+        if let Some(dir) = &output { std::fs::write(dir.join(name).with_extension("cjs"), patched).unwrap(); }
     }
 
     #[test]

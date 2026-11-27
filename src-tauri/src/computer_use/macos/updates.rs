@@ -351,9 +351,11 @@ impl Controller {
             Err(error) => return Err(error),
         };
         let active = running(app)? || self.production && installer_running()?;
-        if j.phase == Phase::Watching && stamp != j.observed_stamp {
+        if j.phase == Phase::Watching
+            && (stamp != j.observed_stamp || j.adapter_version != env!("CARGO_PKG_VERSION"))
+        {
             j.phase = Phase::WaitingForReapply;
-            j.message = "Desktop 文件有变化，等它退出后检查".into();
+            j.message = "Desktop 或兼容规则有更新，等它退出后检查".into();
         }
         if j.phase == Phase::Unsupported
             && (j.attempted_stamp.as_deref() != Some(stamp.as_str())
@@ -690,6 +692,34 @@ mod tests {
         let _guard = c.lock().unwrap();
         assert!(c.tick().is_err());
         assert!(c.enable(false).is_err());
+    }
+
+    #[test]
+    fn adapter_update_waits_for_a_running_desktop() {
+        let (_dir, c, mut j) = fixture();
+        let app = &c.installation.app;
+        fs::create_dir_all(app.join("Contents/_CodeSignature")).unwrap();
+        fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        fs::write(app.join("Contents/Info.plist"), "original").unwrap();
+        fs::write(app.join("Contents/_CodeSignature/CodeResources"), "original").unwrap();
+        let executable = app.join("Contents/MacOS/Claude");
+        fs::copy("/bin/sleep", &executable).unwrap();
+        j.phase = Phase::Watching;
+        j.observed_stamp = bundle_stamp(app).unwrap();
+        j.adapter_version = "previous".into();
+        let desired = j.desired;
+        let mut child = Command::new(executable).arg("30").spawn().unwrap();
+        let result = c.advance(&mut j);
+        let _ = child.kill();
+        let _ = child.wait();
+        result.unwrap();
+        assert_eq!(j.phase, Phase::WaitingForReapply);
+        assert_eq!(j.desired, desired);
+        assert_eq!(bundle_stamp(app).unwrap(), j.observed_stamp);
+        j.phase = Phase::Watching;
+        j.adapter_version = env!("CARGO_PKG_VERSION").into();
+        c.advance(&mut j).unwrap();
+        assert_eq!(j.phase, Phase::Watching);
     }
 
     #[test]

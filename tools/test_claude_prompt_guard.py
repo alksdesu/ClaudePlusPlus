@@ -9,7 +9,7 @@ ROOT = None
 MARKER = 'CPP_HERON_PROBE_REMOTE_TEXT_7810'
 
 
-def run(binary, label, source, model="claude-opus-5-5", profile=None, resume=None, persist=False, entrypoint="cli"):
+def run(binary, label, source, model="claude-opus-5-5", profile=None, resume=None, persist=False, entrypoint="cli", settings=None, extra_env=None):
     import time
     started = time.monotonic()
     requests = []
@@ -28,7 +28,7 @@ def run(binary, label, source, model="claude-opus-5-5", profile=None, resume=Non
                 body = {'input_tokens': 1}
             else:
                 system = json.dumps(data.get('system'), ensure_ascii=False)
-                requests.append({'path': self.path, 'markerPresent': MARKER in system, 'haikuGuidance': 'The reasoning effort setting changes how much you think before you act' in system, 'systemChars': len(system), 'model': data.get('model')})
+                requests.append({'path': self.path, 'markerPresent': MARKER in system, 'haikuGuidance': 'The reasoning effort setting changes how much you think before you act' in system, 'systemChars': len(system), 'model': data.get('model'), 'speed': data.get('speed')})
                 body = {'id': 'msg_cpp_probe', 'type': 'message', 'role': 'assistant', 'model': data.get('model', 'claude-opus-5-5'), 'content': [{'type': 'text', 'text': 'OK'}], 'stop_reason': 'end_turn', 'stop_sequence': None, 'usage': {'input_tokens': 1, 'output_tokens': 1}}
             self.send_response(200)
             if data.get('stream'):
@@ -57,6 +57,10 @@ def run(binary, label, source, model="claude-opus-5-5", profile=None, resume=Non
     env = {k: v for k, v in os.environ.items() if not k.startswith(('ANTHROPIC_', 'CLAUDE_', 'DISABLE_', 'BUN_', 'OTEL_', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'))}
     env.update({'CLAUDE_CONFIG_DIR': str(config), 'CLAUDE_SECURESTORAGE_CONFIG_DIR': str(config), 'ANTHROPIC_API_KEY': 'sk-ant-api03-not-a-real-key-CPP-probe', 'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{server.server_port}', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC': '1', 'CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF': '1', 'CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL': '1', 'CLAUDE_CODE_DISABLE_AUTO_MEMORY': '1', 'CLAUDE_CODE_ENTRYPOINT': entrypoint})
     command = [str(binary), '-p', 'Reply OK.', '--output-format', 'json', '--model', model, '--max-turns', '1', '--setting-sources', 'user', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence']
+    if extra_env:
+        env.update(extra_env)
+    if settings is not None:
+        command += ['--settings', json.dumps(settings)]
     if persist:
         command.remove('--no-session-persistence')
     if resume:

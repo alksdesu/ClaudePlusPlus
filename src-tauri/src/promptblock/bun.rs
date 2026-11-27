@@ -164,23 +164,50 @@ fn replace_once(
     Ok(result)
 }
 
+fn snapshot_reader<'a>(source: &'a str, reader: &Regex) -> Result<Option<regex::Captures<'a>>> {
+    let mut found = None;
+    for caps in reader.captures_iter(source) {
+        if caps["arg"] != caps["messages"] || caps["snapshot"] != caps["check"] {
+            continue;
+        }
+        let predicate = Regex::new(&format!(
+            r#"function {}\((?P<arg>[\w$]+)\)\{{return (?P<a>[\w$]+)\.type==="attachment"&&(?P<b>[\w$]+)\.attachment\.type==="prompt_snapshot"\}}"#,
+            regex::escape(&caps["predicate"]),
+        ))?;
+        if !predicate.captures_iter(source).any(|p| p["arg"] == p["a"] && p["arg"] == p["b"]) {
+            continue;
+        }
+        ensure!(found.is_none(), "提示词快照读取入口不唯一");
+        found = Some(caps);
+    }
+    Ok(found)
+}
+
+fn reader_pattern() -> Result<Regex> {
+    Ok(Regex::new(concat!(
+        r"(?P<prefix>function [\w$]+\((?P<arg>[\w$]+)\)\{let (?P<snapshot>[\w$]+)=",
+        r"(?P<messages>[\w$]+)\.findLast\((?P<predicate>[\w$]+)\)\?\.attachment;)",
+        r"if\((?P<check>[\w$]+)===void 0\)return;",
+    ))?)
+}
+
 pub(super) fn refresh_snapshots(data: &mut [u8]) -> Result<()> {
     let graph = graph(data)?;
     let mut changed = Vec::new();
     let getter = Regex::new(
         r#"function ([\w$]+)\(\)\{let [\w$]+=[\w$]+\(\)\?\.[tx]engu_heron_brook;[^\n]{0,500}?return null\}"#,
     )?;
-    let reader = Regex::new(
-        r#"(function [\w$]+\([\w$]+\)\{let ([\w$]+)=[\w$]+\.findLast\([\w$]+\)\?\.attachment;)if\([\w$]+===void 0\)return;"#,
-    )?;
+    let reader = reader_pattern()?;
     let mut getter_count = 0;
     let mut reader_count = 0;
     let mut snapshot_count = 0;
+    let mut reader_writes = 0;
     for module in &graph.modules {
         let source = std::str::from_utf8(&data[module.source..module.source + module.length])?;
         let count = source.matches(SNAPSHOT).count();
         let has_getter = getter.is_match(source);
-        if count == 0 && !has_getter {
+        let reader_match = snapshot_reader(source, &reader)?;
+        if count == 0 && !has_getter && reader_match.is_none() {
             continue;
         }
         ensure!(
@@ -194,22 +221,25 @@ pub(super) fn refresh_snapshots(data: &mut [u8]) -> Result<()> {
             })?;
             getter_count += 1;
         }
-        if count == 1 {
-            rewritten = replace_once(&rewritten, &reader, |caps| {
-                format!(
-                    "{}if({}===void 0||{}.cppPromptBlock!==1)return;",
-                    &caps[1], &caps[2], &caps[2]
-                )
-            })?;
+        if reader_match.is_some() {
+            let caps = snapshot_reader(&rewritten, &reader)?.context("提示词快照读取入口已变化")?;
+            let span = caps.get(0).context("提示词快照读取范围缺失")?.range();
+            let replacement = format!(
+                "{}if({}===void 0||{}.cppPromptBlock!==1)return;",
+                &caps["prefix"], &caps["snapshot"], &caps["snapshot"]
+            );
+            rewritten.replace_range(span, &replacement);
             reader_count += 1;
+            reader_writes += count;
         }
         rewritten = rewritten.replace(SNAPSHOT, STAMPED);
         snapshot_count += count;
         changed.push((module, rewritten));
     }
     ensure!(
-        getter_count == 1 && reader_count == 1 && snapshot_count == 4,
-        "提示词快照模块未适配"
+        getter_count == 1 && reader_count == 1
+            && matches!((snapshot_count, reader_writes), (4, 1) | (3, 0)),
+        "提示词快照模块未适配：消费入口 {getter_count}，读取入口 {reader_count}，写入入口 {snapshot_count}"
     );
     let mut arena = graph.arena;
     for (module, source) in changed {
@@ -233,4 +263,32 @@ pub(super) fn refresh_snapshots(data: &mut [u8]) -> Result<()> {
     data[graph.graph_record..graph.graph_record + 8].fill(0);
     put(data, graph.flags, number(data, graph.flags)? & !16)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const READER: &str = concat!(
+        r#"function isSnapshot(row){return row.type==="attachment"&&row.attachment.type==="prompt_snapshot"}"#,
+        "function read(rows){let snapshot=rows.findLast(isSnapshot)?.attachment;if(snapshot===void 0)return;return snapshot}",
+    );
+
+    #[test]
+    fn reader_is_recognized_independently_of_snapshot_writes() {
+        let pattern = reader_pattern().unwrap();
+        for source in [READER.to_string(), format!("{READER}const value={{{SNAPSHOT}systemPrompt:[]}};")] {
+            let caps = snapshot_reader(&source, &pattern).unwrap().unwrap();
+            assert_eq!(&caps["snapshot"], "snapshot");
+        }
+        assert!(snapshot_reader(&format!("{READER}{READER}"), &pattern).is_err());
+        for (old, new) in [
+            ("prompt_snapshot", "model"),
+            ("snapshot===void", "other===void"),
+            ("rows.findLast", "other.findLast"),
+            ("row.attachment", "other.attachment"),
+        ] {
+            assert!(snapshot_reader(&READER.replace(old, new), &pattern).unwrap().is_none());
+        }
+    }
 }

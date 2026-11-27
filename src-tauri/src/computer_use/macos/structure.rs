@@ -29,6 +29,12 @@ pub(super) fn selection(app: &Path) -> Result<Selection> {
     if !selected.fast_mode_status {
         rules::patch_fast_state(&fast)?;
     }
+    let (_, lookup) = renderer.fast_model_lookup()?.context("未找到 Fast 模型查找入口")?;
+    let lookup_installed = rules::fast_model_lookup_installed(&lookup)?;
+    ensure!(!lookup_installed || selected.fast_mode_status, "Fast 模型查找与主进程状态不一致");
+    if !lookup_installed {
+        rules::patch_fast_model_lookup(&lookup)?;
+    }
     let (_, language) = renderer.language()?.context("未找到语言入口")?;
     selected.chinese = rules::language_installed(&language)?;
     if !selected.chinese {
@@ -39,6 +45,15 @@ pub(super) fn selection(app: &Path) -> Result<Selection> {
         "中文词典与语言入口状态不一致"
     );
     Ok(selected)
+}
+
+pub(super) fn needs_upgrade(app: &Path) -> Result<bool> {
+    if asar::rules_upgrade_needed(&app.join(MAIN))? {
+        return Ok(true);
+    }
+    let (_, lookup) = Resources::at(app.join("Contents/Resources"))?
+        .fast_model_lookup()?.context("未找到 Fast 模型查找入口")?;
+    Ok(!rules::fast_model_lookup_installed(&lookup)?)
 }
 
 pub(super) fn patch(app: &Path, selected: Selection) -> Result<()> {

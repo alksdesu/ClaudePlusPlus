@@ -44,6 +44,15 @@ fn plain(path: &Path, directory: bool) -> Result<()> {
     Ok(())
 }
 
+fn stage_change(changes: &mut Vec<(String, Vec<u8>)>, path: String, source: &str, patch: fn(&str) -> Result<String>) -> Result<()> {
+    if let Some((_, bytes)) = changes.iter_mut().find(|(name, _)| *name == path) {
+        *bytes = patch(std::str::from_utf8(bytes).context("界面资源不是 UTF-8")?)?.into_bytes();
+    } else {
+        changes.push((path, patch(source)?.into_bytes()));
+    }
+    Ok(())
+}
+
 impl Resources {
     pub(crate) fn open(app: &Path) -> Result<Self> {
         Self::at(app.join("resources"))
@@ -176,6 +185,10 @@ impl Resources {
         )
     }
 
+    pub(crate) fn fast_model_lookup(&mut self) -> Result<Option<(String, String)>> {
+        self.find("fastModeFor:", |text| rules::fast_model_lookup_installed(text).is_ok(), "Fast 模型查找")
+    }
+
     pub(crate) fn catalogs_present(&mut self) -> Result<bool> {
         let mut found = 0;
         for (name, _, expected) in catalogs::RESOURCES {
@@ -195,11 +208,13 @@ impl Resources {
         let mut changes = Vec::new();
         if selection.fast_mode_status {
             let (path, text) = self.fast_state()?.context("未找到 Fast 状态入口")?;
-            changes.push((path, rules::patch_fast_state(&text)?.into_bytes()));
+            stage_change(&mut changes, path, &text, rules::patch_fast_state)?;
+            let (path, text) = self.fast_model_lookup()?.context("未找到 Fast 模型查找入口")?;
+            stage_change(&mut changes, path, &text, rules::patch_fast_model_lookup)?;
         }
         if selection.chinese {
             let (path, text) = self.language()?.context("未找到语言入口")?;
-            changes.push((path, rules::patch_language(&text)?.into_bytes()));
+            stage_change(&mut changes, path, &text, rules::patch_language)?;
             ensure!(!self.catalogs_present()?, "中文资源已存在，拒绝覆盖");
             if self.packed() {
                 for (name, bytes, expected) in catalogs::RESOURCES {
@@ -231,12 +246,14 @@ mod tests {
     use super::*;
 
     const FAST: &str = "let cr=l&&meta?.fastModeOffByCredits===!0,ag=l?meta?.fastModeByAgent:void 0,on=pick??(remote?st===\"on\"||st===\"cooldown\":cr?!1:ag??(fallback));";
+    const LOOKUP: &str = r#"const selector={fastModeFor:e=>{let t=g(e)?.fast_mode;return t?.type==="toggle"&&t.options?.some(e=>e.id!=="off")?t:void 0}};"#;
     const LANGUAGE: &str = "var a=[\"en-US\",\"de-DE\",\"fr-FR\",\"ko-KR\",\"ja-JP\",\"es-419\",\"es-ES\",\"it-IT\",\"hi-IN\",\"pt-BR\",\"id-ID\"];function resolve(x,t=a){return x.startsWith(\"zh-\")?x:t[0]}function fallback(x,t=a){let n=new Map;return t[0]}";
 
     fn fixture(packed: bool) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let entries: Vec<(&str, &[u8])> = vec![
             ("assets/v1/fast.js", FAST.as_bytes()),
+            ("assets/v1/models.js", LOOKUP.as_bytes()),
             ("assets/v1/locale.js", LANGUAGE.as_bytes()),
             ("assets/v1/untouched.js", b"unrelated();"),
             ("i18n/en-US.json", b"{}"),
@@ -268,6 +285,27 @@ mod tests {
         resources.apply(Selection { chinese: true, fast_mode_status: true, ..Default::default() }, dir.path()).unwrap();
         assert_eq!(fs::read(loose.join("index.html")).unwrap(), b"<html></html>");
         assert!(Resources::open(dir.path()).unwrap().catalogs_present().unwrap());
+    }
+
+    #[test]
+    fn fast_edits_compose_when_they_share_a_chunk() {
+        for packed in [false, true] {
+            let dir = fixture(packed);
+            let source = format!("{FAST}{LOOKUP}");
+            if packed {
+                asar::fixture_resources(&dir.path().join(PACKED), &[("assets/v1/fast.js", source.as_bytes())]);
+            } else {
+                fs::remove_file(dir.path().join(LOOSE).join("assets/v1/models.js")).unwrap();
+                fs::write(dir.path().join(LOOSE).join("assets/v1/fast.js"), source).unwrap();
+            }
+            Resources::open(dir.path()).unwrap().apply(Selection { fast_mode_status: true, ..Default::default() }, dir.path()).unwrap();
+            let mut resources = Resources::open(dir.path()).unwrap();
+            let (path, state) = resources.fast_state().unwrap().unwrap();
+            let (lookup_path, lookup) = resources.fast_model_lookup().unwrap().unwrap();
+            assert_eq!(path, lookup_path);
+            assert!(rules::fast_state_installed(&state).unwrap());
+            assert!(rules::fast_model_lookup_installed(&lookup).unwrap());
+        }
     }
 
     #[test]

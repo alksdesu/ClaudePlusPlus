@@ -278,6 +278,23 @@ impl Archive {
         }
         found.with_context(|| format!("未找到{label}入口"))
     }
+
+    fn prewarm_gate(&mut self, name: String, sessions: String) -> Result<(String, String)> {
+        let Some(helper) = rules::prewarm_helper(&sessions)? else {
+            return Ok((name, sessions));
+        };
+        let source = self.source(&[".vite", "build", &helper])?;
+        let text = String::from_utf8(source).context("预热共享模块不是 UTF-8")?;
+        rules::prewarm_installed(&text)?;
+        Ok((helper, text))
+    }
+
+    fn prewarm_claim(&mut self, sessions: &str) -> Result<Option<(String, String)>> {
+        let Some(name) = rules::prewarm_claim_helper(sessions)? else { return Ok(None); };
+        let source = String::from_utf8(self.source(&[".vite", "build", &name])?).context("预热接管模块不是 UTF-8")?;
+        rules::prewarm_claim_installed(&source)?;
+        Ok(Some((name, source)))
+    }
 }
 
 pub(super) fn header_hash(path: &Path) -> Result<String> {
@@ -295,18 +312,38 @@ pub(super) fn rules_selection(
     let mut archive = Archive::open(path)?;
     let (_, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
     let mask = rules::main_mask(&main, platform)?;
-    let (_, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+    let (name, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
     ensure!(
-        rules::prewarm_installed(&prewarm)? == (mask & rules::PREWARM != 0),
+        rules::fast_start_installed(&prewarm)? != Some(true) || mask & rules::FAST_STATUS != 0,
+        "Fast 启动设置与模型入口状态不一致"
+    );
+    let uses_rollout = rules::prewarm_uses_rollout(&prewarm)?;
+    let claim = archive.prewarm_claim(&prewarm)?;
+    let (_, gate) = archive.prewarm_gate(name, prewarm)?;
+    let prewarm_installed = rules::prewarm_installed(&gate)?;
+    if let Some((_, source)) = claim {
+        ensure!(rules::prewarm_claim_installed(&source)? == prewarm_installed, "预热门槛与接管参数状态不一致");
+    }
+    ensure!(
+        (uses_rollout && prewarm_installed) == (mask & rules::PREWARM != 0),
         "原生预热模块与配置开关状态不一致"
     );
     Ok(super::native::Selection {
         computer_use: mask & rules::COMPUTER_USE != 0,
         simulators: mask & rules::SIMULATORS != 0,
-        prewarm: mask & rules::PREWARM != 0,
+        prewarm: prewarm_installed,
         fast_mode_status: mask & rules::FAST_STATUS != 0,
         chinese: false,
     })
+}
+
+pub(super) fn rules_upgrade_needed(path: &Path) -> Result<bool> {
+    let mut archive = Archive::open(path)?;
+    let (_, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
+    let (_, sessions) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+    Ok(rules::fast_main_upgrade_needed(&main)?
+        || rules::fast_main_installed(&main)? == Some(true)
+            && rules::fast_start_installed(&sessions)? == Some(false))
 }
 
 pub(super) fn patch_with_rules(
@@ -319,18 +356,36 @@ pub(super) fn patch_with_rules(
         rules_selection(path, platform)?.mask() == 0,
         "必须从官方基线组合原生补丁"
     );
-    // 预热的开关字段也在主进程配置函数里，只改独立模块不会生效
-    if mask != 0 {
+    let mut archive = Archive::open(path)?;
+    let (_, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+    let main_mask = if rules::prewarm_uses_rollout(&prewarm)? { mask } else { mask & !rules::PREWARM };
+    drop(archive);
+    if main_mask != 0 {
         let mut archive = Archive::open(path)?;
         let (name, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
-        let modified = rules::patch_main(&main, platform, mask)?;
+        let modified = rules::patch_main(&main, platform, main_mask)?;
         replace_entry(path, archive, &name, modified.as_bytes())?;
     }
     if mask & rules::PREWARM != 0 {
         let mut archive = Archive::open(path)?;
         let (name, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
-        let modified = rules::patch_prewarm(&prewarm)?;
+        let (name, source) = archive.prewarm_gate(name, prewarm)?;
+        let modified = rules::patch_prewarm(&source)?;
         replace_entry(path, archive, &name, modified.as_bytes())?;
+        let mut archive = Archive::open(path)?;
+        let (_, sessions) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+        if let Some((name, source)) = archive.prewarm_claim(&sessions)? {
+            let modified = rules::patch_prewarm_claim(&source)?;
+            replace_entry(path, archive, &name, modified.as_bytes())?;
+        }
+    }
+    if mask & rules::FAST_STATUS != 0 {
+        let mut archive = Archive::open(path)?;
+        let (name, sessions) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+        if rules::fast_start_installed(&sessions)?.is_some() {
+            let modified = rules::patch_fast_start(&sessions)?;
+            replace_entry(path, archive, &name, modified.as_bytes())?;
+        }
     }
     ensure!(
         rules_selection(path, platform)?.mask() == mask,
@@ -344,9 +399,20 @@ pub(super) fn validate_rules(path: &Path) -> Result<()> {
     let mut archive = Archive::open(path)?;
     let (_, main) = archive.locate_marker(MAIN_MARKER, "原生配置")?;
     if rules::main_mask(&main, rules::Platform::Macos)? == 0 {
-        rules::patch_main(&main, rules::Platform::Macos, rules::Platform::Macos.supported())?;
-        let (_, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
-        rules::patch_prewarm(&prewarm)?;
+        let (name, prewarm) = archive.locate_marker(PREWARM_MARKER, "原生预热")?;
+        let mask = rules::Platform::Macos.supported();
+        let mask = if rules::prewarm_uses_rollout(&prewarm)? { mask } else { mask & !rules::PREWARM };
+        rules::patch_main(&main, rules::Platform::Macos, mask)?;
+        if rules::fast_start_installed(&prewarm)? == Some(false) {
+            rules::patch_fast_start(&prewarm)?;
+        }
+        if let Some((_, source)) = archive.prewarm_claim(&prewarm)? {
+            if !rules::prewarm_claim_installed(&source)? { rules::patch_prewarm_claim(&source)?; }
+        }
+        let (_, gate) = archive.prewarm_gate(name, prewarm)?;
+        if !rules::prewarm_installed(&gate)? {
+            rules::patch_prewarm(&gate)?;
+        }
     }
     Ok(())
 }
@@ -1030,6 +1096,108 @@ mod tests {
         r#"async sparePrewarmSupport(){if(!t.x0("4237076858"))return{unsupported:"gate_off"};"#,
         r#"if(t.Ret().type!=="1p")return{unsupported:"third_party"};let e;}"#,
     );
+
+    const DELEGATED_PREWARM: &str = concat!(
+        r#"var bg=require("./index.helper-renamed.js");"#,
+        r#"var claim=require("./index.claim.js");"#,
+        r#"async sparePrewarmSupport(){if(!t.ready())return{unsupported:"flags_not_loaded"};"#,
+        r#"if(t.connectors())return{unsupported:"connector_names"};"#,
+        "let e=await bg.backgroundStartSupport();return e.refused?{unsupported:e.refused}:",
+        "{unsupported:void 0,orgLauncher:e.orgLauncher}}",
+        "start(){return{options:claim._(args.sdkOptions,{userAdditionalDirectories:args.userAdditionalDirectories,bootModel:spare.bootModel})}}"
+    );
+
+    const PREWARM_CLAIM: &str = concat!(
+        r#"var allowed=["CLAUDE_CODE_OAUTH_TOKEN","CLAUDE_CODE_SESSION_ACCESS_TOKEN","CLAUDE_CODE_HOST_SESSION_ID"];"#,
+        "function claim(e){let i={};for(let t of allowed){let n=e.env?.[t];",
+        r#"typeof n=="string"&&(i[t]=n)}return{cwd:e.cwd,env:i}}"#
+    );
+
+    const PREWARM_HELPER: &str = concat!(
+        r#"async function n(){if(e.deployment().type!=="1p")return{refused:"third_party"};"#,
+        r#"let n;try{n=await t.read()}catch{return{refused:"org_launcher"}}"#,
+        r#"return t.blocked(n)?{refused:"org_launcher"}:{refused:void 0,orgLauncher:n}}"#,
+        "exports.backgroundStartSupport=n;"
+    );
+
+    #[test]
+    fn delegated_prewarm_classifies_official_packages_and_changes_only_the_helper() {
+        let main = format!(r#"{RULES_MAIN}Ky("1346958739",a);Zy("3577536076",!1);Zy("1403324732",!1);"#);
+        let other = r#"require("./index.helper-renamed.js").backgroundStartSupport()"#;
+        for platform in [rules::Platform::Macos, rules::Platform::Windows] {
+            for bits in 0..8 {
+                let selected = super::super::native::Selection {
+                    computer_use: bits & 1 != 0, simulators: bits & 2 != 0, prewarm: bits & 4 != 0,
+                    ..Default::default()
+                };
+                let (_dir, path) = fixture(&[
+                    ("index.main.js", &main), ("index.sessions.js", DELEGATED_PREWARM),
+                    ("index.helper-renamed.js", PREWARM_HELPER), ("index.hidden-prewarm.js", other),
+                    ("index.claim.js", PREWARM_CLAIM),
+                ]);
+                assert!(rules_selection(&path, platform).unwrap().is_empty());
+                patch_with_rules(&path, platform, selected).unwrap();
+                assert_eq!(rules_selection(&path, platform).unwrap(), selected);
+                let mut archive = Archive::open(&path).unwrap();
+                for (name, expected) in [("index.sessions.js", DELEGATED_PREWARM), ("index.hidden-prewarm.js", other)] {
+                    assert_eq!(archive.source(&[".vite", "build", name]).unwrap(), expected.as_bytes());
+                }
+                let helper = String::from_utf8(archive.source(&[".vite", "build", "index.helper-renamed.js"]).unwrap()).unwrap();
+                assert_eq!(rules::prewarm_installed(&helper).unwrap(), selected.prewarm);
+                assert!(helper.contains("org_launcher"));
+                let claim = String::from_utf8(archive.source(&[".vite", "build", "index.claim.js"]).unwrap()).unwrap();
+                assert_eq!(rules::prewarm_claim_installed(&claim).unwrap(), selected.prewarm);
+            }
+        }
+    }
+
+    #[test]
+    fn missing_or_changed_prewarm_delegates_are_rejected_before_writing() {
+        for helper in [None, Some("exports.backgroundStartSupport=unknown;")] {
+            let mut entries = vec![("index.main.js", RULES_MAIN), ("index.sessions.js", DELEGATED_PREWARM)];
+            if let Some(source) = helper { entries.push(("index.helper-renamed.js", source)); }
+            let (_dir, path) = fixture(&entries);
+            let before = fs::read(&path).unwrap();
+            assert!(rules_selection(&path, rules::Platform::Windows).is_err());
+            assert!(patch_with_rules(&path, rules::Platform::Windows, super::super::native::Selection {
+                prewarm: true, ..Default::default()
+            }).is_err());
+            assert_eq!(fs::read(&path).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn prewarm_without_rollout_does_not_inject_a_retired_flag() {
+        let prewarm = concat!(
+            r#"async sparePrewarmSupport(){if(!t.ready())return{unsupported:"flags_not_loaded"};"#,
+            r#"if(t.connectors())return{unsupported:"connector_names"};"#,
+            r#"if(t.deployment().type!=="1p")return{unsupported:"third_party"};return{unsupported:void 0}}"#,
+        );
+        let main = format!(r#"{RULES_MAIN}Ky("1346958739",a);Zy("3577536076",!1);Zy("1403324732",!1);"#);
+        for platform in [rules::Platform::Macos, rules::Platform::Windows] {
+            for bits in 0..8 {
+                let selected = super::super::native::Selection {
+                    computer_use: bits & 1 != 0,
+                    simulators: bits & 2 != 0,
+                    prewarm: bits & 4 != 0,
+                    ..Default::default()
+                };
+                let (_dir, path) = fixture(&[("index.main.js", &main), ("index.prewarm.js", prewarm)]);
+                patch_with_rules(&path, platform, selected).unwrap();
+                assert_eq!(rules_selection(&path, platform).unwrap(), selected);
+                let mut archive = Archive::open(&path).unwrap();
+                let (_, patched) = archive.locate_marker(MAIN_MARKER, "原生配置").unwrap();
+                assert!(!patched.contains("4237076858"));
+                if bits & 3 == 0 {
+                    assert_eq!(patched, main);
+                }
+                let (_, patched) = archive.locate_marker(PREWARM_MARKER, "原生预热").unwrap();
+                assert!(patched.contains("flags_not_loaded"));
+                assert!(patched.contains("connector_names"));
+                assert_eq!(patched.contains("third_party"), !selected.prewarm);
+            }
+        }
+    }
 
     #[test]
     fn rules_patch_only_the_unique_entries_and_update_integrity() {

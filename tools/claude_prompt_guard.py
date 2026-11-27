@@ -23,8 +23,8 @@ MARKER = b'/*claudepp:heron-guard:2*/'
 SNAPSHOT = b'type:"prompt_snapshot",'
 STAMPED_SNAPSHOT = b'type:"prompt_snapshot",cppHeronGuard:1,'
 SNAPSHOT_READER = re.compile(
-    rb'(function [\w$]+\((\w+)\)\{let (\w+)=\2\.findLast\([\w$]+\)\?\.attachment;)'
-    rb'if\(\3===void 0\)return;'
+    rb'(function [\w$]+\(([\w$]+)\)\{let ([\w$]+)=\2\.findLast\(([\w$]+)\)\?\.attachment;)'
+    rb'if\(\3===void 0(?:\|\|\3\.cppHeronGuard!==1)?\)return;'
 )
 TRAILER = b'\n---- Bun! ----\n'
 GETTER = re.compile(
@@ -51,6 +51,17 @@ def digest(path):
         for block in iter(lambda: f.read(1024 * 1024), b''):
             h.update(block)
     return h.hexdigest()
+
+
+def snapshot_reader(source):
+    found = []
+    for match in SNAPSHOT_READER.finditer(source):
+        predicate = (rb'function ' + re.escape(match[4])
+                     + rb'\(([\w$]+)\)\{return \1\.type==="attachment"&&\1\.attachment\.type==="prompt_snapshot"\}')
+        if re.search(predicate, source):
+            found.append(match)
+    require(len(found) <= 1, '提示词快照读取入口不唯一')
+    return found[0] if found else None
 
 
 def segment(data):
@@ -101,6 +112,8 @@ def inspect_bytes(data):
     table_at = bounded(table, size + count * 4)
     matches = []
     writers = []
+    readers = []
+    modules = []
     regions = []
     for i in range(count):
         record = table_at + i * 52
@@ -111,20 +124,28 @@ def inspect_bytes(data):
                 regions.append((fields[j], fields[j] + fields[j + 1]))
         start, source_length = fields[2:4]
         source = data[base + start:base + start + source_length]
-        if GETTER.search(source) or MARKER in source or source.count(SNAPSHOT) == 3:
+        reader = snapshot_reader(source) if fields[12:15] == (1, 1, 1) else None
+        if GETTER.search(source) or MARKER in source or source.count(SNAPSHOT) == 3 or reader:
             require(fields[12:15] == (1, 1, 1), '提示词模块编码或类型未适配')
             name = data[base + fields[0]:base + fields[0] + fields[1]].decode()
             item = dict(index=i, record=record, start=base + start,
                         size=source_length, source=source, name=name,
                         hash_at=table_at + size + i * 4)
+            modules.append(item)
             if source.count(SNAPSHOT) == 3:
                 writers.append(item)
-            else:
+            if GETTER.search(source) or MARKER in source:
                 matches.append(item)
+            if reader:
+                readers.append(item)
     require(len(matches) == 1, '需要唯一的 heron 字段消费模块')
     module = matches[0]
     require(len(writers) == 1, '提示词快照写入模块未适配')
     writer = writers[0]
+    require(len(readers) == 1, '提示词快照读取模块未适配')
+    reader = readers[0]
+    snapshot_count = sum(item['source'].count(SNAPSHOT) for item in modules)
+    require((snapshot_count, reader['source'].count(SNAPSHOT)) in ((4, 1), (3, 0)), '提示词快照写入数量已变化')
     at = table + size + count * 4
     builtins = struct.unpack_from('<I', data, bounded(at, 4))[0]
     at += 4
@@ -136,25 +157,25 @@ def inspect_bytes(data):
     require(graph_count <= count, 'Bun 预链接模块数量异常')
     bounded(at + 12, graph_count * 4)
     module.update(graph_record=graph_record, graph=graph, graph_length=graph_length,
-                  base=base, flags_at=end - 4, flags=flags, writer=writer)
+                  base=base, flags_at=end - 4, flags=flags, writer=writer, reader=reader, modules=modules)
     version = re.search(rb'// Version: (\d+\.\d+\.\d+)', module['source'])
     require(version is not None, '未找到 CLI 版本')
     module['version'] = version[1].decode()
     module['state'] = 'guarded' if MARKER in module['source'] else 'original'
     if module['state'] == 'original':
-        require(flags & 16 and graph_length > len(writer['source']) + 256, '缺少可复用的预链接区')
+        require(flags & 16 and graph_length > len(writer['source']) + len(reader['source']) + 256, '缺少可复用的预链接区')
         require(all(hi <= graph or lo >= graph + graph_length for lo, hi in regions), '预链接区与模块数据重叠')
     if module['state'] == 'guarded':
         require(module['source'].count(MARKER) == 1 and not GETTER.search(module['source']), '补丁源码状态异常')
         registration = SECTION.findall(module['source'])
-        require(len(registration) == 1 and b'{...' + registration[0] + b',cacheBreak:!0}' in module['source'], 'heron 缓存仍可复用')
-        require(data[module['record'] + 24:module['record'] + 40] == bytes(16), '旧字节码仍启用')
-        require(data[module['hash_at']:module['hash_at'] + 4] == bytes(4), '旧源码哈希仍启用')
+        if registration:
+            require(len(registration) == 1 and b'{...' + registration[0] + b',cacheBreak:!0}' in module['source'], 'heron 缓存仍可复用')
         require(data[graph_record:graph_record + 8] == bytes(8), '旧预链接表仍启用')
-        require(b'.cppHeronGuard!==1' in module['source'], '旧快照仍可读取')
-        require(module['source'].count(STAMPED_SNAPSHOT) == 1 and writer['source'].count(STAMPED_SNAPSHOT) == 3, '新快照没有完整标记')
-        require(data[writer['record'] + 24:writer['record'] + 40] == bytes(16), '快照写入模块仍使用旧字节码')
-        require(data[writer['hash_at']:writer['hash_at'] + 4] == bytes(4), '快照写入模块哈希未清除')
+        require(b'.cppHeronGuard!==1' in reader['source'], '旧快照仍可读取')
+        require(sum(item['source'].count(STAMPED_SNAPSHOT) for item in modules) == snapshot_count, '新快照没有完整标记')
+        for item in modules:
+            require(data[item['record'] + 24:item['record'] + 40] == bytes(16), '旧字节码仍启用')
+            require(data[item['hash_at']:item['hash_at'] + 4] == bytes(4), '旧源码哈希仍启用')
         require(not flags & 16, '源码布局标记未更新')
     return module
 
@@ -164,26 +185,35 @@ def patch_file(path):
         info = inspect_bytes(data)
         require(info['state'] == 'original', '已经应用补丁')
         source = info['source']
-        require(len(GETTER.findall(source)) == len(SECTION.findall(source)) == 1, '提示词结构不唯一')
-        require(len(SNAPSHOT_READER.findall(source)) == 1 and source.count(SNAPSHOT) == 1, '快照恢复结构不唯一')
-        require(re.search(rb'if\(!\w+\.cacheBreak&&', source), '未确认提示词缓存读取条件')
-        source = GETTER.sub(lambda m: b'function ' + m[1] + b'(){return null;' + MARKER + b'}', source)
-        source = SECTION.sub(lambda m: b'{...' + m[0] + b',cacheBreak:!0}', source)
-        source = SNAPSHOT_READER.sub(lambda m: m[1] + b'if(' + m[3] + b'===void 0||' + m[3] + b'.cppHeronGuard!==1)return;', source)
-        source = source.replace(SNAPSHOT, STAMPED_SNAPSHOT)
-        require(len(source) <= info['size'], '补丁超出原有模块容量')
-        data[info['start']:info['start'] + info['size']] = source.ljust(info['size'])
-        # Bun 的字节码与预链接记录会绕过修改后的源码。
-        data[info['record'] + 24:info['record'] + 40] = bytes(16)
-        data[info['hash_at']:info['hash_at'] + 4] = bytes(4)
-        data[info['graph_record']:info['graph_record'] + 8] = bytes(8)
-        writer = info['writer']
-        rewritten = writer['source'].replace(SNAPSHOT, STAMPED_SNAPSHOT)
+        require(len(GETTER.findall(source)) == 1, '提示词结构不唯一')
+        legacy_cache = SECTION.findall(source)
+        if legacy_cache:
+            require(len(legacy_cache) == 1 and re.search(rb'if\(!\w+\.cacheBreak&&', source), '未确认提示词缓存读取条件')
+        else:
+            require(source.count(b'"heron_brook",()=>{let ') == 1 and b'cacheBreak' not in source, 'heron 注册结构未适配')
         arena = info['base'] + info['graph']
-        data[arena:arena + len(rewritten) + 1] = rewritten + b'\0'
-        struct.pack_into('<II', data, writer['record'] + 8, info['graph'], len(rewritten))
-        data[writer['record'] + 24:writer['record'] + 40] = bytes(16)
-        data[writer['hash_at']:writer['hash_at'] + 4] = bytes(4)
+        for item in info['modules']:
+            source = item['source']
+            if item['record'] == info['record']:
+                source = GETTER.sub(lambda m: b'function ' + m[1] + b'(){return null;' + MARKER + b'}', source)
+                if legacy_cache:
+                    source = SECTION.sub(lambda m: b'{...' + m[0] + b',cacheBreak:!0}', source)
+            match = snapshot_reader(source)
+            if match:
+                replacement = match[1] + b'if(' + match[3] + b'===void 0||' + match[3] + b'.cppHeronGuard!==1)return;'
+                source = source[:match.start()] + replacement + source[match.end():]
+            source = source.replace(SNAPSHOT, STAMPED_SNAPSHOT)
+            if len(source) <= item['size']:
+                data[item['start']:item['start'] + item['size']] = source.ljust(item['size'])
+            else:
+                require(arena + len(source) + 1 <= info['base'] + info['graph'] + info['graph_length'], '预链接空闲区不足')
+                data[arena:arena + len(source) + 1] = source + b'\0'
+                struct.pack_into('<II', data, item['record'] + 8, arena - info['base'], len(source))
+                arena += len(source) + 1
+            # Bun 的字节码与预链接记录会绕过修改后的源码。
+            data[item['record'] + 24:item['record'] + 40] = bytes(16)
+            data[item['hash_at']:item['hash_at'] + 4] = bytes(4)
+        data[info['graph_record']:info['graph_record'] + 8] = bytes(8)
         struct.pack_into('<I', data, info['flags_at'], info['flags'] & ~16)
         data.flush()
         require(inspect_bytes(data)['state'] == 'guarded', '补丁回读失败')

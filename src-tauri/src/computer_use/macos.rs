@@ -173,7 +173,14 @@ pub(super) fn inspect(app: &Path) -> Result<(String, asar::PatchState)> {
             verify_archive_integrity(app, &info, structure::PACKED)?;
         }
         let selected = structure::selection(app)?;
-        return Ok((version.into(), if selected.is_empty() { asar::PatchState::Pristine } else { asar::PatchState::Patched }));
+        let state = if selected.is_empty() {
+            asar::PatchState::Pristine
+        } else if selected.fast_mode_status && structure::needs_upgrade(app)? {
+            asar::PatchState::Legacy
+        } else {
+            asar::PatchState::Patched
+        };
+        return Ok((version.into(), state));
     }
     let archive = app.join("Contents/Resources/app.asar");
     ensure!(
@@ -643,7 +650,7 @@ impl Installation {
                     verify_signature(&self.app, None)?;
                     if patch_state == asar::PatchState::Legacy {
                         status.state = "upgradeAvailable".into();
-                        status.message = "装的是旧版补丁，升级会先还原官方再装新版（含后台模式）".into();
+                        status.message = "原生补丁有更新，将验证官方备份后重新应用所选功能".into();
                         status.can_install = !status.running && !status.identities.is_empty();
                     } else {
                         status.state = "installed".into();
